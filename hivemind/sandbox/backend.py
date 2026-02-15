@@ -1,6 +1,5 @@
 import logging
 import secrets
-import tempfile
 from typing import Callable
 
 from openai import AsyncOpenAI
@@ -15,19 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class SandboxBackend:
-    """Backend that runs user-uploaded agent Docker images in isolated containers.
-
-    Implements the same run() interface as OpenRouterBackend:
-        async def run(prompt, system, tools, on_tool_call) -> str
+    """Runs agent Docker images in isolated containers.
 
     Each invocation:
       1. Starts a BridgeServer (LLM proxy + tool endpoints) on an ephemeral port
       2. Runs the agent as a Docker container on an internal network
       3. Captures stdout as the agent's output
       4. Tears everything down
-
-    The agent can only communicate via the bridge — the Docker network is
-    internal (no internet access) and the container has no host filesystem access.
     """
 
     def __init__(
@@ -48,12 +41,10 @@ class SandboxBackend:
         model: str | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> dict:
-        """Passthrough proxy: forward agent's LLM calls to OpenRouter.
-
-        The agent controls model, messages, and parameters.
-        We just forward and return the result.
-        """
+        """Passthrough proxy: forward agent's LLM calls to the provider."""
         kwargs: dict = {
             "model": model or self.llm_model,
             "messages": messages,
@@ -63,6 +54,10 @@ class SandboxBackend:
             kwargs["temperature"] = temperature
         if top_p is not None:
             kwargs["top_p"] = top_p
+        if tools is not None:
+            kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
 
         resp = await self.llm_client.chat.completions.create(**kwargs)
 
@@ -70,7 +65,21 @@ class SandboxBackend:
         result: dict = {
             "content": choice.message.content or "",
             "usage": {},
+            "finish_reason": choice.finish_reason,
         }
+
+        if choice.message.tool_calls:
+            result["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in choice.message.tool_calls
+            ]
 
         if hasattr(resp, "usage") and resp.usage:
             result["usage"] = {
@@ -82,25 +91,38 @@ class SandboxBackend:
 
     async def run(
         self,
-        prompt: str,
-        system: str,
+        role: str,
+        env: dict[str, str],
         tools: list[Tool],
         on_tool_call: Callable,
-        extra_env: dict[str, str] | None = None,
-    ) -> str:
+        agent_store=None,
+        run_query_fn: Callable | None = None,
+        scope_query_agent_id: str | None = None,
+        max_calls: int | None = None,
+        max_tokens: int | None = None,
+        return_budget_summary: bool = False,
+    ) -> str | tuple[str, dict]:
+        """Run the agent container and return its stdout output."""
         agent = self.agent
 
         # Resolve budget: min of agent config and global caps
-        max_calls = min(agent.max_llm_calls, self.settings.global_max_llm_calls)
-        max_tokens = min(agent.max_tokens, self.settings.global_max_tokens)
+        resolved_max_calls = min(
+            max_calls or agent.max_llm_calls,
+            self.settings.global_max_llm_calls,
+        )
+        resolved_max_tokens = min(
+            max_tokens or agent.max_tokens,
+            self.settings.global_max_tokens,
+        )
         timeout = min(agent.timeout_seconds, self.settings.global_timeout_seconds)
+        memory_mb = min(agent.memory_mb, self.settings.container_memory_mb)
 
-        # Override agent timeout with resolved value
-        agent = agent.model_copy(update={"timeout_seconds": timeout})
+        agent = agent.model_copy(
+            update={"timeout_seconds": timeout, "memory_mb": memory_mb}
+        )
 
-        budget = Budget(max_calls=max_calls, max_tokens=max_tokens)
+        budget = Budget(max_calls=resolved_max_calls, max_tokens=resolved_max_tokens)
         session_token = secrets.token_urlsafe(32)
-        work_dir = tempfile.mkdtemp(prefix="hm-")
 
         bridge = BridgeServer(
             session_token=session_token,
@@ -109,19 +131,34 @@ class SandboxBackend:
             llm_caller=self._llm_caller,
             budget=budget,
             host=self.settings.bridge_host,
+            role=role,
+            agent_store=agent_store,
+            run_query_fn=run_query_fn,
+            scope_query_agent_id=scope_query_agent_id,
         )
 
         try:
             port = await bridge.start()
             bridge_url = f"http://{self.settings.bridge_host}:{port}"
 
+            # Add bridge connection info to env
+            full_env = {
+                "BRIDGE_URL": bridge_url,
+                "SESSION_TOKEN": session_token,
+                "AGENT_ROLE": role,
+                "BUDGET_MAX_TOKENS": str(resolved_max_tokens),
+                "BUDGET_MAX_CALLS": str(resolved_max_calls),
+                # OpenAI SDK auto-routing: standard SDKs use these env vars
+                "OPENAI_BASE_URL": f"{bridge_url}/v1",
+                "OPENAI_API_KEY": session_token,
+                **env,
+            }
+
             result = await self.runner.run_agent(
                 agent=agent,
-                prompt=prompt,
                 bridge_url=bridge_url,
                 session_token=session_token,
-                work_dir=work_dir,
-                extra_env=extra_env,
+                env=full_env,
             )
 
             logger.info(
@@ -131,6 +168,17 @@ class SandboxBackend:
                 result.timed_out,
                 budget.summary(),
             )
+
+            if result.exit_code != 0:
+                if result.timed_out:
+                    raise ValueError(
+                        f"Agent '{agent.agent_id}' timed out after {agent.timeout_seconds}s"
+                    )
+                details = (result.stderr or result.stdout or "").strip()
+                details = details[:400] if details else "no details"
+                raise ValueError(
+                    f"Agent '{agent.agent_id}' failed (exit_code={result.exit_code}): {details}"
+                )
 
             if result.stderr:
                 logger.warning("Agent stderr: %s", result.stderr[:500])
@@ -142,6 +190,8 @@ class SandboxBackend:
                 else:
                     output = "(Agent produced no output)"
 
+            if return_budget_summary:
+                return output, budget.summary()
             return output
 
         finally:

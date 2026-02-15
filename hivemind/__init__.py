@@ -1,13 +1,11 @@
 from .core import Hivemind
 from .models import (
-    IndexEntry,
     QueryRequest,
     QueryResponse,
-    Scope,
-    SoftConstraints,
     StoreRequest,
     StoreResponse,
 )
+from .version import APP_VERSION as __version__
 
 __all__ = [
     "Hivemind",
@@ -15,7 +13,5 @@ __all__ = [
     "StoreResponse",
     "QueryRequest",
     "QueryResponse",
-    "Scope",
-    "SoftConstraints",
-    "IndexEntry",
+    "__version__",
 ]

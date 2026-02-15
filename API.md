@@ -1,497 +1,450 @@
 # Hivemind-Core API Reference
 
-Base URL: `http://localhost:8100` (configurable via `HIVEMIND_HOST` and `HIVEMIND_PORT`)
+This document covers:
+- Public HTTP API (`/v1/*`) used by clients
+- Internal bridge API used by Docker agents at runtime
+
+Base URL (default): `http://localhost:8100`
 
 ## Authentication
 
-If `HIVEMIND_API_KEY` is set, all endpoints except `GET /v1/health` require:
+If `HIVEMIND_API_KEY` is set, every public endpoint except `GET /v1/health` requires:
 
-```
+```http
 Authorization: Bearer <your-api-key>
 ```
 
-## Endpoints
+Startup safety rule: if `HIVEMIND_HOST` is non-local (not `127.0.0.1`, `localhost`, or `::1`), `HIVEMIND_API_KEY` must be set.
+
+## Conventions And Gotchas
+
+- IDs (`record_id`, `agent_id`) are opaque strings (currently 12-char hex).
+- Most endpoints use JSON. `POST /v1/agents/upload` uses `multipart/form-data`.
+- `POST /v1/query` canonical field is `query`. `prompt` is still accepted as a deprecated alias.
+- OpenAPI schema still marks `query` as required (for generated clients, send `query`).
+- `created_at` differs by endpoint:
+  - `POST /v1/store` returns ISO datetime string
+  - `GET /v1/admin/records/{id}` returns Unix timestamp (float seconds)
+- Validation errors return `422` (Pydantic/FastAPI). Runtime errors return `400`/`404`/`503`/`500` with `{"detail": ...}`.
+
+## Public API
 
 ### `GET /v1/health`
 
-Health check. No auth required.
+Health check (never requires auth).
 
-**Response:**
+**Response 200**
+
 ```json
 {
   "status": "ok",
   "record_count": 42,
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
 ```
-
----
 
 ### `POST /v1/store`
 
-Store a document in the enclave. The text is encrypted at rest (if `HIVEMIND_ENCRYPTION_KEY` is set) and indexed by an LLM that extracts title, summary, tags, and key claims.
+Store a record. `data` is encrypted at rest when `HIVEMIND_ENCRYPTION_KEY` is configured.
 
-**Request body:**
+**Request body**
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `text` | string | yes | Document text (min 1 char) |
-| `space_id` | string | no | Namespace/team identifier (default: `"public"`) |
-| `user_id` | string | no | Owner user ID (used for scope filtering) |
-| `metadata` | object | no | Arbitrary key-value metadata |
-| `index` | IndexEntry | no | Pre-computed index (skips LLM indexing if provided) |
-| `index_agent_id` | string | no | Custom indexing agent ID (sandbox). Agent gets scoped access to user's data. Requires `HIVEMIND_SANDBOX_ENABLED=true` |
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `data` | string | yes | Min length 1 |
+| `metadata` | object | no | Schemaless JSON, defaults to `{}` |
+| `index_text` | string or null | no | If provided, used directly for FTS |
+| `index_agent_id` | string | no | Runs index agent to produce `index_text` and optional metadata |
 
-**IndexEntry schema:**
+Indexing priority:
+1. `index_text` provided -> use it
+2. else `index_agent_id` (or configured default index agent) -> run agent
+3. else -> record is stored without FTS index text
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `title` | string | Short descriptive title |
-| `summary` | string | 1-3 sentence summary |
-| `tags` | list[string] | Keywords for search |
-| `key_claims` | list[string] | Factual assertions from the text |
-| `extra` | object | Optional extra metadata (default: `{}`) |
+**Example**
 
-**Example — LLM auto-indexing:**
 ```bash
 curl -X POST http://localhost:8100/v1/store \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "text": "In the Q3 sprint retro, the team decided to migrate from PayPal to Stripe. Key reasons: lower transaction fees (2.9% vs 3.5%), better API docs, and native subscription billing support.",
-    "space_id": "team-alpha",
-    "user_id": "alice",
-    "metadata": {"source": "retro-notes"}
+    "data": "Q3 retro: decided to migrate payments from PayPal to Stripe.",
+    "metadata": {"author": "alice", "team": "payments"},
+    "index_text": "Q3 retro payment migration PayPal Stripe"
   }'
 ```
 
-**Example — pre-computed index (skips LLM call):**
-```bash
-curl -X POST http://localhost:8100/v1/store \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Meeting notes from the design review...",
-    "space_id": "team-alpha",
-    "user_id": "bob",
-    "index": {
-      "title": "Design Review - Notification System",
-      "summary": "Team chose SSE over WebSockets for real-time notifications.",
-      "tags": ["notifications", "sse", "architecture"],
-      "key_claims": ["SSE chosen over WebSockets", "Simpler to implement"]
-    }
-  }'
-```
+**Response 200**
 
-**Example — custom indexing agent:**
-```bash
-curl -X POST http://localhost:8100/v1/store \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Sprint 47 retro: Decided to migrate auth service to OAuth2...",
-    "user_id": "alice",
-    "index_agent_id": "idx789"
-  }'
-```
-
-When `index_agent_id` is set, the document is indexed by a sandboxed Docker agent instead of the built-in LLM. The indexing agent receives `DOCUMENT_TEXT` env var with the text and has scoped access to all of the user's existing records via bridge tools (`search_index`, `read_record`, `list_index`). This enables cross-document indexing — the agent can search previous records to extract consistent tags, link related decisions, etc.
-
-**Indexing priority:** `index_agent_id` > `index` (pre-computed) > default LLM indexer. If `index_agent_id` is set, `index` is ignored.
-
-**Response (200):**
 ```json
 {
   "record_id": "482feb9fd696",
-  "timestamp": "2026-02-08T22:01:49.774955",
-  "index": {
-    "title": "Design Review - Notification System",
-    "summary": "Team chose SSE over WebSockets for real-time notifications.",
-    "tags": ["notifications", "sse", "architecture"],
-    "key_claims": ["SSE chosen over WebSockets", "Simpler to implement"],
-    "extra": {}
-  }
+  "created_at": "2026-02-12T22:01:49.774955",
+  "metadata": {"author": "alice", "team": "payments"}
 }
 ```
 
----
+**Common errors**
+- `400` index agent not found / invalid index agent output
+- `401` unauthorized (when API key enabled)
+- `422` invalid request body
 
 ### `POST /v1/query`
 
-Query the knowledge base. An agent searches the index, reads relevant records, and produces an answer. The answer passes through a mediator audit before being returned.
+Run query pipeline: optional scope agent -> query agent -> optional mediator.
 
-The query pipeline has three customizable agents:
-- **Scope agent** (Stage 0): decides what records the query agent can see
-- **Query agent** (Stages 1-2): searches and reads records, produces an answer
-- **Mediator** (Stage 3): audits the answer against soft constraints
+**Request body**
 
-Each has a default implementation and can be replaced by uploading a custom agent.
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `query` | string | yes | Canonical field, min length 1 |
+| `prompt` | string | no | Deprecated alias; used only if `query` missing/blank |
+| `scope` | array[string] or null | no | Record whitelist. `null` = all records |
+| `query_agent_id` | string | no | Required unless default query agent configured |
+| `scope_agent_id` | string | no | Explicit scope agent for dynamic scope resolution |
+| `mediator_agent_id` | string | no | Optional output auditing/filtering |
+| `max_tokens` | integer | no | Per-request cap (min 1), clamped to server global max |
 
-**Request body:**
+Scope resolution order:
+1. `scope_agent_id` if provided
+2. else explicit `scope` from request
+3. else configured default scope agent
+4. else unscoped (`null`)
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `question` | string | yes | The question to answer (min 1 char) |
-| `context` | string | no | "Uploaded brain" — system-level persona/focus for the agent |
-| `scope` | Scope | no | Access control whitelist (see below). Default: no restrictions |
-| `soft` | SoftConstraints | no | Prompt-level guidance for agent and mediator |
-| `querier_id` | string | no | ID of the querying user (passed to scoping agent as `QUERIER_ID`) |
-| `query_agent_id` | string | no | If set, run query through a sandboxed Docker agent (requires `HIVEMIND_SANDBOX_ENABLED=true`). Custom query agents control their own LLM interactions — no system prompt injection, no HyDE |
-| `scope_agent_id` | string | no | If set, run a scoping agent to dynamically resolve scope. The scoping agent gets full DB access and the query agent's description/image info. Requires `HIVEMIND_SANDBOX_ENABLED=true` |
+Scope rules:
+- Enforced in SQL layer (query agent tools cannot escape scope)
+- IDs are trimmed + deduplicated
+- Max scope size is 900 record IDs
+- Empty scope list means no records visible
 
-**Scope resolution priority:**
-1. `scope_agent_id` set → sandboxed scoping agent decides
-2. Otherwise → use `scope` from request (default: `Scope()` = see everything)
+Mediator behavior:
+- If mediator budget is too low (`<128` tokens remaining), mediator is skipped
+- If mediator fails for a non-not-found reason, raw query output is returned (`mediated=false`)
 
-**Scope schema:**
+**Example**
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `user_ids` | list[string] or null | Only records owned by these users. null = unrestricted |
-| `record_ids` | list[string] or null | Only these specific records. null = unrestricted |
-
-When both are set, both must match (AND logic). When either is null/omitted, that dimension is unrestricted. Empty list `[]` = sees nothing.
-
-Scope is enforced at the SQL layer. The agent's tools physically cannot access out-of-scope records. This cannot be bypassed by prompt injection — the scope is baked into the SQL WHERE clauses before the agent runs.
-
-The agent does not know it is scoped. If it searches for something outside scope, it simply gets no results or "Record not found" — same as if the record didn't exist. This prevents the agent from leaking information about access boundaries.
-
-**SoftConstraints schema:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `detail_level` | string | Controls agent behavior and mediator audit (default: `"synthesis"`) |
-| `custom_instructions` | string | Additional instructions for the agent and mediator |
-
-`detail_level` accepts any string. Built-in values with special behavior:
-
-| Value | Agent behavior | Mediator behavior |
-|-------|---------------|-------------------|
-| `"synthesis"` | Paraphrase, combine insights from multiple records | Audits for verbatim quotes and single-source claims |
-| `"aggregate_only"` | Only aggregate insights, no individual data points | Audits for individual references |
-| `"full"` | Include specific details, numbers, direct references | No audit (passes through) |
-| Any other string | String is injected as a system prompt instruction | String becomes a mediator audit constraint |
-
-Free-form `detail_level` examples:
-```json
-{"detail_level": "Only discuss security-related topics"}
-{"detail_level": "Respond in formal academic tone"}
-{"detail_level": "Focus on cost implications only"}
-```
-
-**Example — basic query:**
-```bash
-curl -X POST http://localhost:8100/v1/query \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What were the key technical decisions made recently?"}'
-```
-
-**Example — scoped query (access control):**
 ```bash
 curl -X POST http://localhost:8100/v1/query \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "question": "What did this person work on?",
-    "scope": {"user_ids": ["alice"]}
+    "query": "What technical decisions were made recently?",
+    "query_agent_id": "qa-1",
+    "scope": ["rec_001", "rec_002"],
+    "max_tokens": 50000
   }'
 ```
 
-**Example — with soft constraints:**
-```bash
-curl -X POST http://localhost:8100/v1/query \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "Summarize recent work",
-    "soft": {
-      "detail_level": "Only discuss security-related topics",
-      "custom_instructions": "Respond in bullet points. Keep it under 3 sentences."
-    }
-  }'
-```
+**Response 200**
 
-**Example — with uploaded brain (context):**
-```bash
-curl -X POST http://localhost:8100/v1/query \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What should we prioritize next quarter?",
-    "context": "You are a security-focused CTO. Always prioritize risk reduction and vulnerability remediation above all else."
-  }'
-```
-
-**Example — with scoping agent (dynamic access control):**
-```bash
-curl -X POST http://localhost:8100/v1/query \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What technical decisions were made recently?",
-    "querier_id": "alice",
-    "scope_agent_id": "scope789"
-  }'
-```
-
-When `scope_agent_id` is set, a scoping agent runs BEFORE the query agent (Stage 0). The scoping agent:
-- Gets full DB access (no scope restrictions on its tools)
-- Receives `QUERIER_ID` env var identifying who is asking
-- Receives `PROMPT` env var with the question
-- Receives `QUERY_AGENT_ID` env var (the query agent ID, or `"default"`)
-- Receives `QUERY_AGENT_IMAGE` env var (the query agent's Docker image reference)
-- Receives `QUERY_AGENT_DESCRIPTION` env var (the query agent's description, or a default description)
-- Outputs `{"record_ids": ["abc123", ...]}` — this whitelist becomes the query agent's entire visible universe
-- Uses the same sandbox infrastructure (Docker container, bridge, budget, timeout) as query agents
-
-The scoping agent decides WHAT the query agent can see. It can also inspect HOW the data will be used (via the query agent's description and image) to make trust-informed scoping decisions. The query agent then decides what to do with what it sees.
-
-See `examples/scoping_agent.py` for a proximity-based scoping agent with query agent awareness.
-
-**Response (200):**
 ```json
 {
-  "answer": "Recent technical decisions include migrating payment processing to Stripe for lower fees and better API support, and adopting Server-Sent Events for the notification system.",
-  "sources_used": 2,
-  "source_ids": ["482feb9fd696", "a1b2c3d4e5f6"],
-  "audited": true
+  "output": "Two decisions were made: migrate payments to Stripe and move internal APIs to gRPC.",
+  "records_accessed": ["482feb9fd696", "a1b2c3d4e5f6"],
+  "mediated": false,
+  "usage": {"total_tokens": 12345, "max_tokens": 50000}
 }
 ```
 
----
+**Common errors**
+- `400` no query agent configured, agent not found, invalid scope-agent output, scope too large
+- `401` unauthorized (when API key enabled)
+- `422` validation errors (for example `max_tokens <= 0`)
 
-### `PATCH /v1/records/{record_id}/index`
+### `GET /v1/admin/records/{record_id}`
 
-Update a record's index (title, summary, tags, key_claims). The raw text is not changed.
+Get record metadata + `index_text`. Raw encrypted/decrypted `data` is never returned here.
 
-**Request body:** IndexEntry (same schema as in store)
+**Response 200**
 
-**Example:**
-```bash
-curl -X PATCH http://localhost:8100/v1/records/482feb9fd696/index \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Updated Title",
-    "summary": "Updated summary.",
-    "tags": ["updated", "migration"],
-    "key_claims": ["New claim"]
-  }'
-```
-
-**Response (200):** `{"status": "ok"}`
-**Response (404):** `{"detail": "Record not found"}`
-
----
-
-### `DELETE /v1/records/{record_id}`
-
-Delete a record and its index.
-
-**Example:**
-```bash
-curl -X DELETE http://localhost:8100/v1/records/482feb9fd696 \
-  -H "Authorization: Bearer $API_KEY"
-```
-
-**Response (200):** `{"status": "ok"}`
-**Response (404):** `{"detail": "Record not found"}`
-
----
-
-### `GET /v1/spaces`
-
-List all spaces with record counts.
-
-**Example:**
-```bash
-curl http://localhost:8100/v1/spaces \
-  -H "Authorization: Bearer $API_KEY"
-```
-
-**Response (200):**
 ```json
-[
-  {"space_id": "team-alpha", "count": 4},
-  {"space_id": "team-beta", "count": 2},
-  {"space_id": "hr-confidential", "count": 1}
-]
+{
+  "id": "482feb9fd696",
+  "metadata": {"author": "alice", "team": "payments"},
+  "index_text": "Q3 retro payment migration PayPal Stripe",
+  "created_at": 1739404909.774955
+}
 ```
 
----
+**Errors**
+- `404` record not found
 
-### `POST /v1/agents` (sandbox mode)
+### `PATCH /v1/admin/records/{record_id}`
 
-Register a custom Docker agent. Requires `HIVEMIND_SANDBOX_ENABLED=true`.
+Update `metadata` and/or `index_text`.
 
-**Request body (JSON):**
+**Request body**
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | yes | Agent name |
-| `image` | string | yes | Docker image reference (e.g. `myorg/my-agent:v1`) |
-| `description` | string | no | Agent description |
-| `entrypoint` | string | no | Override container CMD |
-| `memory_mb` | integer | no | Container memory limit in MB (default: 256) |
-| `max_llm_calls` | integer | no | Max LLM calls per query (default: 20) |
-| `max_tokens` | integer | no | Max tokens per query (default: 100000) |
-| `timeout_seconds` | integer | no | Max runtime in seconds (default: 120) |
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `metadata` | object | no | Replaces metadata when present |
+| `index_text` | string | no | Replaces FTS text when present |
 
-**Example:**
+At least one field must be present.
+
+**Example**
+
 ```bash
-curl -X POST http://localhost:8100/v1/agents \
+curl -X PATCH http://localhost:8100/v1/admin/records/482feb9fd696 \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-agent",
-    "image": "myorg/my-agent:v1",
-    "description": "Custom search agent",
-    "max_llm_calls": 10
-  }'
+  -d '{"metadata": {"reviewed": true}, "index_text": "updated search text"}'
 ```
 
-**Response (200):** `{"agent_id": "abc123def456", "name": "my-agent"}`
+**Responses**
+- `200` `{"status": "ok"}`
+- `400` missing fields, `metadata: null`, or `index_text: null`
+- `404` record not found
+- `422` invalid types (for example `metadata` array, `index_text` number)
 
----
+### `DELETE /v1/admin/records/{record_id}`
 
-### `GET /v1/agents` (sandbox mode)
+Delete record and associated FTS index.
 
-List all registered agents.
+**Responses**
+- `200` `{"status": "ok"}`
+- `404` `{"detail": "Record not found"}`
 
-**Response (200):**
+### `POST /v1/agents`
+
+Register a pre-built local Docker image as an agent.
+
+**Request body**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | Human-readable name |
+| `image` | string | yes | Docker image ref available in local daemon |
+| `description` | string | no | Defaults to `""` |
+| `entrypoint` | string or null | no | Overrides image CMD |
+| `memory_mb` | integer | no | Min 16, capped by server `HIVEMIND_CONTAINER_MEMORY_MB` |
+| `max_llm_calls` | integer | no | Min 1 |
+| `max_tokens` | integer | no | Min 1 |
+| `timeout_seconds` | integer | no | Min 1 |
+
+Server validates Docker image availability before registration.
+
+**Response 200**
+
+```json
+{
+  "agent_id": "abc123def456",
+  "name": "my-agent",
+  "files_extracted": 5
+}
+```
+
+`files_extracted` is best-effort source extraction from the image and may be `0` even when registration succeeds.
+
+**Common errors**
+- `400` image missing locally
+- `503` Docker daemon unavailable during validation
+- `422` request validation errors
+
+### `POST /v1/agents/upload`
+
+Upload source archive, build Docker image on server, register resulting agent.
+
+**Request**: `multipart/form-data`
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `archive` | file | yes | Tar/tar.gz with `Dockerfile` |
+| `name` | string | yes | Agent name |
+| `description` | string | no | Defaults to `""` |
+| `entrypoint` | string | no | Optional CMD override |
+| `memory_mb` | integer | no | Min 16 |
+| `max_llm_calls` | integer | no | Min 1 |
+| `max_tokens` | integer | no | Min 1 |
+| `timeout_seconds` | integer | no | Min 1 |
+
+Archive safeguards:
+- Max compressed upload: 50 MB
+- Max archive entries: 2,000
+- Max single file size: 15 MB
+- Max extracted total size: 150 MB
+- Symlinks/hardlinks and path traversal are rejected
+
+**Example**
+
+```bash
+tar czf agent.tar.gz -C my-agent .
+
+curl -X POST http://localhost:8100/v1/agents/upload \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "name=my-agent" \
+  -F "description=Custom query agent" \
+  -F "archive=@agent.tar.gz"
+```
+
+**Response 200**
+
+```json
+{
+  "agent_id": "abc123def456",
+  "name": "my-agent",
+  "files_extracted": 3
+}
+```
+
+**Common errors**
+- `400` missing Dockerfile, invalid archive, oversized archive/member, too many entries
+- `422` invalid numeric form values
+- `500` archive extraction/build failures (details are redacted)
+
+### `GET /v1/agents`
+
+List registered agents.
+
+**Response 200**
+
 ```json
 [
   {
     "agent_id": "abc123def456",
     "name": "my-agent",
-    "description": "Custom search agent",
-    "image": "myorg/my-agent:v1",
+    "description": "Custom query agent",
+    "image": "hivemind-agent-abc123def456:latest",
     "entrypoint": null,
     "memory_mb": 256,
-    "max_llm_calls": 10,
+    "max_llm_calls": 20,
     "max_tokens": 100000,
     "timeout_seconds": 120
   }
 ]
 ```
 
----
+### `GET /v1/agents/{agent_id}`
 
-### `GET /v1/agents/{agent_id}` (sandbox mode)
+Get one agent config.
 
-Get details of a specific agent.
+**Responses**
+- `200` same schema as list item
+- `404` `{"detail": "Agent not found"}`
 
-**Response (200):** Same schema as list item above.
-**Response (404):** `{"detail": "Agent not found"}`
+### `DELETE /v1/agents/{agent_id}`
 
----
+Delete agent config and extracted source files.
 
-### `DELETE /v1/agents/{agent_id}` (sandbox mode)
+**Responses**
+- `200` `{"status": "ok"}`
+- `404` `{"detail": "Agent not found"}`
 
-Delete an agent.
+## Internal Bridge API (Agent Runtime)
 
-**Response (200):** `{"status": "ok"}`
-**Response (404):** `{"detail": "Agent not found"}`
+Each running Docker agent talks to an ephemeral bridge server.
 
----
+Auth for bridge endpoints (except `/health`):
 
-## Sandbox Agent Protocol
+```http
+Authorization: Bearer <SESSION_TOKEN>
+```
 
-When a query includes `query_agent_id`, the query is routed to a sandboxed Docker container instead of the built-in agent loop. The container receives environment variables and communicates with hivemind through an ephemeral HTTP bridge.
+Agents automatically receive `BRIDGE_URL`, `SESSION_TOKEN`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY` in env vars.
 
-**Environment variables passed to the agent container:**
+### Common Endpoints (All Agent Roles)
 
-| Env var | Description |
-|---------|-------------|
-| `BRIDGE_URL` | Base URL of the bridge HTTP server (e.g. `http://host.docker.internal:54321`) |
-| `SESSION_TOKEN` | Bearer token for bridge authentication |
-| `PROMPT` | The query prompt text |
-| `DOCUMENT_TEXT` | Alias for PROMPT (used by indexing agents) |
-| `QUERIER_ID` | Who is asking (scoping agents only, may be empty) |
-| `QUERY_AGENT_ID` | Query agent ID, or `"default"` (scoping agents only) |
-| `QUERY_AGENT_IMAGE` | Docker image of the query agent (scoping agents only) |
-| `QUERY_AGENT_DESCRIPTION` | Description of the query agent (scoping agents only) |
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness + current budget summary |
+| `GET` | `/tools` | Tool schemas (OpenAI function format) |
+| `POST` | `/tools/{tool_name}` | Invoke tool with `{"arguments": {...}}` |
+| `POST` | `/llm/chat` | LLM proxy with budget enforcement |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions proxy |
 
-**Bridge HTTP API (available at BRIDGE_URL):**
+`POST /llm/chat` request fields:
+- `messages` (required)
+- `model` (optional override)
+- `max_tokens` (default 4096, max 16384)
+- `temperature`, `top_p` (optional)
 
-| Method | Path | Body | Response |
-|--------|------|------|----------|
-| GET | /health | — | `{status, budget}` |
-| GET | /tools | — | Tool schemas (OpenAI format) |
-| POST | /llm/chat | `{messages, max_tokens, model?, temperature?, top_p?}` | `{content, usage}` |
-| POST | /tools/{name} | `{arguments}` | `{result, error}` |
+`POST /llm/chat` response:
 
-All endpoints except `/health` require `Authorization: Bearer {SESSION_TOKEN}`.
+```json
+{
+  "content": "...",
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 50
+  }
+}
+```
 
-The `/llm/chat` endpoint is a passthrough proxy — the agent controls model selection, temperature, top_p, and all other parameters. The bridge just forwards to OpenRouter and enforces budget.
+Budget exhaustion returns `429` with `{"detail": "Budget exhausted: ..."}`.
 
-The agent writes its final answer to **stdout** and exits with code 0. The output then passes through the mediator audit before being returned to the caller. If the agent times out, the container is killed and a timeout error is returned. If the agent produces no stdout output, an error message is returned.
+### Scope-Agent-Only Bridge Endpoints
 
-**Custom query agents vs default:** When `query_agent_id` is set, the sandbox query agent has full control over its LLM interactions — no system prompt is injected, no HyDE expansion runs. The agent calls `/llm/chat` with whatever messages, model, and parameters it wants. The only post-processing is the mediator audit (soft constraints). When no `query_agent_id` is set, the default query agent uses the built-in system prompt, HyDE search expansion, and the standard tool-calling loop.
+Available only when bridge role is `scope`.
 
-**Budget enforcement:** The bridge tracks LLM calls and token usage. When the budget is exhausted (either the agent's per-query limit or the global cap), `/llm/chat` returns a `429` with `{"detail": "Budget exhausted: ..."}`. The agent can check remaining budget via `GET /health`.
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/sandbox/simulate` | Nested query-agent run for allowed query agent only |
+| `GET` | `/sandbox/agents/{agent_id}/files` | List extracted files for allowed query agent |
+| `GET` | `/sandbox/agents/{agent_id}/files/{file_path}` | Read extracted file content |
 
-**Docker isolation:** Each agent runs as a Docker container on an internal network (`internal=True`). This provides:
+`/sandbox/simulate` request:
 
-| Isolation layer | Mechanism |
-|----------------|-----------|
-| **Filesystem** | Container has its own rootfs — cannot read host files (hivemind.db, .env, other agents) |
-| **Network** | Docker `internal=True` network — container can only reach the bridge, not the internet |
-| **Process** | PID namespace — container cannot see or signal host processes |
-| **Resources** | Memory limit (`memory_mb`) and CPU quota prevent resource abuse |
+```json
+{
+  "query_agent_id": "qa-1",
+  "prompt": "What changed this week?",
+  "record_ids": ["r1", "r2"]
+}
+```
 
-The `SESSION_TOKEN` is the only credential the container has, and it's ephemeral (bridge shuts down after each query, token becomes worthless). Long-lived secrets (`HIVEMIND_OPENROUTER_API_KEY`, `HIVEMIND_ENCRYPTION_KEY`, `HIVEMIND_API_KEY`) are never passed to the container.
+### Agent Tools Exposed Through Bridge
 
-**Security model:** The bridge only exposes the four endpoints listed above — it is not a general-purpose HTTP proxy. Tool dispatch uses the same scoped `on_tool_call` closure from the query pipeline, so scope enforcement is identical to the built-in agent. The Docker internal network prevents data exfiltration on all platforms (macOS, Linux, TEE).
+Query/index/scope roles receive scoped storage tools:
 
-## Query Pipeline
+| Tool | Signature | Behavior |
+|---|---|---|
+| `search` | `search(query, limit=20)` | FTS5 search, limit clamped to `1..200` |
+| `read` | `read(record_id, offset=0, limit=20000)` | Chunked record read, limit clamped to `1..50000` |
+| `list` | `list(limit=20, offset=0)` | List records by recency, limit clamped to `1..200` |
 
-When a query is processed, the following stages run in order:
+Scope agents additionally receive:
+- `list_query_agent_files()`
+- `read_query_agent_file(file_path)`
 
-0. **Scope resolution** — if `scope_agent_id` is set, a sandboxed scoping agent runs with full DB access + query agent source visibility, outputs `record_ids` whitelist. Otherwise, the static `scope` from the request body is used (default: no restrictions).
-1. **Scope enforcement + agent execution** — the query agent's tools are built with SQL WHERE clauses whitelisting only in-scope records. **Default agent:** built-in LLM tool-calling loop with HyDE search expansion, system prompt with soft constraints. **Custom agent** (`query_agent_id` set): sandboxed Docker container with full LLM control (no system prompt injection, no HyDE).
-2. **Mediator audit** — a second LLM checks the agent's output against soft constraints (`detail_level`, `custom_instructions`) and rewrites the minimum necessary if any constraints are violated. Skipped in `"full"` mode.
-
-All LLM prompts are defined in `hivemind/prompts.py`.
+Mediator agents receive no data tools.
 
 ## Python Client Example
 
 ```python
 import httpx
 
+BASE = "http://localhost:8100"
+API_KEY = "your-api-key"
+QUERY_AGENT_ID = "default-query"
+
 client = httpx.Client(
-    base_url="http://localhost:8100",
-    headers={
-        "Authorization": "Bearer your-api-key",
-        "Content-Type": "application/json",
-    },
-    timeout=120,  # queries can take 5-30s depending on agent turns
+    base_url=BASE,
+    headers={"Authorization": f"Bearer {API_KEY}"},
+    timeout=120,
 )
 
-# Store a document (LLM auto-indexes it)
-r = client.post("/v1/store", json={
-    "text": "Sprint retro: decided to switch from REST to gRPC for 40% latency improvement.",
-    "space_id": "team-alpha",
-    "user_id": "alice",
-})
-record_id = r.json()["record_id"]
-
-# Query with scope
-r = client.post("/v1/query", json={
-    "question": "What technical decisions were made?",
-    "scope": {"user_ids": ["alice"]},
-    "soft": {"detail_level": "full"},
-})
-print(r.json()["answer"])
-
-# Query with custom detail level
-r = client.post("/v1/query", json={
-    "question": "What's happening across teams?",
-    "scope": {"user_ids": ["alice", "bob", "charlie"]},
-    "soft": {
-        "detail_level": "Focus only on security implications",
-        "custom_instructions": "Respond in bullet points.",
+store_resp = client.post(
+    "/v1/store",
+    json={
+        "data": "Sprint retro: moved internal APIs from REST to gRPC.",
+        "metadata": {"team": "backend", "type": "decision"},
+        "index_text": "sprint retro REST gRPC migration",
     },
-})
+)
+store_resp.raise_for_status()
+record_id = store_resp.json()["record_id"]
+
+query_resp = client.post(
+    "/v1/query",
+    json={
+        "query": "What decisions were made?",
+        "query_agent_id": QUERY_AGENT_ID,
+        "scope": [record_id],
+        "max_tokens": 50000,
+    },
+)
+query_resp.raise_for_status()
+
+print(query_resp.json()["output"])
+print(query_resp.json()["usage"])
 ```

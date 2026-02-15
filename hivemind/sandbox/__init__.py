@@ -1,6 +1,15 @@
 from .backend import SandboxBackend
 from .agents import AgentStore
 from .docker_runner import DockerRunner, ContainerResult
-from .models import AgentConfig, SandboxSettings
+from .models import AgentConfig, SandboxSettings, SimulateRequest, SimulateResponse
 
-__all__ = ["SandboxBackend", "AgentStore", "DockerRunner", "ContainerResult", "AgentConfig", "SandboxSettings"]
+__all__ = [
+    "SandboxBackend",
+    "AgentStore",
+    "DockerRunner",
+    "ContainerResult",
+    "AgentConfig",
+    "SandboxSettings",
+    "SimulateRequest",
+    "SimulateResponse",
+]

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AgentConfig(BaseModel):
@@ -9,37 +9,41 @@ class AgentConfig(BaseModel):
     description: str = ""
     image: str  # Docker image reference (e.g. "myorg/my-agent:v1")
     entrypoint: str | None = None  # Override container CMD
-    memory_mb: int = 256  # Container memory limit
-    max_llm_calls: int = 20
-    max_tokens: int = 100_000
-    timeout_seconds: int = 120
+    memory_mb: int = Field(default=256, ge=16)  # Container memory limit
+    max_llm_calls: int = Field(default=20, ge=1)
+    max_tokens: int = Field(default=100_000, ge=1)
+    timeout_seconds: int = Field(default=120, ge=1)
 
 
 class SandboxSettings(BaseModel):
     """Sandbox configuration for Docker-based agent execution."""
 
     bridge_host: str = "0.0.0.0"  # containers need to reach bridge
+    docker_host: str = ""  # optional explicit Docker daemon socket/URL
     docker_network_name: str = "hivemind-sandbox"
-    container_memory_mb: int = 256
-    container_cpu_quota: float = 1.0
-    global_max_llm_calls: int = 50
-    global_max_tokens: int = 200_000
-    global_timeout_seconds: int = 300
+    docker_network_internal: bool = True
+    enforce_bridge_only_egress: bool = True
+    enforce_bridge_only_egress_fail_closed: bool = True
+    container_memory_mb: int = Field(default=256, ge=16)
+    container_cpu_quota: float = Field(default=1.0, gt=0.0)
+    container_pids_limit: int = Field(default=256, ge=16)
+    container_read_only_fs: bool = True
+    container_drop_all_caps: bool = True
+    container_no_new_privileges: bool = True
+    global_max_llm_calls: int = Field(default=50, ge=1)
+    global_max_tokens: int = Field(default=200_000, ge=1)
+    global_timeout_seconds: int = Field(default=300, ge=1)
 
 
 # ── Bridge request/response models ──
 
 
 class BridgeLLMRequest(BaseModel):
-    """Request from agent container to bridge /llm/chat endpoint.
-
-    The agent controls model selection and all LLM parameters.
-    The bridge just forwards to OpenRouter and enforces budget.
-    """
+    """Request from agent container to bridge /llm/chat endpoint."""
 
     messages: list[dict]
     model: str | None = None  # None = use server default
-    max_tokens: int = 4096
+    max_tokens: int = Field(default=4096, ge=1, le=16384)
     temperature: float | None = None
     top_p: float | None = None
 
@@ -48,13 +52,13 @@ class BridgeLLMResponse(BaseModel):
     """Response from bridge /llm/chat endpoint."""
 
     content: str
-    usage: dict = {}
+    usage: dict = Field(default_factory=dict)
 
 
 class BridgeToolRequest(BaseModel):
     """Request from agent container to bridge /tools/{name} endpoint."""
 
-    arguments: dict = {}
+    arguments: dict = Field(default_factory=dict)
 
 
 class BridgeToolResponse(BaseModel):
@@ -71,7 +75,37 @@ class AgentCreateRequest(BaseModel):
     image: str  # Docker image reference (required)
     description: str = ""
     entrypoint: str | None = None
-    memory_mb: int = 256
-    max_llm_calls: int = 20
-    max_tokens: int = 100_000
-    timeout_seconds: int = 120
+    memory_mb: int = Field(default=256, ge=16)
+    max_llm_calls: int = Field(default=20, ge=1)
+    max_tokens: int = Field(default=100_000, ge=1)
+    timeout_seconds: int = Field(default=120, ge=1)
+
+
+# ── Simulation models (scope agents only) ──
+
+
+class OpenAIChatRequest(BaseModel):
+    """OpenAI-compatible request for POST /v1/chat/completions on the bridge."""
+
+    model: str | None = None
+    messages: list[dict]
+    max_tokens: int | None = Field(default=4096, ge=1)
+    temperature: float | None = None
+    top_p: float | None = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
+
+
+class SimulateRequest(BaseModel):
+    """Request to POST /sandbox/simulate — run a nested query agent."""
+
+    query_agent_id: str
+    prompt: str
+    record_ids: list[str]
+
+
+class SimulateResponse(BaseModel):
+    """Response from POST /sandbox/simulate."""
+
+    output: str
+    records_accessed: list[str]

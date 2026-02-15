@@ -59,3 +59,43 @@ def test_budget_summary_updates():
     assert s["prompt_tokens"] == 300
     assert s["completion_tokens"] == 150
     assert s["total_tokens"] == 450
+
+
+def test_budget_rejects_planned_completion_over_remaining():
+    b = Budget(max_calls=10, max_tokens=500)
+    b.record(prompt_tokens=200, completion_tokens=200)  # 100 remaining
+    err = b.check(planned_completion_tokens=150)
+    assert err is not None
+    assert "requested up to 150" in err
+
+
+def test_budget_rejects_planned_prompt_plus_completion_over_remaining():
+    b = Budget(max_calls=10, max_tokens=500)
+    b.record(prompt_tokens=250, completion_tokens=200)  # 50 remaining
+    err = b.check(planned_prompt_tokens=20, planned_completion_tokens=40)
+    assert err is not None
+    assert "requested up to 60" in err
+
+
+def test_budget_record_can_increment_multiple_calls():
+    b = Budget(max_calls=10, max_tokens=1000)
+    b.record(calls=3, prompt_tokens=10, completion_tokens=20)
+    s = b.summary()
+    assert s["calls"] == 3
+    assert s["total_tokens"] == 30
+
+
+def test_budget_remaining_tracks_calls_and_tokens():
+    b = Budget(max_calls=5, max_tokens=500)
+    b.record(calls=2, prompt_tokens=120, completion_tokens=80)
+    remaining = b.remaining()
+    assert remaining["calls"] == 3
+    assert remaining["tokens"] == 300
+
+
+def test_budget_remaining_clamps_at_zero():
+    b = Budget(max_calls=1, max_tokens=10)
+    b.record(calls=5, prompt_tokens=8, completion_tokens=10)
+    remaining = b.remaining()
+    assert remaining["calls"] == 0
+    assert remaining["tokens"] == 0

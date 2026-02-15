@@ -1,9 +1,15 @@
 import asyncio
-import io
+import ipaddress
+import json
 import logging
+import os
 import platform
+import socket
+import subprocess
+import tempfile
 import tarfile
 from dataclasses import dataclass
+from uuid import uuid4
 
 import docker
 import docker.errors
@@ -14,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "managed-by"
 CONTAINER_LABEL_VALUE = "hivemind"
+CONTAINER_RUN_LABEL = "hivemind-run-id"
 
 
 @dataclass
@@ -27,10 +34,10 @@ class ContainerResult:
 
 
 class DockerRunner:
-    """Runs agent Docker containers with network isolation and resource limits.
+    """Runs agent Docker containers with configurable network isolation and limits.
 
     The container:
-      - Joins an internal-only Docker network (no internet)
+      - Joins a managed Docker network (internal mode configurable)
       - Receives bridge URL + session token via env vars
       - Has memory and CPU limits enforced
       - Is always cleaned up (removed) after execution
@@ -40,26 +47,115 @@ class DockerRunner:
         self.settings = settings
         self._client: docker.DockerClient | None = None
         self._network_id: str | None = None
-        self._cleanup_orphans()
+
+    def _client_from_base_url(self, base_url: str) -> docker.DockerClient:
+        return docker.DockerClient(base_url=base_url)
+
+    def _validate_client(self, client: docker.DockerClient) -> None:
+        ping = getattr(client, "ping", None)
+        if callable(ping):
+            ping()
+
+    def _docker_host_from_context(self) -> str | None:
+        try:
+            shown = subprocess.run(
+                ["docker", "context", "show"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            context = shown.stdout.strip()
+            if not context:
+                return None
+            inspected = subprocess.run(
+                ["docker", "context", "inspect", context],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            payload = json.loads(inspected.stdout)
+            if not isinstance(payload, list) or not payload:
+                return None
+            endpoint = payload[0].get("Endpoints", {}).get("docker", {})
+            host = endpoint.get("Host")
+            if isinstance(host, str) and host.strip():
+                return host.strip()
+        except Exception as e:
+            logger.debug("Docker context host lookup failed: %s", e)
+        return None
 
     def _get_client(self) -> docker.DockerClient:
         if self._client is None:
-            self._client = docker.from_env()
+            attempts: list[tuple[str, str | None]] = []
+            explicit = (self.settings.docker_host or "").strip()
+            if explicit:
+                attempts.append(("settings", explicit))
+
+            env_host = os.getenv("DOCKER_HOST", "").strip()
+            if env_host and env_host != explicit:
+                attempts.append(("env", env_host))
+
+            attempts.append(("from_env", None))
+
+            errors: list[str] = []
+            tried_hosts: set[str] = {
+                host for _, host in attempts if host is not None
+            }
+
+            for label, host in attempts:
+                try:
+                    client = (
+                        docker.from_env()
+                        if host is None
+                        else self._client_from_base_url(host)
+                    )
+                    self._validate_client(client)
+                    self._client = client
+                    break
+                except Exception as e:
+                    host_desc = host or "(docker.from_env)"
+                    errors.append(f"{label}:{host_desc} -> {e}")
+
+            if self._client is None:
+                context_host = self._docker_host_from_context()
+                if context_host and context_host not in tried_hosts:
+                    try:
+                        client = self._client_from_base_url(context_host)
+                        self._validate_client(client)
+                        self._client = client
+                    except Exception as e:
+                        errors.append(f"context:{context_host} -> {e}")
+
+            if self._client is None:
+                details = "; ".join(errors) if errors else "no attempts made"
+                raise RuntimeError(
+                    "Unable to connect to Docker daemon. "
+                    f"Attempted: {details}"
+                )
         return self._client
 
-    def _cleanup_orphans(self):
-        """Remove any containers from previous crashes."""
+    def cleanup_stale_containers(self):
+        """Remove non-running managed containers from previous crashes."""
         try:
             client = self._get_client()
-            orphans = client.containers.list(
+            managed = client.containers.list(
                 all=True,
                 filters={"label": f"{CONTAINER_LABEL}={CONTAINER_LABEL_VALUE}"},
             )
-            for c in orphans:
-                logger.warning("Removing orphan container %s", c.short_id)
+            for c in managed:
+                status = getattr(c, "status", "") or ""
+                if status == "running":
+                    continue
+                logger.warning(
+                    "Removing stale managed container %s (status=%s)",
+                    c.short_id,
+                    status or "unknown",
+                )
                 c.remove(force=True)
         except Exception as e:
-            logger.debug("Orphan cleanup skipped: %s", e)
+            logger.debug("Stale container cleanup skipped: %s", e)
 
     def _ensure_network(self) -> str:
         """Create or get the internal Docker network. Returns network name."""
@@ -69,18 +165,53 @@ class DockerRunner:
         if self._network_id:
             return name
 
+        internal = self.settings.docker_network_internal
+        # Docker Desktop (macOS/Windows) cannot reach host bridge from an
+        # internal network, so force a compatible network mode.
+        if internal and platform.system() in ("Darwin", "Windows"):
+            logger.warning(
+                "docker_network_internal=true is incompatible with host bridge on %s; using internal=false",
+                platform.system(),
+            )
+            internal = False
+
         try:
             network = client.networks.get(name)
+            existing_internal = bool(network.attrs.get("Internal", False))
+            if existing_internal != internal:
+                attached = network.attrs.get("Containers") or {}
+                if attached:
+                    logger.warning(
+                        "Network %s has internal=%s but desired=%s and has %d attached containers; reusing existing network",
+                        name,
+                        existing_internal,
+                        internal,
+                        len(attached),
+                    )
+                else:
+                    logger.warning(
+                        "Recreating network %s with internal=%s (was internal=%s)",
+                        name,
+                        internal,
+                        existing_internal,
+                    )
+                    network.remove()
+                    network = client.networks.create(
+                        name,
+                        driver="bridge",
+                        internal=internal,
+                        labels={CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
+                    )
             self._network_id = network.id
         except docker.errors.NotFound:
             network = client.networks.create(
                 name,
                 driver="bridge",
-                internal=True,
+                internal=internal,
                 labels={CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
             )
             self._network_id = network.id
-            logger.info("Created Docker network %s (internal=True)", name)
+            logger.info("Created Docker network %s (internal=%s)", name, internal)
 
         return name
 
@@ -103,67 +234,303 @@ class DockerRunner:
             # Fallback — 172.17.0.1 is the default Docker bridge gateway
             return f"http://172.17.0.1:{port}"
 
+    def _resolve_ipv4(self, host: str) -> str:
+        if not host:
+            raise RuntimeError("Bridge host is empty")
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            return socket.gethostbyname(host)
+
+    def _container_ipv4(self, container, network_name: str) -> str:
+        if hasattr(container, "reload"):
+            container.reload()
+        attrs = getattr(container, "attrs", {}) or {}
+        networks = attrs.get("NetworkSettings", {}).get("Networks", {})
+        network = networks.get(network_name)
+        if not network and networks:
+            network = next(iter(networks.values()))
+        ip = (network or {}).get("IPAddress", "").strip()
+        if not ip:
+            raise RuntimeError(
+                f"Could not determine container IP for network '{network_name}'"
+            )
+        return ip
+
+    def _install_bridge_only_egress_rules(
+        self,
+        container,
+        network_name: str,
+        bridge_host: str,
+        bridge_port: int,
+    ) -> list[list[str]]:
+        src_ip = self._container_ipv4(container, network_name)
+        dst_ip = self._resolve_ipv4(bridge_host)
+        marker = f"hivemind:{getattr(container, 'id', '')[:12] or getattr(container, 'short_id', 'agent')}"
+
+        commands = [
+            [
+                "iptables",
+                "-I",
+                "DOCKER-USER",
+                "1",
+                "-s",
+                src_ip,
+                "-d",
+                dst_ip,
+                "-p",
+                "tcp",
+                "--dport",
+                str(bridge_port),
+                "-m",
+                "comment",
+                "--comment",
+                marker,
+                "-j",
+                "ACCEPT",
+            ],
+            [
+                "iptables",
+                "-I",
+                "DOCKER-USER",
+                "2",
+                "-s",
+                src_ip,
+                "-m",
+                "comment",
+                "--comment",
+                marker,
+                "-j",
+                "DROP",
+            ],
+        ]
+
+        applied: list[list[str]] = []
+        try:
+            for cmd in commands:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                applied.append(cmd)
+        except Exception:
+            self._remove_firewall_rules(applied)
+            raise
+        return applied
+
+    def _delete_cmd_for_inserted_rule(self, cmd: list[str]) -> list[str]:
+        # Convert: iptables -I CHAIN <n> <spec...>  ->  iptables -D CHAIN <spec...>
+        if len(cmd) >= 5 and cmd[0] == "iptables" and cmd[1] == "-I":
+            chain = cmd[2]
+            offset = 4 if cmd[3].isdigit() else 3
+            return ["iptables", "-D", chain, *cmd[offset:]]
+        return cmd
+
+    def _remove_firewall_rules(self, applied_commands: list[list[str]]) -> None:
+        for cmd in reversed(applied_commands):
+            del_cmd = self._delete_cmd_for_inserted_rule(cmd)
+            try:
+                subprocess.run(
+                    del_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception as e:
+                logger.warning("Failed to remove firewall rule %s: %s", del_cmd, e)
+
+    def _remove_containers_by_label(self, label_filter: str) -> int:
+        """Best-effort removal for all containers matching a label filter."""
+        client = self._get_client()
+        removed = 0
+        containers = client.containers.list(
+            all=True,
+            filters={"label": label_filter},
+        )
+        for container in containers:
+            try:
+                container.remove(force=True)
+                removed += 1
+            except Exception as e:
+                logger.warning(
+                    "Failed to remove labeled container %s (%s): %s",
+                    getattr(container, "short_id", "unknown"),
+                    label_filter,
+                    e,
+                )
+        return removed
+
+    async def _cleanup_startup_timeout_containers(
+        self,
+        run_id: str,
+        *,
+        max_wait_seconds: float = 4.0,
+        poll_interval_seconds: float = 0.25,
+    ) -> int:
+        """Wait briefly for delayed startup calls and remove leaked containers."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_wait_seconds
+        label_filter = f"{CONTAINER_RUN_LABEL}={run_id}"
+        total_removed = 0
+        saw_container = False
+        empty_polls_after_seen = 0
+
+        while True:
+            try:
+                removed_now = await asyncio.to_thread(
+                    self._remove_containers_by_label,
+                    label_filter,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Startup-timeout cleanup failed for run %s: %s",
+                    run_id,
+                    e,
+                )
+                return total_removed
+
+            total_removed += removed_now
+            if removed_now > 0:
+                saw_container = True
+                empty_polls_after_seen = 0
+            elif saw_container:
+                empty_polls_after_seen += 1
+                if empty_polls_after_seen >= 2:
+                    return total_removed
+
+            if loop.time() >= deadline:
+                return total_removed
+            await asyncio.sleep(poll_interval_seconds)
+
     async def run_agent(
         self,
         agent: AgentConfig,
-        prompt: str,
         bridge_url: str,
         session_token: str,
-        work_dir: str,
-        extra_env: dict[str, str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> ContainerResult:
         """Run an agent Docker container.
 
         The bridge_url passed in is the host-side URL. We resolve a
-        container-reachable URL internally.
+        container-reachable URL internally. The env dict is passed
+        directly to the container with BRIDGE_URL rewritten.
         """
-        # Parse port from bridge_url
         from urllib.parse import urlparse
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(1, agent.timeout_seconds)
+
+        def _remaining_timeout() -> float:
+            return deadline - loop.time()
+
+        async def _to_thread_with_deadline(fn, *args, **kwargs):
+            remaining = _remaining_timeout()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return await asyncio.wait_for(
+                asyncio.to_thread(fn, *args, **kwargs),
+                timeout=remaining,
+            )
+
+        async def _kill_container_best_effort(container_obj) -> None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(container_obj.kill),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Timed out while killing container %s",
+                    getattr(container_obj, "short_id", "unknown"),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to kill container %s: %s",
+                    getattr(container_obj, "short_id", "unknown"),
+                    e,
+                )
 
         parsed = urlparse(bridge_url)
         port = parsed.port or 80
-        container_bridge_url = self._resolve_bridge_url(port)
-
-        env = {
-            "BRIDGE_URL": container_bridge_url,
-            "SESSION_TOKEN": session_token,
-            "PROMPT": prompt,
-            "DOCUMENT_TEXT": prompt,  # alias for indexing agents
-        }
-        if extra_env:
-            env.update(extra_env)
-
-        network_name = await asyncio.to_thread(self._ensure_network)
+        run_id = uuid4().hex[:12]
+        container = None
+        egress_rules: list[list[str]] = []
 
         # Resource limits
-        mem_limit = f"{agent.memory_mb}m"
+        memory_mb = min(agent.memory_mb, self.settings.container_memory_mb)
+        mem_limit = f"{memory_mb}m"
         nano_cpus = int(self.settings.container_cpu_quota * 1e9)
-
-        # Build container kwargs
-        run_kwargs: dict = {
-            "image": agent.image,
-            "environment": env,
-            "network": network_name,
-            "mem_limit": mem_limit,
-            "nano_cpus": nano_cpus,
-            "labels": {CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
-            "detach": True,
-            "stdout": True,
-            "stderr": True,
-        }
-
-        if agent.entrypoint:
-            run_kwargs["entrypoint"] = agent.entrypoint
-
-        # Add extra host for macOS/Windows so host.docker.internal resolves
-        if platform.system() in ("Darwin", "Windows"):
-            run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
-
-        container = None
+        security_opt: list[str] = []
+        if self.settings.container_no_new_privileges:
+            security_opt.append("no-new-privileges:true")
         try:
-            container = await asyncio.to_thread(
-                self._get_client().containers.run, **run_kwargs
+            container_bridge_url = await _to_thread_with_deadline(
+                self._resolve_bridge_url,
+                port,
             )
+            network_name = await _to_thread_with_deadline(self._ensure_network)
+
+            container_env = dict(env or {})
+            container_env["BRIDGE_URL"] = container_bridge_url
+            container_env["SESSION_TOKEN"] = session_token
+            container_env["OPENAI_BASE_URL"] = f"{container_bridge_url}/v1"
+            container_env["OPENAI_API_KEY"] = session_token
+
+            # Build container kwargs
+            run_kwargs: dict = {
+                "image": agent.image,
+                "environment": container_env,
+                "network": network_name,
+                "mem_limit": mem_limit,
+                "nano_cpus": nano_cpus,
+                "pids_limit": self.settings.container_pids_limit,
+                "labels": {
+                    CONTAINER_LABEL: CONTAINER_LABEL_VALUE,
+                    CONTAINER_RUN_LABEL: run_id,
+                },
+                "detach": True,
+                "stdout": True,
+                "stderr": True,
+            }
+            if self.settings.container_read_only_fs:
+                run_kwargs["read_only"] = True
+                run_kwargs["tmpfs"] = {
+                    "/tmp": "rw,noexec,nosuid,size=64m",
+                    "/var/tmp": "rw,noexec,nosuid,size=32m",
+                }
+            if self.settings.container_drop_all_caps:
+                run_kwargs["cap_drop"] = ["ALL"]
+            if security_opt:
+                run_kwargs["security_opt"] = security_opt
+            if agent.entrypoint:
+                run_kwargs["entrypoint"] = agent.entrypoint
+
+            try:
+                client = await _to_thread_with_deadline(self._get_client)
+                container = await _to_thread_with_deadline(
+                    client.containers.run,
+                    **run_kwargs,
+                )
+            except asyncio.TimeoutError:
+                removed = await self._cleanup_startup_timeout_containers(
+                    run_id,
+                    max_wait_seconds=max(0.0, _remaining_timeout()),
+                    poll_interval_seconds=0.1,
+                )
+                return ContainerResult(
+                    stdout="",
+                    stderr=(
+                        "Agent startup timed out before container became ready "
+                        f"({agent.timeout_seconds}s total budget); "
+                        f"removed {removed} startup container(s)."
+                    ),
+                    exit_code=-1,
+                    timed_out=True,
+                )
 
             logger.info(
                 "Started container %s for agent %s (image=%s, timeout=%ds)",
@@ -173,12 +540,41 @@ class DockerRunner:
                 agent.timeout_seconds,
             )
 
-            # Wait for container to finish
+            if self.settings.enforce_bridge_only_egress:
+                if platform.system() != "Linux":
+                    logger.warning(
+                        "Bridge-only host egress enforcement is supported only on Linux; "
+                        "continuing without host firewall rules on %s",
+                        platform.system(),
+                    )
+                else:
+                    bridge_parsed = urlparse(container_bridge_url)
+                    bridge_host = bridge_parsed.hostname or ""
+                    bridge_port = bridge_parsed.port or port
+                    try:
+                        egress_rules = await _to_thread_with_deadline(
+                            self._install_bridge_only_egress_rules,
+                            container,
+                            network_name,
+                            bridge_host,
+                            bridge_port,
+                        )
+                    except Exception as e:
+                        msg = f"Egress policy setup failed: {e}"
+                        if self.settings.enforce_bridge_only_egress_fail_closed:
+                            logger.error(msg)
+                            await _kill_container_best_effort(container)
+                            return ContainerResult(
+                                stdout="",
+                                stderr=msg,
+                                exit_code=-1,
+                                timed_out=False,
+                            )
+                        logger.warning("%s; continuing without host firewall rules", msg)
+
+            # Wait for container to finish within the remaining timeout budget.
             try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(container.wait),
-                    timeout=agent.timeout_seconds,
-                )
+                result = await _to_thread_with_deadline(container.wait)
                 exit_code = result.get("StatusCode", -1)
                 timed_out = False
             except asyncio.TimeoutError:
@@ -188,20 +584,54 @@ class DockerRunner:
                     agent.timeout_seconds,
                     container.short_id,
                 )
-                await asyncio.to_thread(container.kill)
+                await _kill_container_best_effort(container)
                 exit_code = -1
                 timed_out = True
 
-            # Capture output
-            stdout = await asyncio.to_thread(
-                container.logs, stdout=True, stderr=False
-            )
-            stderr = await asyncio.to_thread(
-                container.logs, stdout=False, stderr=True
-            )
+            def _decode(payload: bytes | str) -> str:
+                if isinstance(payload, bytes):
+                    return payload.decode(errors="replace")
+                return str(payload)
 
-            stdout_str = stdout.decode(errors="replace") if isinstance(stdout, bytes) else str(stdout)
-            stderr_str = stderr.decode(errors="replace") if isinstance(stderr, bytes) else str(stderr)
+            # Capture output without extending runtime past the run deadline.
+            logs_truncated = False
+            stdout_str = ""
+            stderr_str = ""
+            try:
+                stdout = await _to_thread_with_deadline(
+                    container.logs,
+                    stdout=True,
+                    stderr=False,
+                )
+                stdout_str = _decode(stdout)
+            except asyncio.TimeoutError:
+                logs_truncated = True
+                logger.warning(
+                    "Skipping stdout collection for %s due to timeout budget",
+                    container.short_id,
+                )
+            except Exception as e:
+                logger.warning("Failed collecting stdout logs for %s: %s", container.short_id, e)
+
+            try:
+                stderr = await _to_thread_with_deadline(
+                    container.logs,
+                    stdout=False,
+                    stderr=True,
+                )
+                stderr_str = _decode(stderr)
+            except asyncio.TimeoutError:
+                logs_truncated = True
+                logger.warning(
+                    "Skipping stderr collection for %s due to timeout budget",
+                    container.short_id,
+                )
+            except Exception as e:
+                logger.warning("Failed collecting stderr logs for %s: %s", container.short_id, e)
+
+            if logs_truncated:
+                note = "(Log collection truncated due to timeout budget)"
+                stderr_str = f"{stderr_str}\n{note}" if stderr_str else note
 
             # Detect OOM kill
             if exit_code == 137 and not timed_out:
@@ -221,13 +651,68 @@ class DockerRunner:
                 exit_code=-1,
                 timed_out=False,
             )
+        except asyncio.TimeoutError:
+            return ContainerResult(
+                stdout="",
+                stderr=(
+                    "Agent execution exceeded timeout budget before completion "
+                    f"({agent.timeout_seconds}s)."
+                ),
+                exit_code=-1,
+                timed_out=True,
+            )
 
         finally:
+            if egress_rules:
+                try:
+                    await asyncio.to_thread(self._remove_firewall_rules, egress_rules)
+                except Exception as e:
+                    logger.warning("Failed to remove container egress rules: %s", e)
             if container:
                 try:
                     await asyncio.to_thread(container.remove, force=True)
                 except Exception as e:
                     logger.warning("Failed to remove container: %s", e)
+
+    # ── Image building ──
+
+    def build_image(self, build_path: str, tag: str) -> str:
+        """Build a Docker image from a directory containing a Dockerfile.
+
+        Args:
+            build_path: Directory containing a Dockerfile and source files.
+            tag: Image tag (e.g. "hivemind-agent-abc123:latest").
+
+        Returns:
+            The image tag string.
+
+        Raises:
+            ValueError: If no Dockerfile is found in build_path.
+        """
+        import os
+
+        dockerfile = os.path.join(build_path, "Dockerfile")
+        if not os.path.isfile(dockerfile):
+            raise ValueError(
+                "No Dockerfile found in upload. A Dockerfile is required."
+            )
+
+        client = self._get_client()
+        client.images.build(path=build_path, tag=tag, rm=True)
+        logger.info("Built Docker image %s from %s", tag, build_path)
+        return tag
+
+    async def build_image_async(self, build_path: str, tag: str) -> str:
+        """Async wrapper around build_image()."""
+        return await asyncio.to_thread(self.build_image, build_path, tag)
+
+    def image_exists(self, image: str) -> bool:
+        """Return True if the Docker image is present locally."""
+        try:
+            self._get_client().images.get(image)
+            return True
+        except docker.errors.ImageNotFound:
+            return False
 
     # ── Image filesystem extraction ──
 
@@ -249,6 +734,7 @@ class DockerRunner:
         extract_dir: str = "/app",
         max_file_size: int = 512_000,
         max_total_size: int = 5_000_000,
+        max_archive_size: int = 50_000_000,
     ) -> dict[str, str]:
         """Extract source files from a Docker image without running it.
 
@@ -275,6 +761,7 @@ class DockerRunner:
         try:
             return self._extract_from_container(
                 container, extract_dir, max_file_size, max_total_size,
+                max_archive_size,
             )
         finally:
             try:
@@ -288,6 +775,7 @@ class DockerRunner:
         extract_dir: str,
         max_file_size: int,
         max_total_size: int,
+        max_archive_size: int,
     ) -> dict[str, str]:
         """Extract files from a created (not started) container."""
         try:
@@ -300,48 +788,64 @@ class DockerRunner:
             )
             return self._extract_from_container(
                 container, "/", max_file_size, max_total_size,
+                max_archive_size,
             )
 
-        tar_bytes = b"".join(chunk for chunk in archive_stream)
-        tar = tarfile.open(fileobj=io.BytesIO(tar_bytes))
+        # Stream archive to a spool file with a hard byte cap so extraction
+        # cannot force unbounded memory growth on the host.
+        total_archive_bytes = 0
+        with tempfile.SpooledTemporaryFile(max_size=4_000_000) as spool:
+            for chunk in archive_stream:
+                total_archive_bytes += len(chunk)
+                if total_archive_bytes > max_archive_size:
+                    logger.warning(
+                        "Skipping extraction from %s: archive exceeds max size (%d > %d)",
+                        extract_dir,
+                        total_archive_bytes,
+                        max_archive_size,
+                    )
+                    return {}
+                spool.write(chunk)
 
-        files: dict[str, str] = {}
-        total_size = 0
-        extracting_from_root = extract_dir == "/"
+            spool.seek(0)
+            with tarfile.open(fileobj=spool, mode="r:*") as tar:
+                files: dict[str, str] = {}
+                total_size = 0
+                extracting_from_root = extract_dir == "/"
 
-        for member in tar.getmembers():
-            if not member.isfile():
-                continue
-            if member.size > max_file_size:
-                continue
-            if total_size + member.size > max_total_size:
-                break
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    if member.size > max_file_size:
+                        continue
+                    if total_size + member.size > max_total_size:
+                        break
 
-            path = member.name
-            parts = path.split("/")
+                    path = member.name
+                    parts = path.split("/")
 
-            # Skip system dirs when extracting from /
-            if extracting_from_root and parts and parts[0] in self._SYSTEM_DIRS:
-                continue
+                    # Skip system dirs when extracting from /
+                    if extracting_from_root and parts and parts[0] in self._SYSTEM_DIRS:
+                        continue
 
-            # Skip junk dirs everywhere
-            if any(p in self._JUNK_DIRS for p in parts):
-                continue
+                    # Skip junk dirs everywhere
+                    if any(p in self._JUNK_DIRS for p in parts):
+                        continue
 
-            # Try to read as text — skip binary files
-            f = tar.extractfile(member)
-            if f is None:
-                continue
-            raw = f.read()
-            try:
-                content = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+                    # Try to read as text — skip binary files
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+                    raw = f.read()
+                    try:
+                        content = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
 
-            files[path] = content
-            total_size += member.size
+                    files[path] = content
+                    total_size += member.size
 
-        return files
+                return files
 
     async def extract_image_files_async(
         self, image: str, **kwargs

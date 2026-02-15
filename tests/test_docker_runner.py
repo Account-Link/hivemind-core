@@ -1,8 +1,8 @@
-import asyncio
 import io
 import tarfile
-from dataclasses import dataclass
-from unittest.mock import MagicMock, patch, AsyncMock
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -37,8 +37,6 @@ def _make_agent(**overrides):
 
 
 class MockContainer:
-    """Mock Docker container for testing."""
-
     def __init__(self, exit_code=0, stdout=b"agent output", stderr=b""):
         self.short_id = "abc123"
         self._exit_code = exit_code
@@ -65,8 +63,6 @@ class MockContainer:
 
 
 class MockDockerClient:
-    """Mock docker.DockerClient."""
-
     def __init__(self, container=None):
         self._container = container or MockContainer()
         self.containers = MockContainers(self._container)
@@ -77,13 +73,15 @@ class MockContainers:
     def __init__(self, container):
         self._container = container
         self.run_kwargs = None
+        self._created_containers = []
 
     def run(self, **kwargs):
         self.run_kwargs = kwargs
+        self._created_containers.append(self._container)
         return self._container
 
     def list(self, all=False, filters=None):
-        return []
+        return [c for c in self._created_containers if not getattr(c, "removed", False)]
 
 
 class MockNetworks:
@@ -103,7 +101,6 @@ class MockNetworks:
 
 @pytest.mark.asyncio
 async def test_run_agent_basic():
-    """DockerRunner creates container with correct env vars and captures output."""
     container = MockContainer(exit_code=0, stdout=b"hello from agent")
     mock_client = MockDockerClient(container)
 
@@ -117,10 +114,14 @@ async def test_run_agent_basic():
         runner = DockerRunner(settings)
         result = await runner.run_agent(
             agent=agent,
-            prompt="test prompt",
             bridge_url="http://0.0.0.0:9999",
             session_token="tok-123",
-            work_dir="/tmp/hm-test",
+            env={
+                "BRIDGE_URL": "http://0.0.0.0:9999",
+                "SESSION_TOKEN": "tok-123",
+                "AGENT_ROLE": "query",
+                "QUERY_PROMPT": "test prompt",
+            },
         )
 
     assert isinstance(result, ContainerResult)
@@ -128,23 +129,28 @@ async def test_run_agent_basic():
     assert result.exit_code == 0
     assert result.timed_out is False
 
-    # Verify container was created with correct args
     kwargs = mock_client.containers.run_kwargs
     assert kwargs["image"] == "myorg/test-agent:v1"
     assert kwargs["environment"]["SESSION_TOKEN"] == "tok-123"
-    assert kwargs["environment"]["PROMPT"] == "test prompt"
-    assert kwargs["environment"]["DOCUMENT_TEXT"] == "test prompt"
+    assert kwargs["environment"]["QUERY_PROMPT"] == "test prompt"
     assert "BRIDGE_URL" in kwargs["environment"]
+    assert kwargs["environment"]["OPENAI_BASE_URL"] == (
+        f"{kwargs['environment']['BRIDGE_URL']}/v1"
+    )
+    assert kwargs["environment"]["OPENAI_API_KEY"] == "tok-123"
     assert kwargs["mem_limit"] == "256m"
+    assert kwargs["pids_limit"] == 256
+    assert kwargs["read_only"] is True
+    assert kwargs["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in kwargs["security_opt"]
+    assert "/tmp" in kwargs["tmpfs"]
     assert kwargs["detach"] is True
 
-    # Container should be cleaned up
     assert container.removed is True
 
 
 @pytest.mark.asyncio
-async def test_run_agent_with_extra_env():
-    """Extra env vars are passed through to the container."""
+async def test_run_agent_with_env():
     container = MockContainer()
     mock_client = MockDockerClient(container)
 
@@ -158,21 +164,57 @@ async def test_run_agent_with_extra_env():
         runner = DockerRunner(settings)
         await runner.run_agent(
             agent=agent,
-            prompt="test",
             bridge_url="http://0.0.0.0:9999",
             session_token="tok-123",
-            work_dir="/tmp/hm-test",
-            extra_env={"QUERIER_ID": "alice", "CUSTOM_VAR": "value"},
+            env={
+                "BRIDGE_URL": "http://0.0.0.0:9999",
+                "SESSION_TOKEN": "tok-123",
+                "ARBITRARY_CONTEXT": '{"user": "alice"}',
+                "CUSTOM_VAR": "value",
+            },
         )
 
     env = mock_client.containers.run_kwargs["environment"]
-    assert env["QUERIER_ID"] == "alice"
+    assert env["ARBITRARY_CONTEXT"] == '{"user": "alice"}'
     assert env["CUSTOM_VAR"] == "value"
+    assert env["OPENAI_BASE_URL"] == f"{env['BRIDGE_URL']}/v1"
+    assert env["OPENAI_API_KEY"] == "tok-123"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_can_disable_hardening_flags():
+    container = MockContainer()
+    mock_client = MockDockerClient(container)
+
+    settings = _make_settings(
+        container_read_only_fs=False,
+        container_drop_all_caps=False,
+        container_no_new_privileges=False,
+        container_pids_limit=128,
+    )
+    agent = _make_agent()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        await runner.run_agent(
+            agent=agent,
+            bridge_url="http://0.0.0.0:9999",
+            session_token="tok-123",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
+        )
+
+    kwargs = mock_client.containers.run_kwargs
+    assert kwargs["pids_limit"] == 128
+    assert "read_only" not in kwargs
+    assert "cap_drop" not in kwargs
+    assert "security_opt" not in kwargs
 
 
 @pytest.mark.asyncio
 async def test_run_agent_with_entrypoint():
-    """Custom entrypoint is forwarded to Docker."""
     container = MockContainer()
     mock_client = MockDockerClient(container)
 
@@ -186,23 +228,56 @@ async def test_run_agent_with_entrypoint():
         runner = DockerRunner(settings)
         await runner.run_agent(
             agent=agent,
-            prompt="test",
             bridge_url="http://0.0.0.0:9999",
             session_token="tok-123",
-            work_dir="/tmp/hm-test",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
         )
 
     assert mock_client.containers.run_kwargs["entrypoint"] == "/custom/run.sh"
 
 
 @pytest.mark.asyncio
-async def test_run_agent_timeout():
-    """Container is killed when timeout is exceeded."""
+async def test_run_agent_non_linux_skips_bridge_only_egress_even_fail_closed():
+    container = MockContainer(exit_code=0, stdout=b"ok")
+    mock_client = MockDockerClient(container)
+    settings = _make_settings(
+        enforce_bridge_only_egress=True,
+        enforce_bridge_only_egress_fail_closed=True,
+    )
+    agent = _make_agent()
 
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker, patch(
+        "hivemind.sandbox.docker_runner.platform.system", return_value="Darwin"
+    ), patch(
+        "hivemind.sandbox.docker_runner.subprocess.run"
+    ) as mock_subprocess:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        result = await runner.run_agent(
+            agent=agent,
+            bridge_url="http://0.0.0.0:9999",
+            session_token="tok-123",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
+        )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert container.killed is False
+    assert container.removed is True
+    assert not any(
+        call.args and call.args[0] and call.args[0][0] == "iptables"
+        for call in mock_subprocess.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_timeout():
     class SlowContainer(MockContainer):
         def wait(self):
             import time
-            time.sleep(10)  # will be interrupted by asyncio timeout
+            time.sleep(10)
             return {"StatusCode": 0}
 
     container = SlowContainer()
@@ -218,10 +293,9 @@ async def test_run_agent_timeout():
         runner = DockerRunner(settings)
         result = await runner.run_agent(
             agent=agent,
-            prompt="test",
             bridge_url="http://0.0.0.0:9999",
             session_token="tok-123",
-            work_dir="/tmp/hm-test",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
         )
 
     assert result.timed_out is True
@@ -231,8 +305,114 @@ async def test_run_agent_timeout():
 
 
 @pytest.mark.asyncio
+async def test_run_agent_startup_timeout():
+    class SlowStartContainers(MockContainers):
+        def run(self, **kwargs):
+            import time
+            self.run_kwargs = kwargs
+            time.sleep(3)
+            self._created_containers.append(self._container)
+            return self._container
+
+    container = MockContainer()
+    mock_client = MockDockerClient(container)
+    mock_client.containers = SlowStartContainers(container)
+
+    settings = _make_settings()
+    agent = _make_agent(timeout_seconds=1)
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        started = time.monotonic()
+        result = await runner.run_agent(
+            agent=agent,
+            bridge_url="http://0.0.0.0:9999",
+            session_token="tok-123",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
+        )
+        elapsed = time.monotonic() - started
+
+    assert result.timed_out is True
+    assert result.exit_code == -1
+    assert "startup timed out" in result.stderr.lower()
+    assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_run_agent_timeout_applies_to_network_setup():
+    container = MockContainer()
+    mock_client = MockDockerClient(container)
+
+    settings = _make_settings(enforce_bridge_only_egress=False)
+    agent = _make_agent(timeout_seconds=1)
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+
+        def slow_network():
+            time.sleep(3)
+            return settings.docker_network_name
+
+        runner._ensure_network = slow_network
+        started = time.monotonic()
+        result = await runner.run_agent(
+            agent=agent,
+            bridge_url="http://0.0.0.0:9999",
+            session_token="tok-123",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
+        )
+        elapsed = time.monotonic() - started
+
+    assert result.timed_out is True
+    assert result.exit_code == -1
+    assert "timeout budget" in result.stderr.lower()
+    assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_run_agent_logs_respect_timeout_budget():
+    class SlowLogsContainer(MockContainer):
+        def wait(self):
+            return {"StatusCode": 0}
+
+        def logs(self, stdout=True, stderr=True):
+            time.sleep(3)
+            return b""
+
+    container = SlowLogsContainer()
+    mock_client = MockDockerClient(container)
+
+    settings = _make_settings(enforce_bridge_only_egress=False)
+    agent = _make_agent(timeout_seconds=1)
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        started = time.monotonic()
+        result = await runner.run_agent(
+            agent=agent,
+            bridge_url="http://0.0.0.0:9999",
+            session_token="tok-123",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
+        )
+        elapsed = time.monotonic() - started
+
+    assert result.exit_code == 0
+    assert result.timed_out is False
+    assert "truncated" in result.stderr.lower()
+    assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
 async def test_run_agent_oom():
-    """OOM kill (exit code 137) is detected and noted in stderr."""
     container = MockContainer(exit_code=137, stdout=b"partial output", stderr=b"")
     mock_client = MockDockerClient(container)
 
@@ -246,10 +426,9 @@ async def test_run_agent_oom():
         runner = DockerRunner(settings)
         result = await runner.run_agent(
             agent=agent,
-            prompt="test",
             bridge_url="http://0.0.0.0:9999",
             session_token="tok-123",
-            work_dir="/tmp/hm-test",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
         )
 
     assert result.exit_code == 137
@@ -258,7 +437,6 @@ async def test_run_agent_oom():
 
 @pytest.mark.asyncio
 async def test_run_agent_image_not_found():
-    """Missing Docker image returns error result."""
     mock_client = MockDockerClient()
 
     import docker.errors as docker_errors
@@ -278,10 +456,9 @@ async def test_run_agent_image_not_found():
         runner = DockerRunner(settings)
         result = await runner.run_agent(
             agent=agent,
-            prompt="test",
             bridge_url="http://0.0.0.0:9999",
             session_token="tok-123",
-            work_dir="/tmp/hm-test",
+            env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
         )
 
     assert result.exit_code == -1
@@ -290,8 +467,6 @@ async def test_run_agent_image_not_found():
 
 @pytest.mark.asyncio
 async def test_cleanup_always_runs():
-    """Container is removed even if an error occurs during wait."""
-
     class ErrorContainer(MockContainer):
         def wait(self):
             raise RuntimeError("unexpected error")
@@ -310,33 +485,19 @@ async def test_cleanup_always_runs():
         with pytest.raises(RuntimeError):
             await runner.run_agent(
                 agent=agent,
-                prompt="test",
                 bridge_url="http://0.0.0.0:9999",
                 session_token="tok-123",
-                work_dir="/tmp/hm-test",
+                env={"BRIDGE_URL": "http://0.0.0.0:9999", "SESSION_TOKEN": "tok-123"},
             )
 
-    # Container should still be cleaned up
     assert container.removed is True
-
-
-def test_container_result_dataclass():
-    """ContainerResult holds all expected fields."""
-    r = ContainerResult(stdout="out", stderr="err", exit_code=0, timed_out=False)
-    assert r.stdout == "out"
-    assert r.stderr == "err"
-    assert r.exit_code == 0
-    assert r.timed_out is False
-
 
 @pytest.mark.asyncio
 async def test_network_labels():
-    """Network is created with hivemind label."""
     mock_client = MockDockerClient()
 
     settings = _make_settings()
 
-    # Make network.get raise NotFound to force creation
     import docker.errors as docker_errors
 
     def raise_not_found(name):
@@ -349,17 +510,175 @@ async def test_network_labels():
         mock_docker.errors = docker_errors
 
         runner = DockerRunner(settings)
-        # Trigger network creation
         runner._ensure_network()
 
     assert mock_client.networks.created is True
+
+
+def test_cleanup_stale_containers_skips_running():
+    running = MagicMock()
+    running.short_id = "run123"
+    running.status = "running"
+
+    exited = MagicMock()
+    exited.short_id = "exit123"
+    exited.status = "exited"
+
+    mock_client = MockDockerClient()
+    mock_client.containers.list = lambda **kw: [running, exited]
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        runner.cleanup_stale_containers()
+
+    running.remove.assert_not_called()
+    exited.remove.assert_called_once_with(force=True)
+
+
+def test_get_client_prefers_configured_docker_host():
+    mock_client = MagicMock()
+    mock_client.ping.return_value = True
+
+    settings = _make_settings(docker_host="unix:///tmp/docker.sock")
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.DockerClient.return_value = mock_client
+        mock_docker.from_env.side_effect = AssertionError(
+            "from_env should not be used when docker_host is configured"
+        )
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        client = runner._get_client()
+
+    assert client is mock_client
+    mock_docker.DockerClient.assert_called_once_with(
+        base_url="unix:///tmp/docker.sock"
+    )
+
+
+def test_get_client_falls_back_to_context_host():
+    mock_client = MagicMock()
+    mock_client.ping.return_value = True
+    context_host = "unix:///Users/test/.docker/run/docker.sock"
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker, patch(
+        "hivemind.sandbox.docker_runner.subprocess.run"
+    ) as mock_run:
+        mock_docker.from_env.side_effect = RuntimeError("no default docker socket")
+        mock_docker.DockerClient.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+        mock_run.side_effect = [
+            SimpleNamespace(stdout="desktop-linux\n"),
+            SimpleNamespace(
+                stdout=(
+                    '[{"Endpoints":{"docker":{"Host":"'
+                    + context_host
+                    + '"}}}]'
+                )
+            ),
+        ]
+
+        runner = DockerRunner(settings)
+        client = runner._get_client()
+
+    assert client is mock_client
+    mock_docker.DockerClient.assert_called_once_with(base_url=context_host)
+
+
+def test_install_bridge_only_egress_rules_builds_iptables_commands():
+    settings = _make_settings(enforce_bridge_only_egress=True)
+    runner = DockerRunner(settings)
+
+    class _Container:
+        id = "abcd1234efgh5678"
+        attrs = {
+            "NetworkSettings": {
+                "Networks": {
+                    "test-hivemind": {"IPAddress": "172.28.0.15"}
+                }
+            }
+        }
+
+        def reload(self):
+            return None
+
+    container = _Container()
+    seen: list[list[str]] = []
+
+    with patch("hivemind.sandbox.docker_runner.subprocess.run") as mock_run:
+        mock_run.side_effect = lambda cmd, **kwargs: seen.append(cmd)
+        applied = runner._install_bridge_only_egress_rules(
+            container,
+            "test-hivemind",
+            "172.28.0.1",
+            8100,
+        )
+
+    assert len(applied) == 2
+    assert seen[0][:4] == ["iptables", "-I", "DOCKER-USER", "1"]
+    assert "172.28.0.15" in seen[0]
+    assert "172.28.0.1" in seen[0]
+    assert "8100" in seen[0]
+    assert seen[1][:4] == ["iptables", "-I", "DOCKER-USER", "2"]
+    assert "-j" in seen[1] and "DROP" in seen[1]
+
+
+def test_remove_firewall_rules_converts_to_delete_specs():
+    settings = _make_settings(enforce_bridge_only_egress=True)
+    runner = DockerRunner(settings)
+    calls: list[list[str]] = []
+
+    applied = [
+        [
+            "iptables",
+            "-I",
+            "DOCKER-USER",
+            "1",
+            "-s",
+            "172.28.0.15",
+            "-d",
+            "172.28.0.1",
+            "-p",
+            "tcp",
+            "--dport",
+            "8100",
+            "-j",
+            "ACCEPT",
+        ],
+        [
+            "iptables",
+            "-I",
+            "DOCKER-USER",
+            "2",
+            "-s",
+            "172.28.0.15",
+            "-j",
+            "DROP",
+        ],
+    ]
+
+    with patch("hivemind.sandbox.docker_runner.subprocess.run") as mock_run:
+        mock_run.side_effect = lambda cmd, **kwargs: calls.append(cmd)
+        runner._remove_firewall_rules(applied)
+
+    assert calls[0][0:3] == ["iptables", "-D", "DOCKER-USER"]
+    assert "DROP" in calls[0]
+    assert calls[1][0:3] == ["iptables", "-D", "DOCKER-USER"]
+    assert "ACCEPT" in calls[1]
 
 
 # ── Image filesystem extraction tests ──
 
 
 def _make_tar(files: dict[str, str | bytes]) -> bytes:
-    """Create an in-memory tar archive from a dict of path → content."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         for path, content in files.items():
@@ -372,8 +691,6 @@ def _make_tar(files: dict[str, str | bytes]) -> bytes:
 
 
 class MockExtractionContainer:
-    """Mock container for extraction (never started)."""
-
     def __init__(self, archives: dict[str, bytes] | None = None):
         self._archives = archives or {}
         self.removed = False
@@ -382,7 +699,6 @@ class MockExtractionContainer:
         if path not in self._archives:
             import docker.errors as de
             raise de.NotFound(f"{path} not found")
-        # get_archive returns (chunks_iterator, stat_dict)
         data = self._archives[path]
         return iter([data]), {"size": len(data)}
 
@@ -402,7 +718,6 @@ class MockExtractionContainers:
 
 
 def test_extract_image_files_basic():
-    """Extracts text files from /app in the image."""
     tar_data = _make_tar({
         "app/agent.py": "import httpx\nprint('hello')\n",
         "app/lib/utils.py": "def helper(): pass\n",
@@ -428,7 +743,6 @@ def test_extract_image_files_basic():
 
 
 def test_extract_skips_binary_files():
-    """Binary files (non-UTF-8) are skipped."""
     tar_data = _make_tar({
         "app/agent.py": "print('hello')\n",
         "app/model.bin": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
@@ -452,7 +766,6 @@ def test_extract_skips_binary_files():
 
 
 def test_extract_skips_junk_dirs():
-    """Files in __pycache__, node_modules etc are skipped."""
     tar_data = _make_tar({
         "app/agent.py": "print('hello')\n",
         "app/__pycache__/agent.cpython-312.pyc": "fake bytecode",
@@ -473,14 +786,13 @@ def test_extract_skips_junk_dirs():
         files = runner.extract_image_files("test-image:v1")
 
     assert "app/agent.py" in files
-    assert len(files) == 1  # only agent.py
+    assert len(files) == 1
 
 
 def test_extract_respects_max_file_size():
-    """Individual files larger than max_file_size are skipped."""
     tar_data = _make_tar({
         "app/small.py": "x = 1\n",
-        "app/big.py": "x" * 1000,  # 1000 bytes
+        "app/big.py": "x" * 1000,
     })
     container = MockExtractionContainer(archives={"/app": tar_data})
     mock_client = MagicMock()
@@ -494,16 +806,32 @@ def test_extract_respects_max_file_size():
         mock_docker.errors = __import__("docker").errors
 
         runner = DockerRunner(settings)
-        files = runner.extract_image_files(
-            "test-image:v1", max_file_size=500,
-        )
+        files = runner.extract_image_files("test-image:v1", max_file_size=500)
 
     assert "app/small.py" in files
     assert "app/big.py" not in files
 
 
+def test_extract_respects_max_archive_size():
+    tar_data = _make_tar({"app/agent.py": "x" * 2000})
+    container = MockExtractionContainer(archives={"/app": tar_data})
+    mock_client = MagicMock()
+    mock_client.containers = MockExtractionContainers(container)
+    mock_client.containers.list = lambda **kw: []
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        files = runner.extract_image_files("test-image:v1", max_archive_size=100)
+
+    assert files == {}
+
+
 def test_extract_fallback_to_root():
-    """Falls back to / when /app doesn't exist, skipping system dirs."""
     tar_data = _make_tar({
         "home/agent/main.py": "print('root fallback')\n",
         "usr/bin/python": "not extracted",
@@ -529,8 +857,7 @@ def test_extract_fallback_to_root():
 
 
 def test_extract_cleanup_on_error():
-    """Container is removed even if extraction fails."""
-    container = MockExtractionContainer(archives={})  # no /app, no /
+    container = MockExtractionContainer(archives={})
     mock_client = MagicMock()
     mock_client.containers = MockExtractionContainers(container)
     mock_client.containers.list = lambda **kw: []
@@ -546,3 +873,65 @@ def test_extract_cleanup_on_error():
 
     assert files == {}
     assert container.removed is True
+
+
+# ── Image build tests ──
+
+
+def test_build_image_returns_tag(tmp_path):
+    """build_image should call docker build and return the tag."""
+    # Create a Dockerfile in the tmp dir
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\nCOPY . /app\n")
+    (tmp_path / "agent.py").write_text("print('hello')\n")
+
+    mock_client = MagicMock()
+    mock_client.images.build.return_value = (MagicMock(), [])
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        tag = runner.build_image(str(tmp_path), "hivemind-agent-abc123:latest")
+
+    assert tag == "hivemind-agent-abc123:latest"
+    mock_client.images.build.assert_called_once_with(
+        path=str(tmp_path), tag="hivemind-agent-abc123:latest", rm=True
+    )
+
+
+def test_build_image_rejects_missing_dockerfile(tmp_path):
+    """build_image should raise ValueError if no Dockerfile exists."""
+    (tmp_path / "agent.py").write_text("print('hello')\n")
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = MagicMock()
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        with pytest.raises(ValueError, match="No Dockerfile found"):
+            runner.build_image(str(tmp_path), "test:latest")
+
+
+@pytest.mark.asyncio
+async def test_build_image_async_returns_tag(tmp_path):
+    """Async wrapper should return the same tag."""
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n")
+
+    mock_client = MagicMock()
+    mock_client.images.build.return_value = (MagicMock(), [])
+
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        tag = await runner.build_image_async(str(tmp_path), "test:latest")
+
+    assert tag == "test:latest"

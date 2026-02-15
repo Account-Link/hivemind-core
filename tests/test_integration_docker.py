@@ -9,6 +9,7 @@ Build it with:
 """
 import json
 import sqlite3
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,8 +25,36 @@ from hivemind.tools import build_agent_file_tools
 try:
     import docker
 
-    _client = docker.from_env()
-    _client.ping()
+    def _docker_client():
+        try:
+            client = docker.from_env()
+            client.ping()
+            return client
+        except Exception:
+            try:
+                context = subprocess.run(
+                    ["docker", "context", "show"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.strip()
+                inspected = subprocess.run(
+                    ["docker", "context", "inspect", context],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                payload = json.loads(inspected.stdout)
+                host = payload[0]["Endpoints"]["docker"]["Host"]
+                client = docker.DockerClient(base_url=host)
+                client.ping()
+                return client
+            except Exception:
+                raise
+
+    _client = _docker_client()
     DOCKER_AVAILABLE = True
 except Exception:
     DOCKER_AVAILABLE = False
@@ -39,7 +68,7 @@ TEST_IMAGE = "hivemind-test-agent:latest"
 
 def _has_test_image() -> bool:
     try:
-        client = docker.from_env()
+        client = _docker_client()
         client.images.get(TEST_IMAGE)
         return True
     except Exception:
@@ -76,7 +105,6 @@ class TestExtractImageFiles:
         runner = DockerRunner(_make_settings())
         files = runner.extract_image_files(TEST_IMAGE)
 
-        # We know the test image has these files in /app
         paths = set(files.keys())
         assert any("agent.py" in p for p in paths)
         assert any("utils.py" in p for p in paths)
@@ -121,7 +149,7 @@ class TestExtractImageFiles:
         runner = DockerRunner(_make_settings())
         runner.extract_image_files(TEST_IMAGE)
 
-        client = docker.from_env()
+        client = _docker_client()
         containers = client.containers.list(
             all=True,
             filters={"label": "managed-by=hivemind"},
@@ -131,7 +159,6 @@ class TestExtractImageFiles:
     def test_max_file_size_respected(self):
         """Files larger than max_file_size are skipped."""
         runner = DockerRunner(_make_settings())
-        # Set max_file_size to 5 bytes — everything should be skipped
         files = runner.extract_image_files(TEST_IMAGE, max_file_size=5)
         assert len(files) == 0
 
@@ -160,10 +187,9 @@ class TestAgentRegistrationAPI:
         settings = Settings(
             db_path=str(tmp_path / "test.db"),
             api_key="",
-            openrouter_api_key="test",
-            sandbox_enabled=True,
-            sandbox_bridge_host="0.0.0.0",
-            sandbox_docker_network="hivemind-test-net",
+            llm_api_key="test",
+            bridge_host="0.0.0.0",
+            docker_network="hivemind-test-net",
         )
         app = create_app(settings)
         with TestClient(app) as c:
@@ -186,23 +212,19 @@ class TestAgentRegistrationAPI:
 
     def test_get_agent_does_not_leak_source(self, sandbox_client):
         """GET /v1/agents/{id} returns config but no source files."""
-        # Register
         resp = sandbox_client.post(
             "/v1/agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
         agent_id = resp.json()["agent_id"]
 
-        # Get agent
         resp = sandbox_client.get(f"/v1/agents/{agent_id}")
         assert resp.status_code == 200
         data = resp.json()
 
-        # Config fields present
         assert data["name"] == "test-agent"
         assert data["image"] == TEST_IMAGE
 
-        # Source NOT present
         assert "files" not in data
         assert "content" not in data
         assert "agent.py" not in json.dumps(data)
@@ -234,7 +256,6 @@ class TestAgentRegistrationAPI:
         resp = sandbox_client.delete(f"/v1/agents/{agent_id}")
         assert resp.status_code == 200
 
-        # Agent gone
         resp = sandbox_client.get(f"/v1/agents/{agent_id}")
         assert resp.status_code == 404
 
@@ -279,7 +300,6 @@ class TestScopingToolsWithRealFiles:
         list_tool = next(t for t in tools if t.name == "list_query_agent_files")
         read_tool = next(t for t in tools if t.name == "read_query_agent_file")
 
-        # Get the actual paths
         result = json.loads(list_tool.handler())
         agent_path = next(
             f["path"] for f in result["files"] if "agent.py" in f["path"]

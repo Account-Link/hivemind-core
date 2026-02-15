@@ -49,6 +49,42 @@ def test_create_and_get(agent_env):
     assert result.timeout_seconds == 120
 
 
+def test_upsert_updates_existing(agent_env):
+    store = agent_env
+    store.create(_make_agent("u1", "Old Name", "img/old:v1"))
+
+    updated = AgentConfig(
+        agent_id="u1",
+        name="New Name",
+        image="img/new:v2",
+        description="updated",
+        memory_mb=512,
+        max_llm_calls=7,
+        max_tokens=77_000,
+        timeout_seconds=45,
+    )
+    store.upsert(updated)
+
+    result = store.get("u1")
+    assert result is not None
+    assert result.name == "New Name"
+    assert result.image == "img/new:v2"
+    assert result.description == "updated"
+    assert result.memory_mb == 512
+    assert result.max_llm_calls == 7
+    assert result.max_tokens == 77_000
+    assert result.timeout_seconds == 45
+
+
+def test_upsert_inserts_new(agent_env):
+    store = agent_env
+    store.upsert(_make_agent("u2", "Upserted", "img/upsert:v1"))
+    result = store.get("u2")
+    assert result is not None
+    assert result.name == "Upserted"
+    assert result.image == "img/upsert:v1"
+
+
 def test_get_nonexistent(agent_env):
     store = agent_env
     assert store.get("nonexistent") is None
@@ -161,3 +197,17 @@ def test_save_files_replaces_existing(agent_env):
 
     content = store.read_file("f6", "main.py")
     assert content == "v2"
+
+
+def test_replace_files_clears_removed_paths(agent_env):
+    store = agent_env
+    store.create(_make_agent("f7"))
+    store.save_files("f7", {"a.py": "aaa", "b.py": "bbb"})
+    assert len(store.list_file_paths("f7")) == 2
+
+    store.replace_files("f7", {"a.py": "new-aaa"})
+    listing = store.list_file_paths("f7")
+    assert len(listing) == 1
+    assert listing[0]["path"] == "a.py"
+    assert store.read_file("f7", "a.py") == "new-aaa"
+    assert store.read_file("f7", "b.py") is None
