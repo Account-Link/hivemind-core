@@ -21,10 +21,7 @@ class Settings(BaseSettings):
     llm_model: str = "anthropic/claude-sonnet-4.5"
     llm_timeout_seconds: int = 45
 
-    # Sandbox backend: "docker" (local dev) or "phala" (production TEE)
-    sandbox_backend: str = "docker"
-
-    # Docker sandbox (used when sandbox_backend=docker)
+    # Docker sandbox
     bridge_host: str = "0.0.0.0"
     docker_host: str = ""
     docker_network: str = "hivemind-sandbox"
@@ -39,18 +36,7 @@ class Settings(BaseSettings):
     container_no_new_privileges: bool = True
     max_llm_calls: int = 50
     max_tokens: int = 200_000
-    agent_timeout: int = 600  # Phala CVMs need 2-3min boot + agent execution time
-
-    # Phala Cloud (used when sandbox_backend=phala)
-    phala_api_key: str = ""  # Phala Cloud API key (phak_...)
-    phala_public_url: str = ""  # Public URL of this hivemind-core instance
-
-    # Persistent agent CVM URLs (Phala mode only)
-    # Scope, index, and mediator agents run as long-lived HTTP services.
-    # Set to the CVM's public URL, e.g. https://<cvm_id>-8080.app.phala.network
-    phala_scope_url: str = ""
-    phala_index_url: str = ""
-    phala_mediator_url: str = ""
+    agent_timeout: int = 300
 
     # S3 configuration for query agent result uploads
     s3_bucket: str = ""

@@ -1,34 +1,27 @@
 # Phala Cloud Deployment Guide
 
-hivemind-core runs on Phala Cloud TEE infrastructure as multiple CVMs (Confidential Virtual Machines).
+hivemind-core runs on Phala Cloud TEE infrastructure as two CVMs (Confidential Virtual Machines).
 
 ## Architecture
 
 ```
 Postgres CVM (persistent, never redeployed unless necessary)
-├── db         — postgres:16, data on encrypted volume
-└── sql-proxy  — HTTP-to-SQL proxy, port 8080
-        │
-        │ HTTPS (Phala auto-TLS)
-        ▼
-Core CVM (can redeploy freely)
-└── hivemind-core — port 8100
-        │
-        │ HTTPS
-        ▼
-Persistent Agent CVMs (one each, long-running)
-├── scope    — port 8080
-├── index    — port 8080
-└── mediator — port 8080
-
-Ephemeral Query CVMs (created per request, auto-destroyed)
-└── query-base + injected source code
++-- db         -- postgres:16, data on encrypted volume
++-- sql-proxy  -- HTTP-to-SQL proxy, port 8080
+        |
+        | HTTPS (Phala auto-TLS)
+        v
+App CVM (can redeploy freely)
++-- hivemind-core -- port 8100
++-- dind           -- Docker-in-Docker for agent containers
 ```
+
+All agents (scope, query, index, mediator) run as Docker containers inside the App CVM.
 
 ## Prerequisites
 
 - [Phala Cloud CLI](https://docs.phala.network/developers/getting-started) installed
-- Images pushed to GHCR (via GitHub Actions `workflow_dispatch`, fill version e.g. `1.0.0`)
+- Images pushed to GHCR (via `push-ghcr.sh`)
 - Generate secrets before starting
 
 ## Step 0: Generate Secrets
@@ -46,12 +39,12 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ## Step 1: Deploy Postgres CVM
 
-Edit `deploy/phala/.env.postgres`, fill in `DB_PASS` and `SQL_PROXY_KEY`:
+Edit `deploy/phala/.env`, fill in `DB_PASS` and `SQL_PROXY_KEY`:
 
 ```bash
 phala deploy -n hivemind-pg \
   -c deploy/phala/docker-compose.postgres.yaml \
-  -e deploy/phala/.env.postgres --wait
+  -e deploy/phala/.env --wait
 ```
 
 After deploy, note the CVM ID. SQL proxy is at:
@@ -67,51 +60,24 @@ curl https://<pg_cvm_id>-8080.app.phala.network/health
 # {"status": "ok"}
 ```
 
-## Step 2: Deploy Persistent Agent CVMs
+## Step 2: Deploy App CVM
 
-These are stateless, no env file needed:
-
-```bash
-phala deploy -n hivemind-scope    -c deploy/phala/docker-compose.scope.yaml    --wait
-phala deploy -n hivemind-index    -c deploy/phala/docker-compose.index.yaml    --wait
-phala deploy -n hivemind-mediator -c deploy/phala/docker-compose.mediator.yaml --wait
-```
-
-Note each CVM's URL:
-
-```
-https://<scope_cvm_id>-8080.app.phala.network
-https://<index_cvm_id>-8080.app.phala.network
-https://<mediator_cvm_id>-8080.app.phala.network
-```
-
-## Step 3: Deploy Core CVM
-
-Edit `deploy/phala/.env.core`, fill in all URLs and keys from previous steps:
+Edit `deploy/phala/.env`, fill in the SQL proxy URL and keys:
 
 ```bash
 phala deploy -n hivemind-core \
   -c deploy/phala/docker-compose.core.yaml \
-  -e deploy/phala/.env.core --wait
+  -e deploy/phala/.env --wait
 ```
-
-> **Chicken-and-egg:** First deploy won't have `HIVEMIND_PHALA_PUBLIC_URL`.
-> Deploy once → note CVM ID → update `.env.core` → redeploy:
->
-> ```bash
-> phala deploy --cvm-id hivemind-core \
->   -c deploy/phala/docker-compose.core.yaml \
->   -e deploy/phala/.env.core --wait
-> ```
 
 Verify:
 
 ```bash
 curl -H "Authorization: Bearer <api-key>" \
-  https://<core_cvm_id>-8100.app.phala.network/health
+  https://<core_cvm_id>-8100.app.phala.network/v1/health
 ```
 
-## Step 4: Import Data
+## Step 3: Import Data
 
 ```bash
 export SQL_PROXY_URL="https://<pg_cvm_id>-8080.app.phala.network"
@@ -130,11 +96,7 @@ export SQL_PROXY_KEY="<your-proxy-secret>"
 # Redeploy core (safe, stateless)
 phala deploy --cvm-id hivemind-core \
   -c deploy/phala/docker-compose.core.yaml \
-  -e deploy/phala/.env.core --wait
-
-# Redeploy an agent (safe, stateless)
-phala deploy --cvm-id hivemind-scope \
-  -c deploy/phala/docker-compose.scope.yaml --wait
+  -e deploy/phala/.env --wait
 
 # DO NOT casually redeploy postgres (data loss!)
 ```

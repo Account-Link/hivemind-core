@@ -5,24 +5,13 @@ from .config import Settings
 from .db import Database, connect
 from .pipeline import Pipeline
 from .sandbox.agents import AgentStore
+from .sandbox.backend import _create_runner
 from .sandbox.models import AgentConfig, SandboxSettings
 from .sandbox.run_store import RunStore
 from .sandbox.settings import build_sandbox_settings
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
-
-
-def _create_runner(sandbox_settings: SandboxSettings):
-    """Create the appropriate runner for the configured backend."""
-    if sandbox_settings.backend == "phala":
-        from .sandbox.phala_runner import PhalaRunner
-
-        return PhalaRunner(sandbox_settings)
-    else:
-        from .sandbox.docker_runner import DockerRunner
-
-        return DockerRunner(sandbox_settings)
 
 
 class Hivemind:

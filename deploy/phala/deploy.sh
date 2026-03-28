@@ -3,13 +3,12 @@ set -euo pipefail
 
 # deploy.sh — Resolve image digests and deploy to Phala Cloud
 #
-# Resolves the latest digest for each image, pins docker-compose files,
-# then runs phala deploy to update the CVM.
+# Two CVMs: postgres (DB + SQL proxy) and core (hivemind + Docker agents)
 #
 # Usage:
 #   ./deploy/phala/deploy.sh                    # deploy all CVMs
 #   ./deploy/phala/deploy.sh core               # deploy only core
-#   ./deploy/phala/deploy.sh scope index        # deploy scope and index
+#   ./deploy/phala/deploy.sh postgres            # deploy only postgres
 #
 # Prerequisites:
 #   - phala CLI authenticated (phala login)
@@ -26,9 +25,6 @@ TAG="${IMAGE_TAG:-latest}"
 # CVM app IDs (update these after first deploy)
 CVM_CORE="37d4e4242a99cde0b9066dd81f854cb09e164f38"
 CVM_POSTGRES="2181af2d134123a46613f62a0311dd1f5af984be"
-CVM_SCOPE="2808148521da8034770fecb39f556d76a7948b2f"
-CVM_INDEX="573e7dca64e67f874e25ffa4dca2add5754d8ca7"
-CVM_MEDIATOR="849dfb7f617c14050123e7c44644702e50f2b99d"
 
 # ── Digest resolution ──
 
@@ -89,7 +85,7 @@ deploy_service() {
     local env_flag="${5:-}"
 
     echo ""
-    echo "━━━ Deploying ${name} ━━━"
+    echo "--- Deploying ${name} ---"
 
     # Resolve digest
     echo "  Resolving digest for ${image_name}:${TAG}..."
@@ -115,7 +111,7 @@ deploy_service() {
 
     # Cleanup temp file
     rm -f "${pinned_compose}"
-    echo "  ✅ ${name} deployed"
+    echo "  ${name} deployed"
 }
 
 deploy_postgres() {
@@ -123,7 +119,7 @@ deploy_postgres() {
     local compose="${SCRIPT_DIR}/docker-compose.postgres.yaml"
 
     echo ""
-    echo "━━━ Deploying postgres ━━━"
+    echo "--- Deploying postgres ---"
 
     local pg_pinned sql_pinned
     echo "  Resolving digests..."
@@ -141,34 +137,16 @@ deploy_postgres() {
     echo "  Compose diff:"
     diff "${compose}" "${tmp}" || true
 
-    phala deploy --cvm-id "${CVM_POSTGRES}" -c "${tmp}" -e "${SCRIPT_DIR}/.env.postgres"
+    phala deploy --cvm-id "${CVM_POSTGRES}" -c "${tmp}" -e "${SCRIPT_DIR}/.env"
     rm -f "${tmp}"
-    echo "  ✅ postgres deployed"
+    echo "  postgres deployed"
 }
 
 deploy_core() {
     deploy_service "core" "${CVM_CORE}" \
         "${SCRIPT_DIR}/docker-compose.core.yaml" \
         "hivemind-core" \
-        "${SCRIPT_DIR}/.env.core"
-}
-
-deploy_scope() {
-    deploy_service "scope" "${CVM_SCOPE}" \
-        "${SCRIPT_DIR}/docker-compose.scope.yaml" \
-        "hivemind-scope"
-}
-
-deploy_index() {
-    deploy_service "index" "${CVM_INDEX}" \
-        "${SCRIPT_DIR}/docker-compose.index.yaml" \
-        "hivemind-index"
-}
-
-deploy_mediator() {
-    deploy_service "mediator" "${CVM_MEDIATOR}" \
-        "${SCRIPT_DIR}/docker-compose.mediator.yaml" \
-        "hivemind-mediator"
+        "${SCRIPT_DIR}/.env"
 }
 
 # ── Verify health ──
@@ -180,19 +158,16 @@ check_health() {
     local status
     status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${url}" 2>/dev/null) || status="000"
     if [ "${status}" = "200" ]; then
-        echo "  ✅ ${name}: healthy (${url})"
+        echo "  ${name}: healthy (${url})"
     else
-        echo "  ⚠️  ${name}: HTTP ${status} (${url})"
+        echo "  WARNING ${name}: HTTP ${status} (${url})"
     fi
 }
 
 verify_all() {
     echo ""
-    echo "━━━ Health checks ━━━"
+    echo "--- Health checks ---"
     check_health "postgres/sql-proxy" "https://${CVM_POSTGRES}-8080.dstack-pha-prod5.phala.network/health"
-    check_health "scope"    "https://${CVM_SCOPE}-8080.dstack-pha-prod5.phala.network/health"
-    check_health "index"    "https://${CVM_INDEX}-8080.dstack-pha-prod5.phala.network/health"
-    check_health "mediator" "https://${CVM_MEDIATOR}-8080.dstack-pha-prod5.phala.network/health"
     check_health "core"     "https://${CVM_CORE}-8100.dstack-pha-prod5.phala.network/v1/health"
 }
 
@@ -200,22 +175,19 @@ verify_all() {
 
 TARGETS=("${@:-all}")
 if [ "${#TARGETS[@]}" -eq 0 ] || [ "${TARGETS[0]}" = "all" ]; then
-    TARGETS=(postgres scope index mediator core)
+    TARGETS=(postgres core)
 fi
 
-echo "🚀 Deploying: ${TARGETS[*]}"
+echo "Deploying: ${TARGETS[*]}"
 echo "   Tag: ${TAG}"
 
 for target in "${TARGETS[@]}"; do
     case "${target}" in
         core)      deploy_core ;;
         postgres)  deploy_postgres ;;
-        scope)     deploy_scope ;;
-        index)     deploy_index ;;
-        mediator)  deploy_mediator ;;
         *)
             echo "Unknown target: ${target}"
-            echo "Valid targets: core, postgres, scope, index, mediator, all"
+            echo "Valid targets: core, postgres, all"
             exit 1
             ;;
     esac
@@ -228,4 +200,4 @@ sleep 30
 verify_all
 
 echo ""
-echo "🎉 Deployment complete!"
+echo "Deployment complete!"

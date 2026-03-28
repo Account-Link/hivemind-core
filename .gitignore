@@ -18,3 +18,5 @@ venv/
 .DS_Store
 .claude
 tests/artifacts/
+
+hivemind-core-amiller-cvm-deploy-demo

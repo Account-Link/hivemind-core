@@ -26,7 +26,6 @@ from .models import (
     StoreRequest,
     StoreResponse,
 )
-from .sandbox.bridge_dispatch import get_dispatcher
 from .sandbox.settings import build_sandbox_settings
 from .version import APP_VERSION
 
@@ -169,11 +168,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Hivemind Core", version=APP_VERSION, lifespan=lifespan)
 
-    # Mount bridge dispatcher for Phala mode (remote CVMs route bridge
-    # requests through the main server, dispatched by session token).
-    if settings.sandbox_backend == "phala":
-        app.mount("/bridge", get_dispatcher())
-
     cors_origins = [
         origin.strip()
         for origin in (settings.cors_allow_origins or "").split(",")
@@ -291,7 +285,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         req: AgentCreateRequest,
         hm: Hivemind = Depends(get_hivemind),
     ):
-        from .core import _create_runner
+        from .sandbox.backend import _create_runner
 
         sandbox_settings = build_sandbox_settings(settings)
         runner = _create_runner(sandbox_settings)
@@ -403,32 +397,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
 
             agent_id = uuid4().hex[:12]
-            is_phala = settings.sandbox_backend == "phala"
 
-            if is_phala:
-                # Phala mode: store source files directly, no Docker build.
-                # PhalaRunner will bundle them into CVM env at runtime.
-                from .sandbox.backend import PHALA_QUERY_BASE_IMAGE
+            sandbox_settings = build_sandbox_settings(settings)
+            runner = _create_runner(sandbox_settings)
 
-                image_tag = PHALA_QUERY_BASE_IMAGE
-            else:
-                # Docker mode: build image locally
-                from .core import _create_runner
-
-                sandbox_settings = build_sandbox_settings(settings)
-                runner = _create_runner(sandbox_settings)
-
-                image_tag = f"hivemind-agent-{agent_id}:latest"
-                try:
-                    await runner.build_image_async(tmpdir, image_tag)
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=str(e))
-                except Exception:
-                    logger.exception("Image build failed for uploaded agent")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Image build failed",
-                    )
+            image_tag = f"hivemind-agent-{agent_id}:latest"
+            try:
+                await runner.build_image_async(tmpdir, image_tag)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception:
+                logger.exception("Image build failed for uploaded agent")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Image build failed",
+                )
 
             try:
                 config = AgentConfig(
@@ -452,12 +435,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Save source files to DB
             file_count = 0
             try:
-                if is_phala:
-                    # Read files directly from extracted archive
-                    files = _read_extracted_files(tmpdir)
-                else:
-                    # Extract from built Docker image
-                    files = await runner.extract_image_files_async(image_tag)
+                files = await runner.extract_image_files_async(image_tag)
                 await asyncio.to_thread(
                     hm.agent_store.save_files, agent_id, files
                 )
@@ -508,26 +486,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=f"Invalid archive: {e}")
 
             agent_id = uuid4().hex[:12]
-            is_phala = settings.sandbox_backend == "phala"
 
-            if is_phala:
-                from .sandbox.backend import PHALA_QUERY_BASE_IMAGE
+            sandbox_settings = build_sandbox_settings(settings)
+            runner = _create_runner(sandbox_settings)
 
-                image_tag = PHALA_QUERY_BASE_IMAGE
-            else:
-                from .core import _create_runner
-
-                sandbox_settings = build_sandbox_settings(settings)
-                runner = _create_runner(sandbox_settings)
-
-                image_tag = f"hivemind-agent-{agent_id}:latest"
-                try:
-                    await runner.build_image_async(tmpdir, image_tag)
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=str(e))
-                except Exception:
-                    logger.exception("Image build failed for uploaded query agent")
-                    raise HTTPException(status_code=500, detail="Image build failed")
+            image_tag = f"hivemind-agent-{agent_id}:latest"
+            try:
+                await runner.build_image_async(tmpdir, image_tag)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception:
+                logger.exception("Image build failed for uploaded query agent")
+                raise HTTPException(status_code=500, detail="Image build failed")
 
             try:
                 config = AgentConfig(
@@ -548,10 +518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             # Save source files to DB
             try:
-                if is_phala:
-                    files = _read_extracted_files(tmpdir)
-                else:
-                    files = await runner.extract_image_files_async(image_tag)
+                files = await runner.extract_image_files_async(image_tag)
                 await asyncio.to_thread(hm.agent_store.save_files, agent_id, files)
             except Exception as e:
                 logger.warning("Failed to save agent files for %s: %s", agent_id, e)

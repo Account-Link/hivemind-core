@@ -1,7 +1,7 @@
 # docker-compose.postgres.yaml — Phala CVM deployment for Postgres + SQL proxy
 #
 # Deploy:
-#   phala deploy -n hivemind-pg -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env.postgres --wait
+#   phala deploy -n hivemind-pg -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env --wait
 #
 # After deploy:
 #   - SQL proxy exposed at https://<cvm_id>-8080.app.phala.network

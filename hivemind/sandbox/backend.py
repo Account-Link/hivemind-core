@@ -1,9 +1,6 @@
 import asyncio
-import base64
-import io
 import logging
 import secrets
-import tarfile
 from typing import Callable
 
 from openai import AsyncOpenAI
@@ -11,66 +8,23 @@ from openai import AsyncOpenAI
 from ..tools import Tool
 from .bridge import BridgeServer
 from .budget import Budget
+from .docker_runner import DockerRunner
 from .models import AgentConfig, SandboxSettings
 
 logger = logging.getLogger(__name__)
 
-# Image used for ephemeral query CVMs when source is bundled via env var
-PHALA_QUERY_BASE_IMAGE = "ghcr.io/account-link/hivemind-query-base:latest"
 
-
-def _bundle_source_b64(files: dict[str, str]) -> str:
-    """Create a base64-encoded tar.gz archive from a dict of {path: content}."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for path, content in files.items():
-            data = content.encode("utf-8")
-            info = tarfile.TarInfo(name=path)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-# Role → SandboxSettings URL field mapping for persistent CVMs
-_PERSISTENT_ROLE_URL_FIELDS = {
-    "scope": "phala_scope_url",
-    "index": "phala_index_url",
-    "mediator": "phala_mediator_url",
-}
-
-
-def _create_runner(settings: SandboxSettings, role: str = "query"):
-    """Create the appropriate runner based on backend setting and role.
-
-    In Phala mode:
-      - scope/index/mediator with a configured URL → PersistentCvmRunner
-      - query (or roles without a URL) → PhalaRunner (ephemeral CVM)
-    In Docker mode:
-      - Always DockerRunner
-    """
-    if settings.backend == "phala":
-        url_field = _PERSISTENT_ROLE_URL_FIELDS.get(role, "")
-        persistent_url = getattr(settings, url_field, "") if url_field else ""
-        if persistent_url:
-            from .persistent_runner import PersistentCvmRunner
-
-            return PersistentCvmRunner(persistent_url)
-        else:
-            from .phala_runner import PhalaRunner
-
-            return PhalaRunner(settings)
-    else:
-        from .docker_runner import DockerRunner
-
-        return DockerRunner(settings)
+def _create_runner(settings: SandboxSettings):
+    """Create a DockerRunner for agent execution."""
+    return DockerRunner(settings)
 
 
 class SandboxBackend:
-    """Runs agent images in isolated containers (Docker or Phala CVM).
+    """Runs agent images in isolated Docker containers.
 
     Each invocation:
       1. Starts a BridgeServer (LLM proxy + tool endpoints)
-      2. Runs the agent container via the configured backend
+      2. Runs the agent container via DockerRunner
       3. Captures stdout as the agent's output
       4. Tears everything down
     """
@@ -162,8 +116,7 @@ class SandboxBackend:
     ) -> str | tuple:
         """Run the agent container and return its stdout output."""
         agent = self.agent
-        is_phala = self.settings.backend == "phala"
-        runner = _create_runner(self.settings, role)
+        runner = _create_runner(self.settings)
 
         # Resolve budget: min of agent config and global caps
         resolved_max_calls = min(
@@ -175,9 +128,6 @@ class SandboxBackend:
             self.settings.global_max_tokens,
         )
         timeout = min(agent.timeout_seconds, self.settings.global_timeout_seconds)
-        # Phala CVMs can take 3-5min to boot; enforce minimum 600s timeout
-        if is_phala:
-            timeout = max(timeout, 600)
         memory_mb = min(agent.memory_mb, self.settings.container_memory_mb)
 
         agent = agent.model_copy(
@@ -186,9 +136,6 @@ class SandboxBackend:
 
         budget = Budget(max_calls=resolved_max_calls, max_tokens=resolved_max_tokens)
         session_token = secrets.token_urlsafe(32)
-
-        # Bridge mode: "mounted" for Phala (via dispatcher), "standalone" for Docker
-        bridge_mode = "mounted" if is_phala else "standalone"
 
         bridge = BridgeServer(
             session_token=session_token,
@@ -205,40 +152,11 @@ class SandboxBackend:
             s3_uploader=s3_uploader,
             run_id=run_id,
             run_store=run_store,
-            mode=bridge_mode,
         )
 
         try:
             port = await bridge.start()
-
-            if is_phala:
-                # In Phala mode, bridge is mounted on the main server.
-                # The public URL serves as the bridge URL for the CVM.
-                public_url = self.settings.phala_public_url.rstrip("/")
-                bridge_url = f"{public_url}/bridge"
-            else:
-                bridge_url = f"http://{self.settings.bridge_host}:{port}"
-
-            # In Phala mode with ephemeral CVM: bundle agent source into env
-            # so the query-base image can extract and run it at boot time.
-            if is_phala and role == "query" and self.agent_store:
-                from .phala_runner import PhalaRunner
-
-                if isinstance(runner, PhalaRunner):
-                    files = await asyncio.to_thread(
-                        self.agent_store.get_files, agent.agent_id,
-                    )
-                    if files:
-                        source_b64 = _bundle_source_b64(files)
-                        env = {
-                            **env,
-                            "AGENT_SOURCE_B64": source_b64,
-                            "AGENT_ENTRYPOINT": agent.entrypoint or "python agent.py",
-                        }
-                        # Override image to the query-base (has boot.sh + SDK deps)
-                        agent = agent.model_copy(
-                            update={"image": PHALA_QUERY_BASE_IMAGE}
-                        )
+            bridge_url = f"http://{self.settings.bridge_host}:{port}"
 
             # Add bridge connection info to env
             full_env = {

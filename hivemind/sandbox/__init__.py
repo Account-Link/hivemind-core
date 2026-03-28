@@ -13,10 +13,3 @@ __all__ = [
     "SimulateRequest",
     "SimulateResponse",
 ]
-
-# PhalaRunner is optional — only import if phala-cloud is installed
-try:
-    from .phala_runner import PhalaRunner
-    __all__.append("PhalaRunner")
-except ImportError:
-    pass

@@ -245,7 +245,6 @@ class BridgeServer:
         s3_uploader=None,
         run_id: str | None = None,
         run_store=None,
-        mode: str = "standalone",  # "standalone" (uvicorn) or "mounted" (dispatcher)
     ):
         self.session_token = session_token
         self.tools = {t.name: t for t in tools}
@@ -260,7 +259,6 @@ class BridgeServer:
         self.s3_uploader = s3_uploader
         self.run_id = run_id
         self.run_store = run_store
-        self.mode = mode
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
         self._sock: socket.socket | None = None
@@ -647,22 +645,9 @@ class BridgeServer:
         return app
 
     async def start(self) -> int:
-        """Start the bridge server. Returns the port it's listening on.
-
-        In "mounted" mode, registers the ASGI app with the global
-        BridgeDispatcher (no uvicorn). The return value is 0 — callers
-        should use the dispatcher's public URL instead.
-        """
+        """Start the bridge server. Returns the port it's listening on."""
         app = self._build_app()
 
-        if self.mode == "mounted":
-            from .bridge_dispatch import get_dispatcher
-
-            get_dispatcher().register(self.session_token, app)
-            logger.info("Bridge session registered (mounted mode, token=...%s)", self.session_token[-6:])
-            return 0
-
-        # Standalone mode — start uvicorn on an ephemeral port
         config = uvicorn.Config(
             app,
             host=self.host,
@@ -696,13 +681,6 @@ class BridgeServer:
 
     async def stop(self):
         """Shut down the bridge server."""
-        if self.mode == "mounted":
-            from .bridge_dispatch import get_dispatcher
-
-            get_dispatcher().unregister(self.session_token)
-            logger.info("Bridge session unregistered (mounted mode)")
-            return
-
         if self._server:
             self._server.should_exit = True
         if self._task:
