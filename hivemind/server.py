@@ -123,7 +123,7 @@ button:disabled{opacity:.4;cursor:wait}
   <label>Agent Name</label>
   <input type="text" id="agent-name" placeholder="e.g. tiktok-analytics" value="tiktok-analytics">
   <label>Agent Archive (.tar.gz)</label>
-  <input type="file" id="archive" accept=".tar.gz,.tgz">
+  <input type="file" id="archive" accept=".tar.gz,.tgz,.gz,application/gzip,application/x-gzip,application/x-tar,application/x-compressed-tar">
 
   <span class="toggle-adv" onclick="document.getElementById('adv').classList.toggle('open')">&#9662; Advanced options</span>
   <div id="adv" class="adv">
