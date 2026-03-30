@@ -43,8 +43,6 @@ _SCOPE_BUILTINS: dict = {
     "zip": zip,
     "range": range,
     "isinstance": isinstance,
-    "hasattr": hasattr,
-    "getattr": getattr,
 }
 
 MAX_SCOPE_FN_LENGTH = 10_000
@@ -53,6 +51,8 @@ SCOPE_FN_TIMEOUT = 5  # seconds
 _FORBIDDEN_CALLS = frozenset({
     "exec", "eval", "compile", "__import__", "open",
     "input", "breakpoint", "exit", "quit",
+    "getattr", "setattr", "delattr", "hasattr",
+    "vars", "dir", "globals", "locals", "type",
 })
 
 
@@ -133,6 +133,13 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
                     f"Scope functions cannot access dunder attributes: "
                     f"{node.attr}"
                 )
+        # Block dunder strings in any context (e.g. getattr(x, "__class__"))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value.startswith("__") and node.value.endswith("__"):
+                raise ValueError(
+                    f"Scope functions cannot reference dunder names: "
+                    f'"{node.value}"'
+                )
 
     namespace: dict = {"__builtins__": dict(_SCOPE_BUILTINS)}
     try:
@@ -156,15 +163,38 @@ def apply_scope_fn(
 ) -> dict:
     """Apply a scope function with fail-closed semantics.
 
+    Runs the scope function in a daemon thread with a timeout to prevent
+    infinite loops from hanging the worker.
+
     Returns a dict with:
       {"allow": True, "rows": [...]} on success
       {"allow": False, "error": "..."} on denial or error
     """
-    try:
-        result = scope_fn(sql, params, rows)
-    except Exception as e:
-        logger.debug("Scope function evaluation error: %s", e)
-        return {"allow": False, "error": f"Scope function error: {e}"}
+    result_box: list = []
+    error_box: list = []
+
+    def _run() -> None:
+        try:
+            result_box.append(scope_fn(sql, params, rows))
+        except Exception as e:
+            error_box.append(e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=SCOPE_FN_TIMEOUT)
+
+    if t.is_alive():
+        logger.warning("Scope function timed out after %ss", SCOPE_FN_TIMEOUT)
+        return {"allow": False, "error": f"Scope function timed out ({SCOPE_FN_TIMEOUT}s)"}
+
+    if error_box:
+        logger.debug("Scope function evaluation error: %s", error_box[0])
+        return {"allow": False, "error": f"Scope function error: {error_box[0]}"}
+
+    if not result_box:
+        return {"allow": False, "error": "Scope function returned no result"}
+
+    result = result_box[0]
 
     if not isinstance(result, dict):
         return {"allow": False, "error": "Scope function must return a dict"}
