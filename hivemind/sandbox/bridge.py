@@ -259,6 +259,7 @@ class BridgeServer:
         self.s3_uploader = s3_uploader
         self.run_id = run_id
         self.run_store = run_store
+        self.pending_s3_uploads: list[dict] = []
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
         self._sock: socket.socket | None = None
@@ -617,30 +618,17 @@ class BridgeServer:
                     raise HTTPException(400, "Invalid base64 content")
 
                 key = f"{bridge.run_id}/{req.filename}"
-                try:
-                    s3_url = await asyncio.to_thread(
-                        bridge.s3_uploader.upload_bytes,
-                        key,
-                        data,
-                        req.content_type,
-                    )
-                except Exception as e:
-                    logger.warning("S3 upload failed for run %s: %s", bridge.run_id, e)
-                    raise HTTPException(500, f"S3 upload failed: {e}")
 
-                # Update run record
-                if bridge.run_store:
-                    try:
-                        await asyncio.to_thread(
-                            bridge.run_store.update_status,
-                            bridge.run_id,
-                            "completed",
-                            s3_url=s3_url,
-                        )
-                    except Exception as e:
-                        logger.warning("Failed to update run record: %s", e)
+                # Buffer the upload — actual S3 upload happens after mediator
+                placeholder_url = f"s3://pending/{key}"
+                bridge.pending_s3_uploads.append({
+                    "key": key,
+                    "data": data,
+                    "content_type": req.content_type,
+                    "placeholder_url": placeholder_url,
+                })
 
-                return BridgeS3UploadResponse(s3_url=s3_url)
+                return BridgeS3UploadResponse(s3_url=placeholder_url)
 
         return app
 

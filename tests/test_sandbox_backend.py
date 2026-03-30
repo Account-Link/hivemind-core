@@ -46,7 +46,7 @@ def _tools() -> list[Tool]:
 
 class _BridgeStub:
     def __init__(self, *args, **kwargs):
-        pass
+        self.pending_s3_uploads: list[dict] = []
 
     async def start(self) -> int:
         return 9999
@@ -87,6 +87,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     class _Bridge:
         def __init__(self, *args, **kwargs):
             self.kwargs = kwargs
+            self.pending_s3_uploads: list[dict] = []
 
         async def start(self) -> int:
             bridge_events["started"] += 1
@@ -109,7 +110,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     async def on_tool_call(name: str, args: dict) -> str:
         return "[]"
 
-    output, usage = await backend.run(
+    output, usage, pending_uploads = await backend.run(
         role="query",
         env={"QUERY_PROMPT": "hi", "CUSTOM_VAR": "x"},
         tools=_tools(),
@@ -124,6 +125,7 @@ async def test_backend_returns_output_and_usage_on_success(monkeypatch):
     assert usage["max_calls"] == 7
     assert usage["total_tokens"] == 0
     assert usage["max_tokens"] == 900
+    assert pending_uploads == []
     assert bridge_events == {"started": 1, "stopped": 1}
 
     run_kwargs = runner_instances[0].run_kwargs
@@ -170,13 +172,14 @@ async def test_backend_empty_output_uses_sentinel(monkeypatch):
     async def on_tool_call(name: str, args: dict) -> str:
         return "[]"
 
-    result = await backend.run(
+    output, pending_uploads = await backend.run(
         role="query",
         env={"QUERY_PROMPT": "hi"},
         tools=_tools(),
         on_tool_call=on_tool_call,
     )
-    assert result == "(Agent produced no output)"
+    assert output == "(Agent produced no output)"
+    assert pending_uploads == []
 
 
 @pytest.mark.asyncio

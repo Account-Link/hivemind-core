@@ -212,14 +212,15 @@ class SandboxBackend:
                     output = "(Agent produced no output)"
 
             tape_data = bridge.get_recorded_tape() if return_tape else None
+            pending_uploads = bridge.pending_s3_uploads
 
             if return_budget_summary and return_tape:
-                return output, budget.summary(), tape_data
+                return output, budget.summary(), tape_data, pending_uploads
             elif return_budget_summary:
-                return output, budget.summary()
+                return output, budget.summary(), pending_uploads
             elif return_tape:
-                return output, tape_data
-            return output
+                return output, tape_data, pending_uploads
+            return output, pending_uploads
 
         finally:
             await bridge.stop()

@@ -121,7 +121,7 @@ class TestRunQuery:
             async def run(self, **kwargs):
                 return json.dumps({"scope_fn": scope_fn_source}), {
                     "total_tokens": 10
-                }
+                }, []
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -157,7 +157,7 @@ class TestRunQuery:
             async def run(self, **kwargs):
                 return json.dumps({"scope_fn": "import os\ndef scope(sql, params, rows): return True"}), {
                     "total_tokens": 0
-                }
+                }, []
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -343,7 +343,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 50}
+                return expected_output, {"total_tokens": 50}, []
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -373,7 +373,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return "not valid json", {"total_tokens": 10}
+                return "not valid json", {"total_tokens": 10}, []
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -396,7 +396,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return json.dumps({"metadata": {}}), {"total_tokens": 10}
+                return json.dumps({"metadata": {}}), {"total_tokens": 10}, []
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -429,7 +429,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 5}
+                return expected_output, {"total_tokens": 5}, []
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 

@@ -178,7 +178,11 @@ class Pipeline:
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
     ):
-        """Run a Docker agent with tools and return its stdout."""
+        """Run a Docker agent with tools and return its stdout.
+
+        backend.run() always appends pending_s3_uploads as the last element.
+        This helper strips it so existing callers see the same shape as before.
+        """
         backend = SandboxBackend(
             self.llm_client,
             self.llm_model,
@@ -187,7 +191,7 @@ class Pipeline:
             agent_store=self.agent_store,
         )
 
-        return await backend.run(
+        raw = await backend.run(
             role=role,
             env=env,
             tools=tools,
@@ -201,6 +205,11 @@ class Pipeline:
             replay_tape=replay_tape,
             return_tape=return_tape,
         )
+
+        # Strip trailing pending_s3_uploads from the result
+        if isinstance(raw, tuple):
+            return raw[:-1] if len(raw) > 2 else raw[0] if len(raw) == 2 else raw
+        return raw
 
     async def _run_scope_agent(
         self,
@@ -352,16 +361,19 @@ class Pipeline:
             return_tape=return_tape,
         )
 
+        # backend.run() appends pending_s3_uploads as last tuple element;
+        # strip it here since _run_query_agent callers don't need it.
         if return_usage and return_tape:
-            output, usage, tape = run_result
+            output, usage, tape, _uploads = run_result
             return output, usage, tape
         elif return_usage:
-            output, usage = run_result
+            output, usage, _uploads = run_result
             return output, usage
         elif return_tape:
-            output, tape = run_result
+            output, tape, _uploads = run_result
             return output, {}, tape
-        return run_result
+        output, _uploads = run_result
+        return output
 
     async def _run_mediator_agent(
         self,
@@ -394,7 +406,7 @@ class Pipeline:
         async def noop_tool_call(name: str, args: dict) -> str:
             return "Error: mediator agents have no tool access"
 
-        return await backend.run(
+        output, usage, _uploads = await backend.run(
             role="mediator",
             env=env,
             tools=[],
@@ -402,6 +414,7 @@ class Pipeline:
             max_tokens=max_tokens,
             return_budget_summary=True,
         )
+        return output, usage
 
     # -- Index pipeline --
 
@@ -595,7 +608,7 @@ class Pipeline:
                 run_store=run_store,
                 return_budget_summary=True,
             )
-            query_output, query_usage = result
+            query_output, query_usage, pending_uploads = result
             used = query_usage.get("total_tokens", 0)
             remaining = max(1, remaining - used)
             await asyncio.to_thread(
@@ -641,21 +654,36 @@ class Pipeline:
                             ended_at=time.time(),
                         )
 
-            # Mark completed + save output.
-            # If agent already uploaded to S3 (bridge set status=completed),
-            # just update output. Otherwise mark completed.
-            current = await asyncio.to_thread(run_store.get, run_id)
-            if current and current["status"] == "running":
-                await asyncio.to_thread(
-                    run_store.update_status, run_id, "completed",
-                    output=(query_output or "")[:10000],
-                )
-            elif current and query_output:
-                # S3 upload already marked completed; just save output
-                await asyncio.to_thread(
-                    run_store.update_status, run_id, current["status"],
-                    output=(query_output or "")[:10000],
-                )
+            # -- Post-mediator: execute buffered S3 uploads --
+            s3_url = None
+            if pending_uploads and s3_uploader:
+                for upload in pending_uploads:
+                    placeholder = upload["placeholder_url"]
+                    try:
+                        real_url = await asyncio.to_thread(
+                            s3_uploader.upload_bytes,
+                            upload["key"],
+                            upload["data"],
+                            upload["content_type"],
+                        )
+                        s3_url = real_url
+                        # Replace placeholder in output so user gets real URL
+                        if query_output:
+                            query_output = query_output.replace(
+                                placeholder, real_url
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Deferred S3 upload failed for run %s: %s",
+                            run_id, e,
+                        )
+
+            # Mark completed + save output
+            await asyncio.to_thread(
+                run_store.update_status, run_id, "completed",
+                output=(query_output or "")[:10000],
+                **({"s3_url": s3_url} if s3_url else {}),
+            )
 
         except Exception as e:
             logger.error("Tracked query run %s failed: %s", run_id, e)
