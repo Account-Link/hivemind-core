@@ -1,0 +1,4 @@
+{"created_at_ms":1775833097294,"model":"minimax/minimax-m2.5","session_id":"session-1775833097294-0","type":"session_meta","updated_at_ms":1775833111935,"version":1}
+{"text":"test","timestamp_ms":1775833107018,"type":"prompt_history"}
+{"message":{"blocks":[{"text":"test","type":"text"}],"role":"user"},"type":"message"}
+{"message":{"blocks":[{"text":"Test received! How can I help you with your Rust project today?","type":"text"}],"role":"assistant","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":6308,"output_tokens":32}},"type":"message"}

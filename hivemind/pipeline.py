@@ -299,6 +299,7 @@ class Pipeline:
                 source = data["scope_fn"]
                 if not isinstance(source, str):
                     raise ValueError("scope_fn must be a string")
+                logger.info("Scope agent produced scope_fn:\n%s", source)
                 fn = compile_scope_fn(source)
                 return fn, usage
 
