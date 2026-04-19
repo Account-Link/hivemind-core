@@ -637,6 +637,215 @@ def _dump_cli_stderr(captured: list[str], outcome: str) -> None:
         )
 
 
+async def _run_single_scope_session(
+    user_prompt: str,
+    server,
+    attempt_label: str,
+) -> tuple[dict | None, str, int, str]:
+    """One scope session via claude-agent-sdk.
+
+    Returns (parsed, outcome, verify_call_count, full_src).
+    parsed is None on failure; outcome is a short diagnostic string;
+    full_src is the scope_fn source if parsed succeeded, else "".
+    """
+    final_result = ""
+    result_is_error = False
+    captured_stderr: list[str] = []
+    outcome = "unknown"
+    last_assistant_text = ""
+    streamed_messages: list[str] = []
+    verify_call_count = 0
+
+    print(
+        f"[scope-agent] SESSION_START attempt={attempt_label} "
+        f"prompt_len={len(user_prompt)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    try:
+        async for message in query(
+            prompt=user_prompt,
+            options=ClaudeAgentOptions(
+                system_prompt=SYSTEM_PROMPT,
+                mcp_servers={"hivemind": server},
+                permission_mode="bypassPermissions",
+                cwd="/tmp",
+                max_turns=20,
+                stderr=captured_stderr.append,
+                extra_args={"bare": None},
+            ),
+        ):
+            msg_type = type(message).__name__
+            streamed_messages.append(msg_type)
+            content = getattr(message, "content", None)
+            if isinstance(content, list):
+                for block in content:
+                    block_type = type(block).__name__
+                    text = getattr(block, "text", None)
+                    if isinstance(text, str) and text.strip():
+                        last_assistant_text = text
+                    tool_name = getattr(block, "name", None)
+                    if block_type == "ToolUseBlock" and tool_name:
+                        tool_input = getattr(block, "input", {}) or {}
+                        arg_keys = ",".join(sorted(tool_input.keys())[:5])
+                        arg_size = len(str(tool_input))
+                        print(
+                            f"[scope-agent] TOOL_USE attempt={attempt_label} "
+                            f"name={tool_name!r} arg_keys=[{arg_keys}] "
+                            f"arg_size={arg_size}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        streamed_messages[-1] += f"({block_type}:{tool_name})"
+                        if "verify_scope_fn" in tool_name:
+                            verify_call_count += 1
+                    else:
+                        streamed_messages[-1] += f"({block_type})"
+            if hasattr(message, "result"):
+                final_result = message.result
+                result_is_error = bool(getattr(message, "is_error", False))
+        outcome = "sdk-completed"
+    except Exception as exc:
+        outcome = f"sdk-crashed:{type(exc).__name__}:{exc}"
+        print(
+            f"[scope-agent] SDK exception attempt={attempt_label}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    _dump_cli_stderr(captured_stderr, outcome)
+    print(
+        f"[scope-agent] streamed_messages attempt={attempt_label} "
+        f"({len(streamed_messages)}): "
+        f"{' -> '.join(streamed_messages[:20])}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    # Parse final_result (or fall back to last_assistant_text if SDK crashed).
+    parsed = _extract_scope_json(final_result) if final_result else None
+    if parsed is None and last_assistant_text:
+        parsed = _extract_scope_json(last_assistant_text)
+        if parsed is not None:
+            print(
+                f"[scope-agent] PATH=salvage attempt={attempt_label} "
+                "(parsed last_assistant_text after crash)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    if parsed is None:
+        # Categorize why we have nothing parseable.
+        if not final_result and not last_assistant_text:
+            outcome = f"no-output:{outcome}"
+        else:
+            outcome = f"extract-failed:{outcome}"
+        return None, outcome, verify_call_count, ""
+
+    if result_is_error:
+        return None, "result_is_error", verify_call_count, ""
+
+    full_src = str(parsed.get("scope_fn", ""))
+
+    # Protocol rule: scope MUST call verify_scope_fn before emitting.
+    # If it didn't, run verify ourselves as a backstop.
+    if verify_call_count == 0:
+        print(
+            f"[scope-agent] PROTOCOL_VIOLATION attempt={attempt_label} "
+            f"verify_call_count=0 — running auto-verify",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            auto_result = await bridge_verify_scope_fn(full_src, tests=[])
+        except Exception as exc:
+            auto_result = {
+                "compiles": False,
+                "compile_error": f"auto-verify raised {type(exc).__name__}: {exc}",
+            }
+        if not bool(auto_result.get("compiles")):
+            err = auto_result.get("compile_error", "") or "no error detail"
+            print(
+                f"[scope-agent] AUTO_VERIFY_FAILED attempt={attempt_label} "
+                f"err={err[:300]!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None, f"auto-verify-failed:{err[:150]}", verify_call_count, ""
+        print(
+            f"[scope-agent] AUTO_VERIFY_PASSED attempt={attempt_label}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return parsed, "success", verify_call_count, full_src
+
+
+async def _run_scope_with_retry(
+    user_prompt: str,
+    server,
+    max_attempts: int = 2,
+) -> tuple[dict | None, str, str, str]:
+    """Run scope session with bounded retry on rejection.
+
+    On first attempt, use the normal user_prompt. On failure, prepend a
+    remediation notice describing the rejection reason and try again.
+
+    Returns (parsed, outcome, full_src, attempt_label).
+    """
+    prompt = user_prompt
+    last_outcome = "never-ran"
+    for attempt_num in range(1, max_attempts + 1):
+        label = f"{attempt_num}/{max_attempts}"
+        parsed, outcome, verify_count, full_src = await _run_single_scope_session(
+            user_prompt=prompt,
+            server=server,
+            attempt_label=label,
+        )
+        last_outcome = outcome
+        if parsed is not None:
+            return parsed, outcome, full_src, label
+
+        # Failed. Build remediation for next attempt (if any).
+        if attempt_num < max_attempts:
+            print(
+                f"[scope-agent] RETRY attempt={label} failed ({outcome}) "
+                f"— building remediation prompt for next attempt",
+                file=sys.stderr,
+                flush=True,
+            )
+            prompt = (
+                f"{user_prompt}\n\n"
+                "---\n"
+                "REMEDIATION NOTICE — YOUR PREVIOUS ATTEMPT WAS REJECTED.\n\n"
+                f"Reason: {outcome}\n\n"
+                "Common causes:\n"
+                "  - Your scope_fn had the wrong signature. It MUST be\n"
+                "    EXACTLY `def scope(sql, params, rows):`. Not\n"
+                "    `def scope_fn(...)`, not `def scope(query, results)`,\n"
+                "    not missing `rows`.\n"
+                "  - Your scope_fn returned `{'allow': False, ...}` or\n"
+                "    `{'error': ...}`. The host's AST validator rejects\n"
+                "    both. The ONLY valid return shape is\n"
+                "    `{'allow': True, 'rows': <list_of_dicts>}`.\n"
+                "  - You emitted prose, markdown, or a code block without\n"
+                "    calling `verify_scope_fn` on the source first. This\n"
+                "    is a protocol violation — you MUST call\n"
+                "    `verify_scope_fn(source, tests=...)` at least once\n"
+                "    on the exact source you plan to emit before emitting.\n\n"
+                "This is your FINAL attempt. Please:\n"
+                "  1. Draft a `def scope(sql, params, rows):` returning\n"
+                "     `{'allow': True, 'rows': [...]}`.\n"
+                "  2. Call `verify_scope_fn` on it.\n"
+                "  3. If verify returns errors, fix them and re-verify.\n"
+                "  4. Emit the final JSON `{\"scope_fn\": \"...\"}` only.\n"
+            )
+
+    return None, last_outcome, "", f"failed-all-{max_attempts}"
+
+
 async def main() -> None:
     print(
         f"[scope-agent] PATH=starting prompt_len={len(QUERY_PROMPT)}",
@@ -689,176 +898,35 @@ async def main() -> None:
             "column matches X, or collapse to an opaque count.\n"
         )
 
-    final_result = ""
-    result_is_error = False
-    captured_stderr: list[str] = []
-    outcome = "unknown"
-    # Salvage: the CLI sometimes crashes AFTER emitting the final assistant
-    # message. We record every AssistantMessage's text content as it streams
-    # in, so if the crash swallows the ResultMessage we can still parse the
-    # last assistant turn for our scope_fn JSON.
-    last_assistant_text = ""
-    streamed_messages: list[str] = []
-    # Track verify_scope_fn invocations during the session so we can catch
-    # "emit-without-verify" chain-of-thought failures post-hoc.
-    verify_call_count = 0
-
-    try:
-        async for message in query(
-            prompt=user_prompt,
-            options=ClaudeAgentOptions(
-                system_prompt=SYSTEM_PROMPT,
-                mcp_servers={"hivemind": server},
-                permission_mode="bypassPermissions",
-                cwd="/tmp",
-                max_turns=20,
-                stderr=captured_stderr.append,
-                # --bare disables: hooks, LSP, plugin sync, attribution,
-                # auto-memory, background prefetches, keychain reads, and
-                # CLAUDE.md auto-discovery. Our SYSTEM_PROMPT is already
-                # complete — bare mode prevents Claude Code from layering
-                # its own defaults on top and producing a more-conservative
-                # behavior than we asked for.
-                extra_args={"bare": None},
-            ),
-        ):
-            msg_type = type(message).__name__
-            streamed_messages.append(msg_type)
-            # Accumulate text from AssistantMessage content blocks.
-            content = getattr(message, "content", None)
-            if isinstance(content, list):
-                for block in content:
-                    block_type = type(block).__name__
-                    text = getattr(block, "text", None)
-                    if isinstance(text, str) and text.strip():
-                        last_assistant_text = text
-                    # Telemetry: log the tool NAME (not just "ToolUseBlock")
-                    # so we can see which superpowers scope actually invokes.
-                    # ToolUseBlock has .name; ToolResultBlock has .content;
-                    # TextBlock has .text.
-                    tool_name = getattr(block, "name", None)
-                    if block_type == "ToolUseBlock" and tool_name:
-                        # Capture an argument summary without dumping full
-                        # payloads (could be large for scope_fn sources).
-                        tool_input = getattr(block, "input", {}) or {}
-                        arg_keys = ",".join(sorted(tool_input.keys())[:5])
-                        arg_size = len(str(tool_input))
-                        print(
-                            f"[scope-agent] TOOL_USE name={tool_name!r} "
-                            f"arg_keys=[{arg_keys}] arg_size={arg_size}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        streamed_messages[-1] += f"({block_type}:{tool_name})"
-                        # Protocol-rule tracking: count verify_scope_fn calls.
-                        if "verify_scope_fn" in tool_name:
-                            verify_call_count += 1
-                    else:
-                        streamed_messages[-1] += f"({block_type})"
-            if hasattr(message, "result"):
-                final_result = message.result
-                result_is_error = bool(getattr(message, "is_error", False))
-        outcome = "sdk-completed"
-    except Exception as exc:
-        outcome = f"sdk-crashed:{type(exc).__name__}:{exc}"
-        print(
-            f"[scope-agent] SDK exception: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    # CRITICAL DIAGNOSTIC: always dump captured CLI stderr.
-    _dump_cli_stderr(captured_stderr, outcome)
-
-    # Log the stream of messages we actually saw, so we can tell at what
-    # point the CLI died (e.g. did we even get an AssistantMessage?).
-    print(
-        f"[scope-agent] streamed_messages ({len(streamed_messages)}): "
-        f"{' -> '.join(streamed_messages[:20])}",
-        file=sys.stderr,
-        flush=True,
+    # Run the scope session. First attempt uses the normal user_prompt;
+    # on rejection (bad extract or failed auto-verify), retry ONCE with a
+    # remediation prompt explaining the rejection reason. This catches the
+    # deny-first chain-of-thought failure where scope emits a bad-shaped
+    # scope_fn without calling verify_scope_fn. Second attempt gets
+    # explicit feedback about what went wrong and another shot.
+    parsed, outcome, full_src, attempt_label = await _run_scope_with_retry(
+        user_prompt=user_prompt,
+        server=server,
+        max_attempts=2,
     )
-    if last_assistant_text:
-        preview = last_assistant_text[:400].replace("\n", "\\n")
+
+    if parsed is not None:
+        flat_src = full_src.replace("\n", "\\n")
         print(
-            f"[scope-agent] last_assistant_text len={len(last_assistant_text)} "
-            f"preview={preview!r}",
+            f"[scope-agent] PATH=success attempt={attempt_label} "
+            f"scope_fn_full len={len(full_src)} src={flat_src}",
             file=sys.stderr,
             flush=True,
         )
-    else:
-        print(
-            "[scope-agent] last_assistant_text was empty",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(json.dumps(parsed))
+        return
 
-    # Even if SDK crashed, we may have a partial final_result from an
-    # earlier ResultMessage OR a captured last_assistant_text. Try both.
-    parsed = _extract_scope_json(final_result) if final_result else None
-    if parsed is None and last_assistant_text:
-        parsed = _extract_scope_json(last_assistant_text)
-        if parsed is not None:
-            print(
-                "[scope-agent] PATH=salvage (parsed last_assistant_text after crash)",
-                file=sys.stderr,
-                flush=True,
-            )
-    if parsed is not None and not result_is_error:
-        full_src = str(parsed.get("scope_fn", ""))
-        # Protocol rule: scope MUST call verify_scope_fn before emitting.
-        # If it didn't, run verify ourselves as a backstop. Catches the
-        # "deny-first chain-of-thought" failure mode where scope reasons
-        # straight from policy to emit without touching the validator.
-        if verify_call_count == 0:
-            print(
-                f"[scope-agent] PROTOCOL_VIOLATION verify_call_count=0 "
-                f"— running auto-verify on emitted scope_fn",
-                file=sys.stderr,
-                flush=True,
-            )
-            try:
-                auto_result = await bridge_verify_scope_fn(full_src, tests=[])
-            except Exception as exc:
-                auto_result = {
-                    "compiles": False,
-                    "compile_error": f"auto-verify raised {type(exc).__name__}: {exc}",
-                }
-            compiles = bool(auto_result.get("compiles"))
-            if not compiles:
-                err = auto_result.get("compile_error", "") or "no error detail"
-                print(
-                    f"[scope-agent] AUTO_VERIFY_FAILED err={err[:300]!r} "
-                    f"— rejecting emit (falling through to emit-failure)",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                outcome = f"auto-verify-failed:{err[:120]}"
-                parsed = None
-            else:
-                print(
-                    "[scope-agent] AUTO_VERIFY_PASSED "
-                    f"— accepting emit despite no in-session verify_scope_fn call",
-                    file=sys.stderr,
-                    flush=True,
-                )
-        # Re-check parsed (auto-verify may have cleared it) before emit.
-        if parsed is not None:
-            flat_src = full_src.replace("\n", "\\n")
-            print(
-                f"[scope-agent] PATH=success scope_fn_full len={len(full_src)} "
-                f"verify_calls={verify_call_count} src={flat_src}",
-                file=sys.stderr,
-                flush=True,
-            )
-            print(json.dumps(parsed))
-            return
-
-    # Emit-failure. Use a DENY-ALL scope_fn so the query agent surfaces
-    # a clear failure instead of silently returning whatever it likes.
-    reason = outcome if not parsed else "parsed JSON but result_is_error=True"
+    # Emit-failure after all retries exhausted. Fall back to a safe
+    # marker scope_fn so the query agent and mediator can produce a
+    # clear "content redacted by policy" response rather than garbage.
     print(
-        f"[scope-agent] PATH=emit-failure REASON={reason[:200]}",
+        f"[scope-agent] PATH=emit-failure attempt={attempt_label} "
+        f"REASON={outcome[:200]}",
         file=sys.stderr,
         flush=True,
     )
