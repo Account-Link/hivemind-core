@@ -298,90 +298,62 @@ The query agent will write a graceful reply acknowledging the question,
 noting the redaction, and reporting the count if safe to share.
 
 ## Pattern E — row filter (exclusion)
-When the policy describes a ROW-LEVEL predicate — "only rows where X",
-"within last N days", "not about topic Y", "from source Z only" — the
-presence or absence of the whole row is the privacy signal, not which
-fields it carries. Filter rows by the predicate and return only the
-qualifying ones.
+When the policy selects a subset of rows based on a row-level predicate
+("only rows where X", "within last N days", "not about Y", "from Z only"),
+the presence of a disqualified row leaks. Redacting fields is not
+enough — you must drop the row.
+
+Worked example — policy: "Only conversations from the last 30 days"
 
     def scope(sql, params, rows):
-        def qualifies(r):
-            # derive the predicate from POLICY_CONTEXT:
-            #   date within allowed window,
-            #   content not matching blocked topic terms,
-            #   source in allowed set, etc.
-            ...
-            return True / False
+        # Derive the cutoff FROM THE DATA, not from a hard-coded "now".
+        # The host may have old test data; computing cutoff as
+        # (max row date) - 30 days keeps the predicate meaningful.
+        dates = [r.get("date") for r in rows if r.get("date")]
+        if not dates:
+            return {"allow": True, "rows": rows}  # nothing date-shaped
+        max_date = max(str(d) for d in dates)  # lex-sort ISO works
+        # 30 days earlier — simple string math when dates are YYYY-MM-DD
+        y, m, d = max_date[:10].split("-")
+        cutoff_month = int(m); cutoff_year = int(y)
+        if int(d) < 30:
+            cutoff_month -= 1
+            if cutoff_month < 1: cutoff_month = 12; cutoff_year -= 1
+        cutoff = f"{cutoff_year:04d}-{cutoff_month:02d}-{d}"
 
-        kept = [r for r in rows if qualifies(r)]
-        if not kept:
-            # don't leak "there are zero rows" either — Pattern D marker
-            return {"allow": True, "rows": [{
-                "policy_note": "no rows match the allowed scope",
-                "match_count": 0,
-            }]}
+        kept = [r for r in rows if str(r.get("date", "")) >= cutoff]
         return {"allow": True, "rows": kept}
 
-Row filtering can be COMPOSED with Pattern B (redact fields on the
-rows that survive the filter) when the policy has both an exclusion
-predicate AND a sensitive-field rule.
+Notice: this does NOT emit an empty-marker row if `kept` is empty.
+A genuinely empty result is a valid answer ("nothing in the last 30
+days"). Marker-emission here would DESTROY utility by silently
+collapsing a legitimate empty result into opaque note.
 
-# CHOOSING A PATTERN
+Compose with Pattern B when the policy ALSO restricts VALUES in the
+rows that survive the row filter ("last 30 days + redact names").
+Apply E first, then B on `kept`.
 
-Two questions, in order:
+# CHOOSING A PATTERN — simple rules
 
-(1) What KIND of constraint is the policy? Classify the POLICY_CONTEXT
-    before picking a pattern. Same schema + same question may need a
-    different pattern depending on policy type.
-
-  TYPE-V  — VALUE-REDACT
-    Signal words: "block <value-class>", "strip <credential>",
-    "mask <PII>", "no <thing> in output". The policy names a VALUE
-    category (names, emails, code blocks, $amounts, tokens). The ROW
-    is fine; specific field contents are not.
-    → Pattern B (redact fields) or D (marker row for extraction).
-
-  TYPE-R  — ROW-EXCLUDE
-    Signal words: "only <predicate>", "within last <window>",
-    "about <topic>", "not <category>", "from <source>", "since
-    <date>". The policy names a ROW PREDICATE — the entire record
-    either qualifies or doesn't. Redacting fields isn't enough; the
-    mere presence of a disqualified row leaks.
-    → Pattern E (row filter), possibly composed with B for residual
-      value-redaction on the rows that survive.
-
-  TYPE-A  — AGGREGATE-ONLY
-    Signal words: "only counts", "aggregate statistics", "summary
-    only", "no individual records", "bucketed". The policy forbids
-    individual-level detail regardless of redaction.
-    → Pattern C (collapse to aggregate).
-
-  A single policy can be a composition — e.g. "only conversations
-  from the last 30 days, and strip names from those" = TYPE-R + TYPE-V
-  → Pattern E then B on the survivors.
-
-(2) Given the type, which specific row-output shape fits the user's
-    question?
+Read the user's question, the POLICY (if any), and a row sample.
+Pick one primary pattern; compose if needed.
 
   - Aggregate question ("how many X?") with aggregate rows → Pattern A
-  - Listing-style under TYPE-V with free-text identifier columns →
-    Pattern B (redact) or C (collapse to count)
-  - Listing-style under TYPE-R → Pattern E (filter) + B as needed
-  - Explicit extraction attempt ("list the emails", "what names",
-    "show messages containing @") regardless of type → Pattern D
+  - Policy blocks specific VALUES in free-text (names, emails, $ amounts,
+    code, tokens) → Pattern B (redact fields) or C (collapse to counts)
+  - Policy selects specific ROWS ("only X", "within window Y",
+    "not about Z") → Pattern E (filter). Compose with B if values
+    inside surviving rows also need redaction.
+  - User is clearly extracting individuals ("list the emails",
+    "what names", "show messages matching @") → Pattern D (marker)
+  - Pure aggregation-only policy ("summary only, no individual records")
+    → Pattern C regardless of question shape
 
-When in doubt between B and C: prefer C. A count is always safe;
-partial redaction can leak if done incompletely. When in doubt about
-policy type: sample rows via execute_sql. If the policy speaks of
-"rows / conversations / records / windows / topics", it's TYPE-R.
-If it speaks of "values / content / fields / identifiers", it's TYPE-V.
-
-For policies you don't have a pre-written pattern for (temporal windows,
-topic filters, custom categorization, etc.) — READ THE POLICY CAREFULLY
-and translate its constraint into row-level logic using the same
-primitives (filter rows, redact fields, collapse to aggregate, emit
-marker). Don't wait for a pattern label that matches your exact case;
-the patterns above are starting points, not an exhaustive list.
+When in doubt between B and C: prefer C (counts are always safe,
+partial redaction leaks if incomplete).
+When writing a Pattern E filter: sample rows via execute_sql FIRST to
+check how many would pass. If >90% would be dropped, inspect your
+predicate — you are probably over-filtering.
 
 # SAMPLE-FIRST, DETECT-SECOND — the "semantic lift" meta-skill
 
