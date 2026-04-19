@@ -104,7 +104,12 @@ async def simulate_tool(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
 
-SCOPE_TOOLS = [verify_tool, simulate_tool]
+# Ablation toggles for overnight/matrix experiments. In production all
+# tools are enabled; unit tests set these to isolate contributions.
+_DISABLE_SIMULATE = os.environ.get("HIVEMIND_DISABLE_SIMULATE", "").lower() in ("1", "true", "yes")
+SCOPE_TOOLS = [verify_tool]
+if not _DISABLE_SIMULATE:
+    SCOPE_TOOLS.append(simulate_tool)
 server = create_hivemind_server(extra_tools=SCOPE_TOOLS)
 
 
@@ -468,6 +473,13 @@ A leak cannot be un-leaked. Aim for USEFUL + SAFE — the transform that
 preserves the most ANSWER while leaking the least INDIVIDUAL-CONTENT.
 """
 
+
+# Ablation toggle: drop the SAMPLE-FIRST / semantic-lift section.
+# Used in the overnight matrix to isolate sem-lift's contribution.
+if os.environ.get("HIVEMIND_DISABLE_SEMLIFT", "").lower() in ("1", "true", "yes"):
+    _sem_marker = '# SAMPLE-FIRST, DETECT-SECOND'
+    if _sem_marker in SYSTEM_PROMPT:
+        SYSTEM_PROMPT = SYSTEM_PROMPT[:SYSTEM_PROMPT.index(_sem_marker)].rstrip() + "\n"
 
 # Override with external prompt file if present (CLI-fused agents)
 _PROMPT_FILE = Path("/app/prompt.md")
