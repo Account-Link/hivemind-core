@@ -1,30 +1,61 @@
 """Hivemind autoresearch live dashboard.
 
 Serves a single-page UI + JSON APIs that expose bench + iter state.
-Bind to 127.0.0.1:8200 by default; access via SSH tunnel or reverse proxy.
+Binds 0.0.0.0:9999 by default; requires login password (no username).
 
 Usage:
-    PYTHONUNBUFFERED=1 .venv/bin/python -m watch.dashboard
+    WATCH_PASSWORD=... PYTHONUNBUFFERED=1 .venv/bin/python -m watch.dashboard
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
+import secrets
 import subprocess
 import time
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Cookie, FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 REPO = Path(__file__).resolve().parent.parent
 RESULTS_TSV = REPO / "autoresearch" / "results.tsv"
 BENCH_RESULTS_DIR = REPO / "bench" / "results"
 SERVER_LOG = Path("/tmp/server.log")
 
+PASSWORD = os.environ.get("WATCH_PASSWORD", "REDACTED")
+COOKIE_NAME = "watch_session"
+COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+# Issued tokens are kept in-memory; reboot invalidates sessions.
+_VALID_TOKENS: set[str] = set()
+
 app = FastAPI(title="hivemind-watch")
+
+
+def _check_auth(token: str | None) -> bool:
+    if not token:
+        return False
+    for t in _VALID_TOKENS:
+        if hmac.compare_digest(t, token):
+            return True
+    return False
+
+
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    # Allow login endpoints unconditionally.
+    if request.url.path in {"/login", "/logout"} or request.url.path.startswith("/static/"):
+        return await call_next(request)
+    token = request.cookies.get(COOKIE_NAME)
+    if _check_auth(token):
+        return await call_next(request)
+    # JSON endpoints get 401; HTML navigates to /login.
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return RedirectResponse(url="/login", status_code=302)
 
 
 def _tail(path: Path, n: int = 50) -> list[str]:
@@ -441,9 +472,82 @@ def index() -> HTMLResponse:
     return HTMLResponse(HTML)
 
 
+LOGIN_HTML = """<!doctype html>
+<html lang=en><head><meta charset=utf-8><title>hivemind · login</title>
+<style>
+ :root { color-scheme: dark; }
+ body { margin: 0; font: 14px/1.5 ui-monospace, Menlo, monospace;
+        background: #0e0f13; color: #d3d7de;
+        display: flex; align-items: center; justify-content: center;
+        height: 100vh; }
+ form { background: #151820; border: 1px solid #24262d; border-radius: 8px;
+        padding: 28px 32px; min-width: 280px;
+        box-shadow: 0 4px 24px rgba(0,0,0,.4); }
+ h1 { margin: 0 0 18px; font-size: 13px; letter-spacing: 1px;
+      text-transform: uppercase; color: #7f8899; font-weight: 600; }
+ input[type=password] { width: 100%; padding: 10px 12px;
+        background: #0e0f13; border: 1px solid #24262d; border-radius: 4px;
+        color: #fff; font: inherit; }
+ input[type=password]:focus { outline: none; border-color: #5f7cff; }
+ button { width: 100%; margin-top: 12px; padding: 10px;
+          background: #5f7cff; border: none; border-radius: 4px;
+          color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+ button:hover { background: #7490ff; }
+ .err { margin-top: 10px; color: #e65858; font-size: 12px; min-height: 1em; }
+</style></head><body>
+<form method=post action=/login>
+ <h1>hivemind · autoresearch</h1>
+ <input type=password name=password placeholder=password autofocus required>
+ <button type=submit>enter</button>
+ <div class=err>{error}</div>
+</form></body></html>"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request) -> HTMLResponse:
+    # If already authenticated, bounce to dashboard.
+    if _check_auth(request.cookies.get(COOKIE_NAME)):
+        return HTMLResponse(
+            '<meta http-equiv="refresh" content="0; url=/">', status_code=200
+        )
+    return HTMLResponse(LOGIN_HTML.replace("{error}", ""))
+
+
+@app.post("/login")
+def login_submit(password: str = Form(...)) -> Response:
+    if not hmac.compare_digest(password, PASSWORD):
+        # Small delay to dampen brute-force.
+        time.sleep(0.5)
+        return HTMLResponse(
+            LOGIN_HTML.replace("{error}", "wrong password"),
+            status_code=401,
+        )
+    token = secrets.token_urlsafe(32)
+    _VALID_TOKENS.add(token)
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.set_cookie(
+        COOKIE_NAME,
+        token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+    )
+    return resp
+
+
+@app.get("/logout")
+def logout(request: Request) -> Response:
+    token = request.cookies.get(COOKIE_NAME)
+    if token:
+        _VALID_TOKENS.discard(token)
+    resp = RedirectResponse(url="/login", status_code=302)
+    resp.delete_cookie(COOKIE_NAME)
+    return resp
+
+
 def main() -> None:
-    host = os.environ.get("WATCH_HOST", "127.0.0.1")
-    port = int(os.environ.get("WATCH_PORT", "8200"))
+    host = os.environ.get("WATCH_HOST", "0.0.0.0")
+    port = int(os.environ.get("WATCH_PORT", "9999"))
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
