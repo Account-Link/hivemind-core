@@ -20,3 +20,8 @@ venv/
 tests/artifacts/
 
 hivemind-core-amiller-cvm-deploy-demo
+
+bench/results/
+autoresearch/experiments/
+/tmp/iter*_*.txt
+*_bench.log

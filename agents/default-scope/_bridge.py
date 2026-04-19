@@ -53,11 +53,57 @@ async def bridge_simulate(
         async with session.post(
             f"{BRIDGE_URL}/sandbox/simulate",
             json=payload,
-            headers={"Authorization": f"Bearer {SESSION_TOKEN}"},
+            headers={
+                "Authorization": f"Bearer {SESSION_TOKEN}",
+                # Telemetry tag: lets the bridge attribute sim calls to
+                # the MCP surface (this function) vs the Bash surface
+                # (play.py), so we can see which one scope actually prefers.
+                "X-Simulate-Caller": "mcp",
+            },
         ) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
+
+
+async def bridge_verify_scope_fn(
+    source: str,
+    tests: list[dict] | None = None,
+) -> dict:
+    """Call the sandbox verify_scope_fn endpoint.
+
+    Returns dict like:
+      {"compiles": bool, "compile_error": str|None,
+       "all_tests_passed": bool, "results": [...]}
+    On transport error returns a compiles=False shaped dict so callers don't crash.
+    """
+    payload: dict[str, Any] = {
+        "source": source,
+        "tests": tests or [],
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=_BRIDGE_TIMEOUT) as session:
+            async with session.post(
+                f"{BRIDGE_URL}/sandbox/verify_scope_fn",
+                json=payload,
+                headers={"Authorization": f"Bearer {SESSION_TOKEN}"},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    return {
+                        "compiles": False,
+                        "compile_error": f"HTTP {resp.status}: {text[:300]}",
+                        "all_tests_passed": False,
+                        "results": [],
+                    }
+                return await resp.json()
+    except Exception as e:
+        return {
+            "compiles": False,
+            "compile_error": f"Bridge error: {e}",
+            "all_tests_passed": False,
+            "results": [],
+        }
 
 
 # ── Standard MCP tool definitions ──

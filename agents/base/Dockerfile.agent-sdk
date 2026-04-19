@@ -7,11 +7,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude Code CLI (latest; diagnostic bump from 2.1.109 → 2.1.112+)
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Install Python Agent SDK + aiohttp for bridge tool calls
-RUN pip install --no-cache-dir claude-agent-sdk aiohttp
+# (diagnostic bump to pick up 0.1.61+ message-reader fixes)
+RUN pip install --no-cache-dir --upgrade "claude-agent-sdk>=0.1.61" aiohttp
 
 RUN useradd -m -s /bin/bash agent
 

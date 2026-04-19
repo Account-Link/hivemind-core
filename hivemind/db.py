@@ -34,7 +34,12 @@ class Database:
 
     def __init__(self, dsn: str):
         self._dsn = dsn
-        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+        # autocommit=True: each statement is its own transaction. psycopg
+        # auto-rolls-back on failure, so a single SQL error can't poison the
+        # shared connection with InFailedSqlTransaction (which would 500 every
+        # subsequent request). All writes in this codebase are single-statement
+        # so we lose nothing by dropping implicit transactions.
+        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
         self._lock = threading.RLock()
         self._bootstrap()
 

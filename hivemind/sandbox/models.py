@@ -37,7 +37,7 @@ class SandboxSettings(BaseModel):
 
     # Shared limits
     global_max_llm_calls: int = Field(default=50, ge=1)
-    global_max_tokens: int = Field(default=200_000, ge=1)
+    global_max_tokens: int = Field(default=300_000, ge=1)
     global_timeout_seconds: int = Field(default=300, ge=1)
 
 
@@ -132,6 +132,47 @@ class SimulateResponse(BaseModel):
 
     output: str
     tape: list[dict] | None = None  # recorded tape from this run
+
+
+# ── Verify scope_fn models (scope agents only) ──
+
+
+class ScopeTestCase(BaseModel):
+    """One synthetic test for a candidate scope_fn."""
+
+    sql: str
+    params: list = Field(default_factory=list)
+    rows: list[dict] = Field(default_factory=list)
+    expect_allow: bool | None = None  # None = don't assert, just record outcome
+    label: str = ""  # human-readable name
+
+
+class VerifyScopeRequest(BaseModel):
+    """Request to POST /sandbox/verify_scope_fn — compile and test a scope_fn."""
+
+    source: str
+    tests: list[ScopeTestCase] = Field(default_factory=list)
+
+
+class ScopeTestResult(BaseModel):
+    """Outcome of running a single test case against a compiled scope_fn."""
+
+    label: str = ""
+    sql: str
+    allow: bool | None = None
+    error: str | None = None
+    rows_returned: int = 0
+    expected_allow: bool | None = None
+    passed: bool | None = None  # None if no expectation provided
+
+
+class VerifyScopeResponse(BaseModel):
+    """Response from POST /sandbox/verify_scope_fn."""
+
+    compiles: bool
+    compile_error: str | None = None
+    all_tests_passed: bool = True  # True if every test with an expectation met it
+    results: list[ScopeTestResult] = Field(default_factory=list)
 
 
 # ── S3 upload models (query agents with run tracking) ──

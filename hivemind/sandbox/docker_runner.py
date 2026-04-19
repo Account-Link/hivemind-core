@@ -412,6 +412,7 @@ class DockerRunner:
         bridge_url: str,
         session_token: str,
         env: dict[str, str] | None = None,
+        extra_volumes: dict[str, dict[str, str]] | None = None,
     ) -> ContainerResult:
         """Run an agent Docker container.
 
@@ -507,6 +508,10 @@ class DockerRunner:
                 }
                 # Claude Code CLI requires a writable cwd for session files
                 run_kwargs["working_dir"] = "/tmp"
+            if extra_volumes:
+                # extra_volumes format matches Docker SDK's volumes= kwarg:
+                #   {"/host/abs/path": {"bind": "/container/path", "mode": "ro"}}
+                run_kwargs["volumes"] = dict(extra_volumes)
             if self.settings.container_drop_all_caps:
                 run_kwargs["cap_drop"] = ["ALL"]
             if security_opt:

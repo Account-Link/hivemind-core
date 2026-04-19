@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     container_drop_all_caps: bool = True
     container_no_new_privileges: bool = True
     max_llm_calls: int = 50
-    max_tokens: int = 200_000
+    max_tokens: int = 300_000
     agent_timeout: int = 300
 
     # S3 configuration for query agent result uploads

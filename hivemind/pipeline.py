@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Callable
 
 from openai import AsyncOpenAI
@@ -26,7 +27,17 @@ from .tools import AccessLevel, build_agent_file_tools, build_sql_tools
 logger = logging.getLogger(__name__)
 
 MEDIATOR_MIN_TOKENS = 128
-MEDIATOR_TOKEN_RESERVE = 512
+# A single Claude Code CLI call to the mediator sends ~15-25k tokens
+# (system prompt + raw_output + question). Reserving only 512 tokens
+# starves the mediator and triggers a 429 → SDK crash. 30k gives
+# comfortable headroom for at least one full mediator call.
+MEDIATOR_TOKEN_RESERVE = 30_000
+# Scope is capped to a fraction of the global budget so it cannot starve
+# the downstream query + mediator agents. A single Claude Code CLI call
+# typically sends ~20-25k tokens in its first request (system prompt + tools
+# + context) — if scope consumes the whole budget the bridge returns 429 to
+# query's very first call and the SDK subprocess exits with code 1.
+SCOPE_BUDGET_FRACTION = 0.5
 
 
 class Pipeline:
@@ -84,17 +95,19 @@ class Pipeline:
 
         # Stage 0: Scope resolution → produces a scope_fn
         scope_fn = None
+        scope_fn_source = ""
+        scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
 
         if req.scope_agent_id:
-            scope_fn, scope_usage = await self._run_scope_agent(
-                req, max_tokens=remaining,
+            scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
+                req, max_tokens=scope_budget,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
             remaining = max(1, remaining - used)
         elif self.settings.default_scope_agent:
-            scope_fn, scope_usage = await self._run_scope_agent(
-                req, max_tokens=remaining,
+            scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
+                req, max_tokens=scope_budget,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -119,6 +132,7 @@ class Pipeline:
             query_agent_id=query_agent_id,
             prompt=req.query,
             scope_fn=scope_fn,
+            scope_fn_source=scope_fn_source,
             max_tokens=query_max_tokens,
             return_usage=True,
         )
@@ -180,6 +194,7 @@ class Pipeline:
         return_budget_summary: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
+        extra_volumes: dict[str, dict[str, str]] | None = None,
     ):
         """Run a Docker agent with tools and return its stdout.
 
@@ -207,6 +222,7 @@ class Pipeline:
             return_budget_summary=return_budget_summary,
             replay_tape=replay_tape,
             return_tape=return_tape,
+            extra_volumes=extra_volumes,
         )
 
         # Strip trailing pending_s3_uploads from the result
@@ -218,8 +234,14 @@ class Pipeline:
         self,
         req: QueryRequest,
         max_tokens: int | None = None,
-    ) -> tuple[Callable, dict]:
-        """Run scope agent to produce a scope function. Returns (scope_fn, usage)."""
+    ) -> tuple[Callable, str, dict]:
+        """Run scope agent to produce a scope function.
+
+        Returns (scope_fn, scope_fn_source, usage). The source text is
+        forwarded to the query agent so it knows what the privacy filter
+        expects and can write SQL that matches — without this, query
+        keeps guessing patterns and hitting allow=False.
+        """
         scope_agent_id = req.scope_agent_id or self.settings.default_scope_agent
         agent_config = await asyncio.to_thread(
             self.agent_store.get, scope_agent_id
@@ -251,6 +273,7 @@ class Pipeline:
                 query_agent_id=query_agent_id,
                 prompt=prompt,
                 scope_fn=sim_scope_fn,
+                scope_fn_source=scope_fn_source,
                 max_calls=max_calls,
                 max_tokens=max_tokens,
                 return_usage=True,
@@ -261,6 +284,10 @@ class Pipeline:
         env = {
             "QUERY_PROMPT": req.query,
             "QUERY_AGENT_ID": query_agent_id or "",
+            # Pass the privacy/utility policy through so scope can design
+            # its scope_fn around the caller's intent. Empty string when
+            # no policy is specified.
+            "POLICY_CONTEXT": (req.policy or "") if hasattr(req, "policy") else "",
         }
 
         # Scope agents get FULL_READ access
@@ -279,6 +306,23 @@ class Pipeline:
                 return f"Error: unknown tool '{name}'. Available: {', '.join(tool_handlers)}"
             return await asyncio.to_thread(tool_handlers[name], **args)
 
+        # iter 19 experiment: filesystem mount RE-ENABLED.
+        # Scope can read query agent source via /workspace/query-agent/ (RO).
+        # Enables the save/load-NPC workflow: read the query agent's prompt,
+        # draft a scope_fn, simulate the query agent via play.py, revise.
+        scope_volumes: dict[str, dict[str, str]] | None = None
+        if query_agent_id and query_agent_id.startswith("default-"):
+            repo_root = Path(__file__).resolve().parent.parent
+            src_dir = repo_root / "agents" / query_agent_id
+            if src_dir.is_dir():
+                scope_volumes = {
+                    str(src_dir): {"bind": "/workspace/query-agent", "mode": "ro"}
+                }
+                logger.info(
+                    "Mounting query agent source %s -> /workspace/query-agent (ro) for scope",
+                    src_dir,
+                )
+
         raw, usage = await self._run_agent(
             agent_config=agent_config,
             role="scope",
@@ -290,6 +334,7 @@ class Pipeline:
             scope_query_agent_id=allowed_query_agent_id,
             max_tokens=max_tokens,
             return_budget_summary=True,
+            extra_volumes=scope_volumes,
         )
 
         try:
@@ -300,16 +345,29 @@ class Pipeline:
                 if not isinstance(source, str):
                     raise ValueError("scope_fn must be a string")
                 fn = compile_scope_fn(source)
-                return fn, usage
+                return fn, source, usage
 
             raise ValueError(
                 "Scope agent must return 'scope_fn'"
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            # Hard-fail on invalid scope_fn. Do NOT fall back to a default
+            # policy — the whole point of this agent is to produce a valid
+            # scope function, and below-100% validity means the privacy
+            # model is broken. Surface the first 600 chars of the offending
+            # output for diagnosis.
+            _src = ""
+            try:
+                _parsed = json.loads(raw.strip())
+                if isinstance(_parsed, dict):
+                    _src = str(_parsed.get("scope_fn", ""))[:600]
+            except Exception:
+                _src = raw.strip()[:600]
             logger.error(
-                "Scope agent output not valid (%s, %d chars)",
+                "Scope agent output invalid (%s, %d chars). scope_fn preview:\n%s",
                 e,
                 len(raw),
+                _src,
             )
             raise ValueError(f"Scope agent failed: {e}")
 
@@ -318,6 +376,7 @@ class Pipeline:
         query_agent_id: str,
         prompt: str,
         scope_fn: Callable | None = None,
+        scope_fn_source: str = "",
         max_calls: int | None = None,
         max_tokens: int | None = None,
         return_usage: bool = False,
@@ -342,6 +401,7 @@ class Pipeline:
 
         env = {
             "QUERY_PROMPT": prompt,
+            "SCOPE_FN_SOURCE": scope_fn_source or "",
         }
 
         backend = SandboxBackend(
@@ -525,6 +585,7 @@ class Pipeline:
 
             # -- Stage 0: Scope resolution --
             scope_fn = None
+            scope_fn_source = ""
             resolved_scope_id = scope_agent_id or self.settings.default_scope_agent
             if resolved_scope_id:
                 scope_t0 = time.time()
@@ -537,8 +598,9 @@ class Pipeline:
                     scope_agent_id=resolved_scope_id,
                 )
                 try:
-                    scope_fn, scope_usage = await self._run_scope_agent(
-                        req_for_scope, max_tokens=remaining,
+                    scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
+                    scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
+                        req_for_scope, max_tokens=scope_budget,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -592,6 +654,7 @@ class Pipeline:
             env: dict[str, str] = {}
             if prompt:
                 env["QUERY_PROMPT"] = prompt
+            env["SCOPE_FN_SOURCE"] = scope_fn_source or ""
 
             backend = SandboxBackend(
                 self.llm_client,

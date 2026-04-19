@@ -8,7 +8,7 @@ from typing import Callable
 from uuid import uuid4
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 from ..tools import Tool
 from .budget import Budget
@@ -21,8 +21,11 @@ from .models import (
     BridgeToolRequest,
     BridgeToolResponse,
     OpenAIChatRequest,
+    ScopeTestResult,
     SimulateRequest,
     SimulateResponse,
+    VerifyScopeRequest,
+    VerifyScopeResponse,
 )
 from .tape import Tape, hash_request
 
@@ -492,6 +495,18 @@ class BridgeServer:
         async def call_tool(
             tool_name: str, req: BridgeToolRequest
         ) -> BridgeToolResponse:
+            # Telemetry: per-tool usage count + approx arg-size for this
+            # scope/query/mediator invocation. Grep logs for TOOL_CALL
+            # after a bench run to see how scope actually exercises its
+            # capabilities.
+            import json as _json
+            args_size = len(_json.dumps(req.arguments, default=str))
+            logger.info(
+                "TOOL_CALL role=%s tool=%s args_size=%d",
+                bridge.role,
+                tool_name,
+                args_size,
+            )
             if tool_name not in bridge.tools:
                 return BridgeToolResponse(
                     result="",
@@ -514,12 +529,23 @@ class BridgeServer:
                 dependencies=[Depends(_check_token)],
                 response_model=SimulateResponse,
             )
-            async def simulate(req: SimulateRequest) -> SimulateResponse:
+            async def simulate(
+                req: SimulateRequest,
+                x_simulate_caller: str = Header(default="unknown"),
+            ) -> SimulateResponse:
                 if not bridge.run_query_fn:
                     raise HTTPException(
                         500, "Simulation not available (no run_query_fn)"
                     )
                 _enforce_scope_query_agent(req.query_agent_id)
+                # Telemetry: log WHICH surface (MCP via bridge_simulate vs
+                # Bash via play.py) scope actually used for this sim call.
+                logger.info(
+                    "SCOPE_SIM caller=%s scope_fn_len=%d prompt_len=%d",
+                    x_simulate_caller,
+                    len(req.scope_fn_source or ""),
+                    len(req.prompt or ""),
+                )
                 # Pass full remaining budget to simulation
                 remaining = bridge.budget.remaining()
                 remaining_calls = remaining["calls"]
@@ -599,6 +625,81 @@ class BridgeServer:
                 if content is None:
                     raise HTTPException(404, "File not found")
                 return {"content": content}
+
+            @app.post(
+                "/sandbox/verify_scope_fn",
+                dependencies=[Depends(_check_token)],
+                response_model=VerifyScopeResponse,
+            )
+            async def verify_scope_fn_endpoint(
+                req: VerifyScopeRequest,
+            ) -> VerifyScopeResponse:
+                """Compile the provided scope_fn source and run it against the
+                given synthetic test cases.
+
+                This is the canonical correctness check: uses the SAME
+                compile_scope_fn + apply_scope_fn the real pipeline uses,
+                so if verify says ok, the real pipeline will accept it.
+                """
+                from ..scope import apply_scope_fn, compile_scope_fn
+
+                try:
+                    scope_fn = await asyncio.to_thread(
+                        compile_scope_fn, req.source
+                    )
+                except ValueError as e:
+                    return VerifyScopeResponse(
+                        compiles=False,
+                        compile_error=str(e),
+                        all_tests_passed=False,
+                        results=[],
+                    )
+
+                results: list[ScopeTestResult] = []
+                all_passed = True
+                for tc in req.tests:
+                    try:
+                        outcome = await asyncio.to_thread(
+                            apply_scope_fn,
+                            scope_fn,
+                            tc.sql,
+                            list(tc.params),
+                            list(tc.rows),
+                            _source=req.source,
+                        )
+                    except Exception as e:
+                        outcome = {"allow": False, "error": f"apply_scope_fn raised: {e}"}
+
+                    allow = bool(outcome.get("allow", False))
+                    error = outcome.get("error")
+                    rows_returned = (
+                        len(outcome.get("rows", []))
+                        if allow and isinstance(outcome.get("rows"), list)
+                        else 0
+                    )
+                    passed: bool | None = None
+                    if tc.expect_allow is not None:
+                        passed = allow == tc.expect_allow
+                        if not passed:
+                            all_passed = False
+                    results.append(
+                        ScopeTestResult(
+                            label=tc.label,
+                            sql=tc.sql[:200],
+                            allow=allow,
+                            error=str(error) if error else None,
+                            rows_returned=rows_returned,
+                            expected_allow=tc.expect_allow,
+                            passed=passed,
+                        )
+                    )
+
+                return VerifyScopeResponse(
+                    compiles=True,
+                    compile_error=None,
+                    all_tests_passed=all_passed,
+                    results=results,
+                )
 
         # ── S3 upload endpoint (query agents with run tracking) ──
 

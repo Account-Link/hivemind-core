@@ -113,6 +113,7 @@ class SandboxBackend:
         s3_uploader=None,
         run_id: str | None = None,
         run_store=None,
+        extra_volumes: dict[str, dict[str, str]] | None = None,
     ) -> str | tuple:
         """Run the agent container and return its stdout output."""
         agent = self.agent
@@ -180,6 +181,7 @@ class SandboxBackend:
                 bridge_url=bridge_url,
                 session_token=session_token,
                 env=full_env,
+                extra_volumes=extra_volumes,
             )
 
             logger.info(
@@ -202,7 +204,7 @@ class SandboxBackend:
                 )
 
             if result.stderr:
-                logger.warning("Agent stderr: %s", result.stderr[:500])
+                logger.warning("Agent stderr: %s", result.stderr[:3000])
 
             output = result.stdout.strip()
             if not output:
