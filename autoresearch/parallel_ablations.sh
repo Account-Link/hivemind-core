@@ -140,6 +140,7 @@ ensure_scope_sim_image() {
 
 launch_server() {
     local port="$1"; local name="$2"; local extra_env="$3"; local model="$4"
+    local scope_agent="$5"
 
     if [ "$port" = "8100" ]; then
         log "REFUSING to touch port 8100 — reserved for existing runners."
@@ -148,8 +149,6 @@ launch_server() {
 
     local existing=$(lsof -ti :"$port" 2>/dev/null || true)
     if [ -n "$existing" ]; then
-        # Someone else is on this port. Don't kill — fail loud so the user
-        # can investigate rather than silently clobbering their work.
         local health=$(curl -sS --max-time 2 "http://localhost:$port/v1/health" 2>/dev/null || echo "DOWN")
         log "$name port $port already in use (pid=$existing health=$health) — ABORTING this experiment"
         return 1
@@ -160,6 +159,16 @@ launch_server() {
 
     local env_line="HIVEMIND_PORT=$port HIVEMIND_LLM_MODEL=$model HIVEMIND_TRACE_DIR=$trace_dir PYTHONUNBUFFERED=1"
     if [ -n "$extra_env" ]; then env_line="$env_line $extra_env"; fi
+
+    # If a non-default scope agent is requested, wire it through the
+    # autoload settings so the server registers agent_id=$scope_agent
+    # pointing at the matching image. No HTTP register step needed —
+    # bench just passes --scope-agent $scope_agent and the lookup hits.
+    if [ -n "$scope_agent" ]; then
+        local img="hivemind-$scope_agent:local"
+        env_line="$env_line HIVEMIND_DEFAULT_SCOPE_AGENT=$scope_agent HIVEMIND_DEFAULT_SCOPE_IMAGE=$img"
+        log "$name autoload scope: id=$scope_agent image=$img"
+    fi
 
     log "$name starting server :$port model=$model extras=${extra_env:-none}"
     eval "$env_line nohup .venv/bin/python -m hivemind.server \
@@ -184,12 +193,8 @@ run_bench() {
 
     local bench_args="--url http://localhost:$port --rounds 1"
     if [ -n "$scope_agent" ]; then
-        log "$name registering scope agent=$scope_agent"
-        local reg=$(curl -sS -X POST "http://localhost:$port/v1/agents/register" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $api_key" \
-            -d "{\"agent_id\":\"$scope_agent\",\"agent_type\":\"scope\",\"image\":\"hivemind-$scope_agent:local\"}" 2>&1)
-        log "$name register: $reg"
+        # No HTTP register — autoload registered this agent_id at server
+        # startup via HIVEMIND_DEFAULT_SCOPE_AGENT / HIVEMIND_DEFAULT_SCOPE_IMAGE.
         bench_args="$bench_args --scope-agent $scope_agent"
     fi
 
@@ -259,7 +264,7 @@ run_experiment() {
             return 1
             ;;
     esac
-    if launch_server "$port" "$name" "$extra_env" "$model"; then
+    if launch_server "$port" "$name" "$extra_env" "$model" "$scope_agent"; then
         run_bench "$port" "$name" "$model" "$scope_agent"
     else
         log "$name SERVER_LAUNCH_FAILED — skipping bench"
