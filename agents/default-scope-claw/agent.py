@@ -82,15 +82,32 @@ SYSTEM_PROMPT = _load_system_prompt()
 
 
 def _looks_like_scope_source(src: str) -> bool:
+    """True only if src has `def scope(...)` AND at least one indented body line.
+
+    The body-line check prevents bare signatures like `def scope(sql, params, rows):`
+    (often echoed from the system prompt or REMEDIATION hint) from being accepted
+    as a valid scope function — they would pass AST parsing only as `pass`-less
+    stubs and blow up downstream with "expected an indented block".
+    """
     if not isinstance(src, str):
         return False
+    saw_def = False
     for line in src.splitlines():
         s = line.strip()
+        if not saw_def:
+            if not s:
+                continue
+            if s.startswith("#") or s.startswith("@"):
+                continue
+            if not (s.startswith("def scope(") or s.startswith("def scope (")):
+                return False
+            saw_def = True
+            continue
         if not s:
             continue
-        if s.startswith("#") or s.startswith("@"):
-            continue
-        return s.startswith("def scope(") or s.startswith("def scope (")
+        if line[:1] in (" ", "\t"):
+            return True
+        return False
     return False
 
 
@@ -118,8 +135,24 @@ def _scrape_def_scope(text: str) -> str | None:
 
 
 def _extract_scope_json(text: str) -> dict | None:
+    """Extract {"scope_fn": "..."} from claw's noisy stdout.
+
+    Ordering matters: claw's --output-format text interleaves assistant prose,
+    tool-call echoes, and (maybe) the original combined prompt. The SYSTEM_PROMPT
+    we inject contains example `def scope(sql, params, rows):` lines that would
+    hijack a naive regex scrape. So:
+      1. Try json.loads on the whole text (cheap happy path).
+      2. Anchor on every `{"scope_fn": ...}` occurrence and use
+         JSONDecoder.raw_decode — string-aware so braces inside the scope_fn
+         body don't confuse boundary tracking. Prefer the LAST match (the
+         model's final emit), not the first (which can be an echo of the
+         system prompt's example).
+      3. Fall back to any `{` via raw_decode if no scope_fn-anchored match.
+      4. Regex scrape as last resort, with tightened validator.
+    """
     if not isinstance(text, str):
         return None
+    import re
     text = text.strip()
 
     def validate_or_rescue(parsed):
@@ -127,7 +160,7 @@ def _extract_scope_json(text: str) -> dict | None:
             return None
         if _looks_like_scope_source(parsed["scope_fn"]):
             return parsed
-        for candidate in (parsed["scope_fn"], text):
+        for candidate in (parsed["scope_fn"],):
             if isinstance(candidate, str):
                 r = _scrape_def_scope(candidate)
                 if r and _looks_like_scope_source(r):
@@ -135,6 +168,7 @@ def _extract_scope_json(text: str) -> dict | None:
                     return parsed
         return None
 
+    # 1) Try whole-text json.loads.
     try:
         parsed = json.loads(text)
         result = validate_or_rescue(parsed) if isinstance(parsed, dict) else None
@@ -143,25 +177,35 @@ def _extract_scope_json(text: str) -> dict | None:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Scan for first { ... } block containing scope_fn.
-    for i, ch in enumerate(text):
-        if ch != "{":
+    decoder = json.JSONDecoder()
+
+    # 2) Anchor on `{"scope_fn":` — use raw_decode so strings/quoting are
+    #    respected. Reverse order: the LAST occurrence is the model's final
+    #    emit; earlier ones are system-prompt echoes.
+    anchors = [m.start() for m in re.finditer(r'\{\s*"scope_fn"\s*:', text)]
+    for anchor in reversed(anchors):
+        try:
+            parsed, _end = decoder.raw_decode(text[anchor:])
+        except (json.JSONDecodeError, ValueError):
             continue
-        depth = 0
-        for j in range(i, len(text)):
-            if text[j] == "{":
-                depth += 1
-            elif text[j] == "}":
-                depth -= 1
-            if depth == 0:
-                try:
-                    parsed = json.loads(text[i : j + 1])
-                    result = validate_or_rescue(parsed) if isinstance(parsed, dict) else None
-                    if result:
-                        return result
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                break
+        result = validate_or_rescue(parsed) if isinstance(parsed, dict) else None
+        if result:
+            return result
+
+    # 3) Any `{` as a last JSON-ish resort.
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[i:])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        result = validate_or_rescue(parsed) if isinstance(parsed, dict) else None
+        if result:
+            return result
+
+    # 4) Final regex scrape. Tightened _looks_like_scope_source will reject
+    #    bare signatures, so this only accepts a real function with a body.
     rescued = _scrape_def_scope(text)
     if rescued and _looks_like_scope_source(rescued):
         return {"scope_fn": rescued}
