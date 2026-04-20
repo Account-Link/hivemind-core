@@ -134,6 +134,29 @@ class SimulateResponse(BaseModel):
     tape: list[dict] | None = None  # recorded tape from this run
 
 
+class SimulateBatchRequest(BaseModel):
+    """Request to POST /sandbox/simulate_batch — run multiple scope_fn candidates concurrently."""
+
+    query_agent_id: str
+    prompt: str
+    candidates: list[str] = Field(..., min_length=1, max_length=3)
+    replay_tape: list[dict] | None = None
+
+
+class SimulateBatchItem(BaseModel):
+    """One candidate's result from a batch simulate."""
+
+    idx: int
+    output: str = ""
+    error: str | None = None
+
+
+class SimulateBatchResponse(BaseModel):
+    """Response from POST /sandbox/simulate_batch."""
+
+    results: list[SimulateBatchItem] = Field(default_factory=list)
+
+
 # ── Verify scope_fn models (scope agents only) ──
 
 

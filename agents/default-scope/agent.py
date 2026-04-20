@@ -34,6 +34,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, query, tool
 from _bridge import (
     bridge_simulate,
+    bridge_simulate_batch,
     bridge_verify_scope_fn,
     create_hivemind_server,
 )
@@ -104,12 +105,55 @@ async def simulate_tool(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
 
+@tool(
+    "simulate_multi",
+    (
+        "Run 2-3 DIFFERENT candidate scope_fn's in PARALLEL against the same "
+        "query. Pass 'candidates' as a JSON string array of scope_fn source "
+        "strings (each a full `def scope(sql, params, rows): ...`). Returns "
+        "{'results': [{idx, output, error}, ...]} — compare their outputs "
+        "and pick the one that's safest+most useful. Use when the right "
+        "strategy is ambiguous (e.g. row-exclusion vs value-redaction vs "
+        "aggregation). Same budget as ONE simulate_query (budget is split "
+        "across candidates). Max 3 candidates."
+    ),
+    {"candidates": str, "prompt": str},
+)
+async def simulate_multi_tool(args: dict[str, Any]) -> dict[str, Any]:
+    candidates_raw = args.get("candidates", "[]")
+    if isinstance(candidates_raw, str):
+        try:
+            candidates = json.loads(candidates_raw)
+        except json.JSONDecodeError:
+            return {"content": [{"type": "text",
+                                 "text": "Error: candidates must be JSON array of strings"}]}
+    elif isinstance(candidates_raw, list):
+        candidates = candidates_raw
+    else:
+        candidates = []
+    candidates = [c for c in candidates if isinstance(c, str) and c.strip()]
+    if not candidates:
+        return {"content": [{"type": "text",
+                             "text": "Error: candidates list is empty"}]}
+    if len(candidates) > 3:
+        candidates = candidates[:3]
+    prompt = args.get("prompt") or QUERY_PROMPT
+    result = await bridge_simulate_batch(QUERY_AGENT_ID, prompt, candidates)
+    if result is None:
+        return {"content": [{"type": "text",
+                             "text": "Batch simulation failed or unavailable."}]}
+    return {"content": [{"type": "text", "text": json.dumps(result)}]}
+
+
 # Ablation toggles for overnight/matrix experiments. In production all
 # tools are enabled; unit tests set these to isolate contributions.
 _DISABLE_SIMULATE = os.environ.get("HIVEMIND_DISABLE_SIMULATE", "").lower() in ("1", "true", "yes")
+_ENABLE_MULTI = os.environ.get("HIVEMIND_SCOPE_MULTI", "").lower() in ("1", "true", "yes")
 SCOPE_TOOLS = [verify_tool]
 if not _DISABLE_SIMULATE:
     SCOPE_TOOLS.append(simulate_tool)
+    if _ENABLE_MULTI:
+        SCOPE_TOOLS.append(simulate_multi_tool)
 server = create_hivemind_server(extra_tools=SCOPE_TOOLS)
 
 
@@ -480,6 +524,28 @@ if os.environ.get("HIVEMIND_DISABLE_SEMLIFT", "").lower() in ("1", "true", "yes"
     _sem_marker = '# SAMPLE-FIRST, DETECT-SECOND'
     if _sem_marker in SYSTEM_PROMPT:
         SYSTEM_PROMPT = SYSTEM_PROMPT[:SYSTEM_PROMPT.index(_sem_marker)].rstrip() + "\n"
+
+# When parallel simulate is enabled, add guidance that encourages the agent
+# to compare 2-3 strategy candidates (row-exclusion vs value-redaction vs
+# aggregation) concurrently instead of betting on a single interpretation.
+if _ENABLE_MULTI:
+    SYSTEM_PROMPT += """
+# PARALLEL SIMULATION — simulate_multi
+
+You also have `simulate_multi(candidates, prompt)`: runs 2-3 candidate
+scope_fn's CONCURRENTLY against the same query. Same total budget as one
+simulate_query (split across candidates). Use when the right strategy is
+ambiguous — e.g. policy could be satisfied by any of:
+  - value-redaction (mask PII fields, keep rows)
+  - row-exclusion (drop rows whose content matches a forbidden topic)
+  - aggregation (collapse rows to counts / distinct-counts)
+Draft 2-3 candidates that embody DIFFERENT strategies, pass them all to
+simulate_multi, then pick the one whose output is safest AND most useful.
+This is strictly better than guessing a single strategy and hoping.
+
+Prefer simulate_multi over a sequence of simulate_query calls when the
+candidates are mutually exclusive strategies (not just tweaks of one).
+"""
 
 # Override with external prompt file if present (CLI-fused agents)
 _PROMPT_FILE = Path("/app/prompt.md")

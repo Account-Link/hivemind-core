@@ -66,6 +66,37 @@ async def bridge_simulate(
             return await resp.json()
 
 
+async def bridge_simulate_batch(
+    query_agent_id: str,
+    prompt: str,
+    candidates: list[str],
+    replay_tape: list[dict] | None = None,
+) -> dict | None:
+    """Call the sandbox simulate_batch endpoint. Runs up to 3 candidates concurrently."""
+    payload: dict[str, Any] = {
+        "query_agent_id": query_agent_id,
+        "prompt": prompt,
+        "candidates": candidates,
+    }
+    if replay_tape is not None:
+        payload["replay_tape"] = replay_tape
+    try:
+        async with aiohttp.ClientSession(timeout=_BRIDGE_TIMEOUT) as session:
+            async with session.post(
+                f"{BRIDGE_URL}/sandbox/simulate_batch",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {SESSION_TOKEN}",
+                    "X-Simulate-Caller": "mcp_batch",
+                },
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+    except Exception:
+        return None
+
+
 async def bridge_verify_scope_fn(
     source: str,
     tests: list[dict] | None = None,

@@ -23,6 +23,9 @@ from .models import (
     BridgeToolResponse,
     OpenAIChatRequest,
     ScopeTestResult,
+    SimulateBatchItem,
+    SimulateBatchRequest,
+    SimulateBatchResponse,
     SimulateRequest,
     SimulateResponse,
     VerifyScopeRequest,
@@ -598,6 +601,96 @@ class BridgeServer:
                     traceback.print_exc()
                     sys.stdout.flush()
                     raise HTTPException(500, f"Simulation failed: {e}")
+
+            @app.post(
+                "/sandbox/simulate_batch",
+                dependencies=[Depends(_check_token)],
+                response_model=SimulateBatchResponse,
+            )
+            async def simulate_batch(
+                req: SimulateBatchRequest,
+                x_simulate_caller: str = Header(default="unknown"),
+            ) -> SimulateBatchResponse:
+                if not bridge.run_query_fn:
+                    raise HTTPException(
+                        500, "Simulation not available (no run_query_fn)"
+                    )
+                _enforce_scope_query_agent(req.query_agent_id)
+                n = len(req.candidates)
+                logger.info(
+                    "SCOPE_SIM_BATCH caller=%s n=%d prompt_len=%d",
+                    x_simulate_caller,
+                    n,
+                    len(req.prompt or ""),
+                )
+                remaining = bridge.budget.remaining()
+                remaining_calls = remaining["calls"]
+                remaining_tokens = remaining["tokens"]
+                if remaining_calls < n or remaining_tokens < n:
+                    raise HTTPException(
+                        429, "Insufficient budget for batch simulation"
+                    )
+                per_calls = max(1, remaining_calls // n)
+                per_tokens = max(1, remaining_tokens // n)
+
+                async def _run_one(idx: int, scope_fn_source: str):
+                    try:
+                        sim_result = await bridge.run_query_fn(
+                            query_agent_id=req.query_agent_id,
+                            prompt=req.prompt,
+                            scope_fn_source=scope_fn_source,
+                            max_calls=per_calls,
+                            max_tokens=per_tokens,
+                            replay_tape=req.replay_tape,
+                        )
+                        usage: dict | None = None
+                        if isinstance(sim_result, tuple) and len(sim_result) == 3:
+                            output, usage, _tape = sim_result
+                        elif isinstance(sim_result, tuple) and len(sim_result) == 2:
+                            output, usage = sim_result
+                        else:
+                            output = sim_result
+                        return (idx, output, usage, None)
+                    except Exception as e:
+                        return (idx, "", None, f"{type(e).__name__}: {e}")
+
+                gathered = await asyncio.gather(
+                    *[_run_one(i, c) for i, c in enumerate(req.candidates)]
+                )
+
+                total_calls = 0
+                total_prompt = 0
+                total_completion = 0
+                items: list[SimulateBatchItem] = []
+                for idx, output, usage, error in gathered:
+                    if isinstance(usage, dict):
+                        total_calls += int(usage.get("calls", 0) or 0)
+                        total_prompt += int(usage.get("prompt_tokens", 0) or 0)
+                        total_completion += int(usage.get("completion_tokens", 0) or 0)
+                    items.append(
+                        SimulateBatchItem(
+                            idx=idx,
+                            output=output or "",
+                            error=error,
+                        )
+                    )
+
+                if total_calls == 0 and total_prompt == 0 and total_completion == 0:
+                    # Fallback: no usage metadata, charge worst case per candidate
+                    bridge.budget.record(
+                        calls=min(remaining_calls, per_calls * n),
+                        prompt_tokens=min(remaining_tokens // 2, (per_tokens * n) // 2),
+                        completion_tokens=min(remaining_tokens // 2, (per_tokens * n) // 2),
+                    )
+                else:
+                    bridge.budget.record(
+                        calls=total_calls,
+                        prompt_tokens=total_prompt,
+                        completion_tokens=total_completion,
+                    )
+
+                items.sort(key=lambda it: it.idx)
+                return SimulateBatchResponse(results=items)
 
             @app.get(
                 "/sandbox/agents/{agent_id}/files",
