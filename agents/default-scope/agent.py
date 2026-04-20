@@ -916,10 +916,16 @@ async def main() -> None:
     # deny-first chain-of-thought failure where scope emits a bad-shaped
     # scope_fn without calling verify_scope_fn. Second attempt gets
     # explicit feedback about what went wrong and another shot.
+    #
+    # Default: OFF (max_attempts=1). iter 40 showed retry's remediation
+    # prompt makes scope over-correct toward refusal, trading -38 utility
+    # for +3 defense on Haiku. Opt in for future experiments via
+    # HIVEMIND_SCOPE_MAX_ATTEMPTS=2.
+    max_attempts = int(os.environ.get("HIVEMIND_SCOPE_MAX_ATTEMPTS", "1"))
     parsed, outcome, full_src, attempt_label = await _run_scope_with_retry(
         user_prompt=user_prompt,
         server=server,
-        max_attempts=2,
+        max_attempts=max_attempts,
     )
 
     if parsed is not None:
