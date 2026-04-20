@@ -76,6 +76,15 @@ register_exp "iter43-simulate-frontier-haiku" 8103 \
     "anthropic/claude-haiku-4.5" \
     "HIVEMIND_AGENT_TIMEOUT=900" "default-scope-sim" "sim"
 
+
+# iter45: concurrent simulate_multi — scope can run 2-3 scope_fn candidates
+# in parallel and pick the best. Tests whether splitting strategy across
+# row-exclusion/value-redaction/aggregation candidates beats a single
+# committed strategy. Uses default-scope image (tool gated on env flag).
+register_exp "iter45-simulate-multi-haiku" 8104 \
+    "anthropic/claude-haiku-4.5" \
+    "HIVEMIND_SCOPE_MULTI=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
+
 # ─────────────────────────────────────────────────────────────────────
 # OPERATIONS
 # ─────────────────────────────────────────────────────────────────────

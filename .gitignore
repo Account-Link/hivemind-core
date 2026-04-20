@@ -25,3 +25,8 @@ bench/results/
 autoresearch/experiments/
 /tmp/iter*_*.txt
 *_bench.log
+
+# scope-claw build context (assembled by build_prep.sh)
+agents/default-scope-claw/claw
+agents/default-scope-claw/mcp_stdio_proxy.py
+agents/default-scope-claw/default-scope-agent.py
