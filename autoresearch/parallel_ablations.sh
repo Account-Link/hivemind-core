@@ -85,6 +85,18 @@ register_exp "iter45-simulate-multi-haiku" 8104 \
     "anthropic/claude-haiku-4.5" \
     "HIVEMIND_SCOPE_MULTI=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
 
+# iter59: contextual-integrity workflow. Scope treats the query agent as the
+# recipient, reads /workspace/query-agent/ (static), declares residual
+# behavioral uncertainty, and runs simulate_multi on 2-3 candidates (dynamic)
+# before picking + emitting. Workflow rebuild of default-scope image needed —
+# the prompt is baked in when HIVEMIND_SCOPE_CI=true triggers the injection.
+# Expects scope to exhibit: Read on query-agent source + simulate_multi call.
+# Runs against the existing 6-scenario bench on Haiku for comparability with
+# iter29/iter45 baselines.
+register_exp "iter59-ci-workflow-haiku" 8119 \
+    "anthropic/claude-haiku-4.5" \
+    "HIVEMIND_SCOPE_CI=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
+
 # ─────────────────────────────────────────────────────────────────────
 # OPERATIONS
 # ─────────────────────────────────────────────────────────────────────

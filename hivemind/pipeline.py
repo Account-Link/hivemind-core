@@ -304,7 +304,8 @@ class Pipeline:
         # Forward ablation/feature toggles into the scope container so that
         # env-var-based experiments set on the server process actually take effect.
         for _toggle in ("HIVEMIND_DISABLE_SIMULATE", "HIVEMIND_DISABLE_SEMLIFT",
-                        "HIVEMIND_SCOPE_MAX_ATTEMPTS", "HIVEMIND_SCOPE_MULTI"):
+                        "HIVEMIND_SCOPE_MAX_ATTEMPTS", "HIVEMIND_SCOPE_MULTI",
+                        "HIVEMIND_SCOPE_CI"):
             _val = os.environ.get(_toggle)
             if _val is not None:
                 env[_toggle] = _val

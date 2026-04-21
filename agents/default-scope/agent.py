@@ -149,6 +149,15 @@ async def simulate_multi_tool(args: dict[str, Any]) -> dict[str, Any]:
 # tools are enabled; unit tests set these to isolate contributions.
 _DISABLE_SIMULATE = os.environ.get("HIVEMIND_DISABLE_SIMULATE", "").lower() in ("1", "true", "yes")
 _ENABLE_MULTI = os.environ.get("HIVEMIND_SCOPE_MULTI", "").lower() in ("1", "true", "yes")
+# iter59: contextual-integrity workflow. When on, the scope agent treats the
+# query agent as the recipient of rows (CI frame: "user uploading their
+# brain"), reads the query agent source (static analysis), declares residual
+# behavioral uncertainty, and uses simulate_multi (dynamic analysis) to pick
+# among candidate filters. Forces _ENABLE_MULTI because the workflow depends
+# on parallel simulation as the verification primitive.
+_ENABLE_CI = os.environ.get("HIVEMIND_SCOPE_CI", "").lower() in ("1", "true", "yes")
+if _ENABLE_CI:
+    _ENABLE_MULTI = True
 SCOPE_TOOLS = [verify_tool]
 if not _DISABLE_SIMULATE:
     SCOPE_TOOLS.append(simulate_tool)
@@ -599,6 +608,137 @@ if _ENABLE_MULTI:
     )
     if _anchor in SYSTEM_PROMPT:
         SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_anchor, _preamble + _anchor)
+
+# iter59: Contextual-integrity workflow. Overrides the default WORKFLOW
+# section with a mandatory static→dynamic loop and prepends a CI framing
+# section that names the query agent as the recipient of rows.
+#
+# Invariant: when CI is on, _ENABLE_MULTI is forced on upstream, and the
+# simulate_multi injection above (the MULTI block) has already rewritten the
+# tool-list and "Typical loop" preamble. This block then replaces the WORKFLOW
+# turn-by-turn section and prepends the CI framing at the top of the prompt.
+if _ENABLE_CI:
+    _ci_framing = """\
+# THE RECIPIENT IS THE QUERY AGENT — CONTEXTUAL INTEGRITY FRAME
+
+You are doing contextual-integrity reasoning. The recipient of the rows
+you pass through is the QUERY AGENT — which represents the USER'S
+UPLOADED BRAIN acting on the user's behalf. Your job is not to decide
+whether rows are sensitive in the abstract. Your job is to reason about
+WHAT THIS SPECIFIC QUERY AGENT WILL EMIT when it sees those rows, and
+whether that emission respects the policy's BEHAVIORAL constraint.
+
+The query agent is NOT fully opaque. Its source and prompt are mounted
+read-only at `/workspace/query-agent/`. Reading that directory is STATIC
+ANALYSIS — it tells you what the agent CLAIMS to do, what SQL patterns
+it will run, what output shape it emits, what self-imposed constraints
+it promises to honor. Use Read / Grep / Glob on that directory.
+
+But source is incomplete. The query agent is LLM-backed, so its actual
+behavior on adversarial inputs can diverge from what its prompt promises.
+That residual — what the agent ACTUALLY DOES vs. what its prompt says —
+is only knowable by DYNAMIC ANALYSIS: running the agent in simulation on
+realistic inputs and observing the output.
+
+Your workflow is STATIC THEN DYNAMIC. Static reading narrows the
+hypothesis space cheaply. Dynamic simulation (`simulate_multi`) verifies
+the residual. Skipping either step leaves you guessing about the
+recipient's behavior — which is exactly the CI question you are here to
+answer.
+
+Note on behavioral policies: a policy like "reader must not be able to
+infer whether the user discussed topic X" is NOT satisfied by a row
+filter alone. Denial itself can leak — if the query agent responds "I
+can't answer about X" to a query that mentions X, the denial confirms
+X is queryable. You must reason about the agent's full OUTPUT behavior,
+not just which rows survive the filter.
+
+"""
+    # Prepend CI framing right after the opening paragraph (before # THE CONTRACT).
+    _contract_anchor = "# THE CONTRACT"
+    if _contract_anchor in SYSTEM_PROMPT:
+        SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+            _contract_anchor, _ci_framing + _contract_anchor, 1
+        )
+
+    # Replace the WORKFLOW section wholesale.
+    _workflow_start = "# WORKFLOW — YOU HAVE 20 TURNS MAX, BUT EMIT BY TURN 10"
+    _workflow_end = "# FIRST PRINCIPLES — privacy reasoning"
+    if _workflow_start in SYSTEM_PROMPT and _workflow_end in SYSTEM_PROMPT:
+        _s = SYSTEM_PROMPT.index(_workflow_start)
+        _e = SYSTEM_PROMPT.index(_workflow_end)
+        _new_workflow = """\
+# WORKFLOW — STATIC THEN DYNAMIC (MANDATORY)
+
+You have 20 turns. Hard deadline: emit JSON by turn 14. The static→dynamic
+loop is not optional — skipping it means writing rules without knowing
+what the recipient will do with them.
+
+Each turn is 20-40s wall clock.
+
+  Turn 0 (free): READ THE POLICY from your user message. Note whether
+          it is BEHAVIORAL ("output must not enable inference of X") or
+          ROW-LEVEL ("block rows containing X"). Behavioral policies
+          REQUIRE the full static+dynamic loop. Even row-level policies
+          benefit from verification.
+
+  Turn 1 — STATIC READ (mandatory):
+          Use Read / Grep / Glob on `/workspace/query-agent/`. At minimum
+          read the query agent's prompt file (e.g. `query-prompt.md`)
+          and its main `agent.py`. Extract:
+            (a) what it CLAIMS to do,
+            (b) what SQL patterns it will likely run,
+            (c) what output shape it emits (raw rows, aggregates, prose),
+            (d) any self-imposed constraints it promises to honor.
+          Also call get_schema so you know the row shapes it will see.
+
+  Turn 2 — DECLARE RESIDUAL UNCERTAINTY:
+          In your reasoning, state explicitly what you CANNOT tell from
+          static reading alone. Example declarations:
+            * "Prompt promises aggregation-only, but whether it will
+               actually aggregate under adversarial rows is unknown."
+            * "Prompt says 'strip PII' but what does its LLM consider PII?
+               Will it catch @handles? Phone numbers? Free-text mentions?"
+            * "Prompt doesn't address inference; even redacted-field rows
+               may let the agent reconstruct the protected attribute."
+          This declaration is what determines which candidate filters
+          you'll compare in Turn 3.
+
+  Turn 3 — CANDIDATE FILTERS (2-3 strategies, one per uncertainty axis):
+          Draft 2-3 candidate scope_fns, each embodying a DIFFERENT
+          strategy aimed at the declared uncertainty. Example for
+          "will it aggregate honestly?":
+            A: pass raw rows, trust the agent's claim (baseline)
+            B: pre-aggregate (Pattern C), force the shape server-side
+            C: row-filter (Pattern E), drop the risky rows entirely
+          Call verify_scope_fn on each so you know they all compile.
+
+  Turn 4 — DYNAMIC PROBE (simulate_multi, mandatory):
+          Call mcp__hivemind__simulate_multi with the candidates as a
+          JSON array. Observe each candidate's OUTPUT — what the query
+          agent actually EMITS under that filter. This is your empirical
+          signal. Do not skip this.
+
+  Turn 5 — PICK + EMIT:
+          Pick the candidate whose observed output best satisfies the
+          BEHAVIORAL policy with maximum utility. A filter that forces
+          the query agent to emit a safe shape beats one that merely
+          hopes the agent behaves. Verify your final choice, then emit.
+
+  Turn 6-13: if post-pick refinement is needed, do a single simulate_query
+             on the refined version. Do NOT re-run simulate_multi — you
+             already have the empirical winner.
+
+  **Turn 14: HARD DEADLINE.** Emit whatever you have. The system HARD
+             FAILS if you don't emit valid JSON.
+
+BIAS: complete the full static→dynamic loop if possible. If you must
+cut corners, NEVER skip Turn 1 (static read) — it is the cheapest
+high-value step. Skipping straight to writing a filter means you are
+reasoning about rows instead of reasoning about the recipient.
+
+"""
+        SYSTEM_PROMPT = SYSTEM_PROMPT[:_s] + _new_workflow + SYSTEM_PROMPT[_e:]
 
 # Override with external prompt file if present (CLI-fused agents)
 _PROMPT_FILE = Path("/app/prompt.md")
