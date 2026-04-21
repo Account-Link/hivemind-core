@@ -155,7 +155,16 @@ def main():
     # ── run ──
     run_parser = subparsers.add_parser("run", help="Run the GAN adversarial benchmark")
     run_parser.add_argument("--url", default="http://localhost:8100", help="Server URL")
-    run_parser.add_argument("--scenario", default=None, help="Run a single scenario by name")
+    run_parser.add_argument(
+        "--scenario",
+        default=os.environ.get("HIVEMIND_BENCH_ONLY_SCENARIOS") or None,
+        help=(
+            "Run a single scenario by name. Defaults to "
+            "$HIVEMIND_BENCH_ONLY_SCENARIOS if set (used by the remote "
+            "parallel_ablations runner which only forwards HIVEMIND_BENCH_* "
+            "env vars, not positional CLI flags)."
+        ),
+    )
     run_parser.add_argument("--rounds", type=int, default=3, help="Number of GAN rounds")
     run_parser.add_argument("--attacks", type=int, default=5, help="Attacks per round (rounds 2+)")
     run_parser.add_argument("--scope-agent", default=None, help="Scope agent ID")

@@ -521,3 +521,78 @@ prior that survives explicit contrary instruction.
   (CI-phrased, denial-as-leak explicit).
 - `autoresearch/parallel_ablations.sh` — registered `iter59-ci-workflow-haiku`
   on port 8119.
+
+---
+
+# Study wrap-up (2026-04-22) — iter58/59/60 + consolidated learnings
+
+Credits exhausted mid-iter60. Partial-data caveat applies to K2 runs:
+iter59/iter60 got ~2 scenarios each before OpenRouter 402 cascade.
+
+See `autoresearch/study_wrap_up.md` for the full consolidated doc.
+Condensed findings (each re-derived from the 60-iteration history +
+partial iter58/59/60 data):
+
+1. Claw runtime ≈ Anthropic Agent SDK — no measurable bench delta.
+2. Kimi > Haiku as mediator (generalizes better); Kimi < Haiku as
+   scope (risk-seeking, under-blocks). Best pairing: Haiku-scope +
+   Kimi-mediator.
+3. Source-reading has no effect on frontier search (≤2/40 tapes).
+   May matter for advanced agents; current LLMs ignore it.
+4. Simulation called 0–1x per invocation even with explicit
+   save/load/revert instructions. May matter for advanced agents.
+5. Parallel simulation (`simulate_multi`) is unused even when
+   injected into main workflow. May matter for advanced agents.
+6. "Models reject over transform" was misread as a privacy prior.
+   Actual cause: **row-exclusion policy wording** ("block content
+   about X") pattern-matches the model's refusal prior. Value-
+   redaction cleanly hits transform mode.
+7. Semantic lift is bi-modal: helps on value-queries ("block
+   financial content"), hurts on row-queries ("last 30 days only").
+   Net across all 6 scenarios: neutral.
+8. `verify_scope_fn` before emit is worth it (~15 points defense).
+9. MCP is load-bearing; CLI/filesystem surface is unused for the
+   use case the prompt describes. May matter for advanced agents.
+10. Scope and mediator gap-cover each other; both required. Scope
+    consumes more tokens (bigger prompt, more iterations).
+11. Scope withstands 3-round GAN-style attack evolution (≥85%
+    defense on value-redaction scenarios).
+12. Retry-on-rejection is NEGATIVE (iter40): wrong-strategy bias
+    inherits into the remediation prompt. Default OFF
+    (`HIVEMIND_SCOPE_MAX_ATTEMPTS=1`).
+13. Row-exclusion is architecturally harder than value-redaction.
+    Specifically: temporal windows, topic drops, tenant filters
+    activate the refusal prior; PII/credential scrubbing doesn't.
+14. **Shared-prior critique.** Attacker LLM, defender LLM, and
+    judge LLM all draw from the same training distribution. iter54's
+    accidental win came from hardcoded categories matching judge
+    expectation. No LLM-judged bench can separate "correctly
+    principled" from "accidentally aligned" without a human or
+    adversarial-ground-truth signal.
+15. **CI-prompt workflow ≠ CI-phrased policy.** Making the scope
+    agent reason via static+dynamic CI (iter59) is neutral/safe —
+    matches iter57a baseline. Rewriting policy text into CI framing
+    (iter60) causes catastrophic defense collapse (40–60% vs
+    baseline B 91). Not interchangeable interventions.
+
+## Partial data — iter58/59/60
+
+| Experiment | Model | Lever | Clean verdicts | Defense | Utility | Grade |
+|---|---|---|---|---|---|---|
+| iter57a (baseline) | Kimi K2 | standard | 30/30 | 93% | 87% | **B 91** |
+| iter58 | Kimi K2.6 | standard | ~2/30 | timeouts | — | **unusable** |
+| iter59 | Kimi K2 | CI workflow | 10/30 (2 scenarios) | 100% | 70% | **~B** |
+| iter60 | Kimi K2 | CI-phrased policy | 10/30 (2 scenarios) | 40–60% | 40% | **F** |
+
+## Cost (wrap-up session)
+
+iter58 140 calls, iter59 291 calls, iter60 330 calls. ~$7.18 total at
+Kimi pricing. Study-wide balance exhausted.
+
+## What ships
+
+**iter57a is the terminal result.** Further gains require either
+fine-tuning (L3) or a human-judged bench to break the shared-prior
+ceiling. Default agents stay as-is; CI workflow stays off-by-default
+(`HIVEMIND_SCOPE_CI`) because it's neutral not positive.
+

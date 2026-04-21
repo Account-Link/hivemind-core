@@ -85,28 +85,55 @@ register_exp "iter45-simulate-multi-haiku" 8104 \
     "anthropic/claude-haiku-4.5" \
     "HIVEMIND_SCOPE_MULTI=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
 
+# iter58: Kimi K2.6 ceiling on iter57a's config (full-stack, no CI flags).
+# Pure model-swap from iter57a (B 91 on Kimi K2). Tests whether the
+# architectural ceiling is model-bound.
+register_exp "iter58-kimi-k2.6-baseline" 8118 \
+    "moonshotai/kimi-k2.6" \
+    "HIVEMIND_AGENT_TIMEOUT=900" "" "no"
+
 # iter59: contextual-integrity workflow. Scope treats the query agent as the
 # recipient, reads /workspace/query-agent/ (static), declares residual
 # behavioral uncertainty, and runs simulate_multi on 2-3 candidates (dynamic)
-# before picking + emitting. Workflow rebuild of default-scope image needed —
-# the prompt is baked in when HIVEMIND_SCOPE_CI=true triggers the injection.
-# Expects scope to exhibit: Read on query-agent source + simulate_multi call.
-# Runs against the existing 6-scenario bench on Haiku for comparability with
-# iter29/iter45 baselines.
-register_exp "iter59-ci-workflow-haiku" 8119 \
-    "anthropic/claude-haiku-4.5" \
+# before picking + emitting. Prompt is baked in when HIVEMIND_SCOPE_CI=true
+# triggers the injection. Runs on Kimi K2.6 for ceiling test of the CI
+# workflow lever on top of the best available model.
+register_exp "iter59-ci-workflow-kimi" 8119 \
+    "moonshotai/kimi-k2.6" \
     "HIVEMIND_SCOPE_CI=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
 
 # iter60: CI-phrased scenario policies (NO scope prompt change). Isolates the
 # lever — does the effect seen in iter59 come from the scope prompt injection,
-# or from the policy wording? This run keeps the default-scope prompt but
-# rewords each of the 6 baseline policies in CI/behavioral terms (denial-as-leak
-# made explicit). Default scope image, same Haiku model, same 6 scenarios.
-# HIVEMIND_BENCH_CI_POLICIES must reach the bench process — run_bench forwards
-# HIVEMIND_BENCH_* vars explicitly.
-register_exp "iter60-ci-policies-haiku" 8120 \
-    "anthropic/claude-haiku-4.5" \
+# or from the policy wording? Keeps the default-scope prompt but reshapes the
+# 6 baseline policies in CI/behavioral terms (denial-as-leak made explicit).
+# Default scope image, Kimi K2.6, same 6 scenarios. HIVEMIND_BENCH_CI_POLICIES
+# must reach the bench process — run_bench forwards HIVEMIND_BENCH_* vars.
+register_exp "iter60-ci-policies-kimi" 8120 \
+    "moonshotai/kimi-k2.6" \
     "HIVEMIND_BENCH_CI_POLICIES=true HIVEMIND_AGENT_TIMEOUT=900" "" "no"
+
+# iter61: OOD stress test for the Patterns A-E catalog in scope-prompt.md.
+# Scenario message_sequence_privacy requires quantizing the seq column into
+# quartile buckets — not cleanly expressible as A (pass), B (strip), C
+# (aggregate), D (marker), or E (row filter). Correct scope_fn must COMPUTE
+# a derived column (seq_quartile = seq / max_seq * 4).
+#
+# Two outcomes worth measuring:
+#   (a) overfit → scope force-fits Pattern C, collapses to "N messages total",
+#       destroys utility on bucket-solvable seed queries.
+#   (b) generalize → scope writes a bucketize helper inside the scope_fn and
+#       returns per-row quartile labels; utility stays high.
+#
+# Single scenario, 1 round (no GAN evolution) — cheap sanity probe. If (b)
+# dominates, A-E scaffolding generalizes. If (a) dominates, the catalog is
+# overfit to the 6 baseline scenarios and we should either expand the menu
+# or switch to first-principles prompting on novel policies.
+#
+# HIVEMIND_BENCH_ONLY_SCENARIOS forwards to the bench CLI; run_bench already
+# forwards HIVEMIND_BENCH_* vars. Kimi K2 (proven fast from iter57a) not K2.6.
+register_exp "iter61-ood-quartile-kimi" 8121 \
+    "moonshotai/kimi-k2" \
+    "HIVEMIND_BENCH_ONLY_SCENARIOS=message_sequence_privacy HIVEMIND_BENCH_QUERY_TIMEOUT=1800 HIVEMIND_AGENT_TIMEOUT=900" "" "no"
 
 # ─────────────────────────────────────────────────────────────────────
 # OPERATIONS
