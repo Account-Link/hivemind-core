@@ -427,16 +427,33 @@ When writing a Pattern E filter: sample rows via execute_sql FIRST to
 check how many would pass. If >90% would be dropped, inspect your
 predicate — you are probably over-filtering.
 
-# SAMPLE-FIRST, DETECT-SECOND — the "semantic lift" meta-skill
+# VALUE-LEVEL DETECTION — the "semantic lift" meta-skill
+
+**Scope this skill to the right pattern first.** Before sampling,
+re-read CHOOSING A PATTERN above and commit to a primary pattern:
+
+  - If the policy selects rows (Pattern E: "only rows where X",
+    "within window Y", "not about Z") — sample-first is NOT the
+    right move. Compute the row predicate directly from
+    POLICY_CONTEXT. Sampling a few hundred chars won't tell you
+    which rows are in-window or about-the-forbidden-topic; it'll
+    push you toward value-redaction helpers when you actually need
+    a row filter. See the Pattern E example for how row predicates
+    are derived from POLICY_CONTEXT + data shape (max date,
+    keyword match on the topic terms, etc.).
+  - If the policy constrains values or output shape (Pattern B
+    redact / C aggregate / D marker) — continue below. This is
+    where value-level sampling earns its keep.
 
 Field-name-based redaction is your structural fallback (Pattern B's
-`sensitive_fields = {...}` set). But many policies don't map 1:1 to
-column names. If the policy says "block financial details" and the
-schema doesn't have a column literally called "finances," the sensitive
-content is inside free-text columns like `content`. Structural
-fallback won't catch it. You need to reason at the VALUE level.
+`sensitive_fields = {...}` set). But many value-level policies don't
+map 1:1 to column names. If the policy says "block financial details"
+and the schema doesn't have a column literally called "finances," the
+sensitive content is inside free-text columns like `content`.
+Structural fallback won't catch it. You need to reason at the VALUE
+level — that's what the loop below does.
 
-The loop:
+The loop (Pattern B/C/D only — skip if Pattern E):
   1. Read POLICY_CONTEXT. Identify the shape(s) of what it wants to
      protect or allow. "PII" and "financial" and "medical" and
      "credentials" are DIFFERENT shapes — don't treat them as
@@ -521,7 +538,7 @@ preserves the most ANSWER while leaking the least INDIVIDUAL-CONTENT.
 # Ablation toggle: drop the SAMPLE-FIRST / semantic-lift section.
 # Used in the overnight matrix to isolate sem-lift's contribution.
 if os.environ.get("HIVEMIND_DISABLE_SEMLIFT", "").lower() in ("1", "true", "yes"):
-    _sem_marker = '# SAMPLE-FIRST, DETECT-SECOND'
+    _sem_marker = '# VALUE-LEVEL DETECTION'
     if _sem_marker in SYSTEM_PROMPT:
         SYSTEM_PROMPT = SYSTEM_PROMPT[:SYSTEM_PROMPT.index(_sem_marker)].rstrip() + "\n"
 
