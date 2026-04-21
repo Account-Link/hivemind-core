@@ -168,6 +168,7 @@ class Pipeline:
                         raw_output=output,
                         prompt=req.query,
                         max_tokens=remaining,
+                        policy=req.policy,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
@@ -462,6 +463,7 @@ class Pipeline:
         raw_output: str,
         prompt: str,
         max_tokens: int | None = None,
+        policy: str | None = None,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
         agent_config = await asyncio.to_thread(
@@ -473,6 +475,7 @@ class Pipeline:
         env = {
             "RAW_OUTPUT": raw_output,
             "QUERY_PROMPT": prompt,
+            "MEDIATION_POLICY": policy or "",
         }
 
         # Mediator has NO data access tools
