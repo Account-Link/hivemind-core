@@ -272,6 +272,20 @@ Upload a query agent that:
 | 4.10 | Agent loops LLM calls beyond `max_llm_calls` | Bridge returns budget exhaustion (429) |
 | 4.11 | Agent sleeps beyond timeout | Sandbox terminates; output indicates timeout/no output sentinel |
 
+### 4c. Artifact upload round-trip (`/sandbox/artifact-upload` → Postgres → `/v1/query/runs/{run_id}/artifacts/{filename}`)
+
+Upload a query agent whose `agent.py` POSTs base64 bytes to the bridge's `/sandbox/artifact-upload`, then verify the server-side fetch path returns the same bytes.
+
+| Test | Action | Pass Criteria |
+|------|--------|---------------|
+| 4.12 | Agent posts `{"filename","content_base64","content_type"}` and receives `{path, size_bytes, retention_seconds}` | Response path is `/v1/query/runs/{run_id}/artifacts/{filename}`; `size_bytes` matches decoded length |
+| 4.13 | `GET /v1/agent-runs/{run_id}` after completion | `.artifacts[]` lists each uploaded filename with correct `content_type` and `size_bytes` |
+| 4.14 | `GET /v1/query/runs/{run_id}/artifacts/{filename}` | 200; body bytes equal to uploaded bytes; response headers include `content-type`, `content-disposition`, `x-retention-seconds`, `expires` |
+| 4.15 | `GET` for a non-existent filename under the same run | 404 with `{"detail":"Artifact not found or expired"}` |
+| 4.16 | Upload two artifacts with different content types (e.g. `application/json`, `text/plain`) in one run | Both fetchable; server returns each with its original `content_type` |
+
+Canonical live smoke (2026-04-23, EC2): 64-byte JSON + 30-byte text uploaded and fetched round-trip; pipeline duration dominated by scope phase (~224s) — upload path itself adds negligible latency.
+
 ---
 
 ## Phase 5: Scope Agent Simulation + Inspection Limits
@@ -335,11 +349,11 @@ Phase 0: API Surface                X/4
 Phase 1: Schema + Store             X/5
 Phase 2: Scope Function Isolation   X/5
 Phase 3: Scope Agent + Validation   X/8
-Phase 4: Sandbox Platform           X/11
+Phase 4: Sandbox Platform           X/16
 Phase 5: Scope Sim/Inspect Limits   X/5
 Phase 6: Tape Recorder + Replay     X/6
 Phase 7: Robustness                 X/4
-TOTAL: X/48
+TOTAL: X/53
 ```
 
 Security blockers:
@@ -369,7 +383,7 @@ At the end of a full completion run, output both:
     "phase_1": "X/5",
     "phase_2": "X/5",
     "phase_3": "X/8",
-    "phase_4": "X/11",
+    "phase_4": "X/16",
     "phase_5": "X/5",
     "phase_6": "X/6",
     "phase_7": "X/4",
