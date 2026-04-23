@@ -166,7 +166,7 @@ agents/            Default + reference agents (see agents/examples/README.md)
   examples/        Sample uploadable agents
 deploy/            Production dstack CVM artifacts (postgres/, monitor/, contracts/)
 tests/             Unit + Docker integration tests
-scripts/           quickstart.sh, eval-scope.sh
+scripts/           quickstart.sh
 ```
 
 ## Tests
