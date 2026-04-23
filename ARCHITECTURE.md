@@ -483,9 +483,9 @@ agents/
 
 deploy/
   boot.sh              CVM entrypoint (env-var secrets, wait for Postgres)
-  Dockerfile           Production app image
-  docker-compose.yaml  Production dstack deployment (app + Postgres)
-  docker-compose.dev.yml  Local dev Postgres
-  postgres/            Production Postgres image (WAL-G, supercronic)
+  Dockerfile           Production app image (built by CI → GHCR)
+  docker-compose.dev.yml  Local dev Postgres (used by quickstart.sh)
+  phala/               Phala Cloud two-CVM deploy (postgres + core compose files, deploy.sh)
+  postgres/            Production Postgres image (WAL-G, supercronic, sql-proxy sidecar)
   restore.sh           Disaster recovery (WAL-G restore from R2)
 ```
