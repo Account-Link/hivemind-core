@@ -38,7 +38,10 @@ if ! su postgres -c "pg_isready -h /var/run/postgresql" >/dev/null 2>&1; then
     exit 1
 fi
 
-# ALTER USER is idempotent — if password already matches, pg accepts it.
-su postgres -c "psql -h /var/run/postgresql -d postgres -v ON_ERROR_STOP=1 -c \"ALTER USER \\\"${DB_USER}\\\" WITH PASSWORD '${POSTGRES_PASSWORD}';\"" \
+# ALTER USER is idempotent. Connect as the DB_USER role (not 'postgres' — the
+# 'postgres' role doesn't exist when initdb ran with POSTGRES_USER=hivemind).
+# Local unix-socket auth is `trust` by default in postgres:16's pg_hba.conf,
+# so no password is needed for the socket connection itself.
+PSQL_OUT=$(su postgres -c "psql -h /var/run/postgresql -U \"${DB_USER}\" -d postgres -v ON_ERROR_STOP=1 -c \"ALTER USER \\\"${DB_USER}\\\" WITH PASSWORD '${POSTGRES_PASSWORD}';\"" 2>&1) \
     && log "aligned password for role '${DB_USER}'" \
-    || log "ALTER USER failed for role '${DB_USER}'"
+    || log "ALTER USER failed for role '${DB_USER}': ${PSQL_OUT}"
