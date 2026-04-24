@@ -23,11 +23,42 @@ def _reset_state():
     )
 
 
-def test_report_data_is_64_bytes_and_version_tagged():
-    rd = attestation._build_report_data()
+def test_report_data_v1_is_64_bytes_and_version_tagged():
+    rd = attestation._build_report_data_v1()
     assert len(rd) == 64
     assert rd[32] == 0x01
     assert rd[33:] == b"\x00" * 31
+
+
+def test_report_data_v2_layout_matches_feedling():
+    # Layout parity check against feedling-mcp-v1/backend/enclave_app.py
+    # build_report_data: [binding32 || version_byte || flag_byte || reserved30].
+    fp = b"\x11" * 32
+    rd = attestation._build_report_data_v2(fp)
+    assert len(rd) == 64
+    assert rd[32] == 0x02
+    assert rd[33] == 0x00
+    assert rd[34:] == b"\x00" * 30
+
+
+def test_report_data_v2_verify_roundtrip():
+    # Build + verify should roundtrip; a different fingerprint should fail.
+    from hivemind import dcap
+    from hivemind.version import APP_VERSION
+
+    fp = b"\x22" * 32
+    rd = attestation._build_report_data_v2(fp)
+    # Wrap in a synthetic quote so extract_report_data_hex works.
+    quote = b"\x00" * (48 + 520) + rd
+    rd_hex = dcap.extract_report_data_hex(quote.hex())
+    assert dcap.verify_report_data_v2(
+        rd_hex, observed_fingerprint=fp, hivemind_version=APP_VERSION
+    )
+    assert not dcap.verify_report_data_v2(
+        rd_hex,
+        observed_fingerprint=b"\x33" * 32,
+        hivemind_version=APP_VERSION,
+    )
 
 
 def test_parse_mr_config_id_extracts_48_bytes_at_known_offset():

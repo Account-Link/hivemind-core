@@ -41,3 +41,8 @@ bench/sources/__pycache__/
 
 # Agent backup files (kept in git history, not in working tree)
 agents/*/*.py.bak
+deploy/contracts/.env
+deploy/contracts/broadcast/
+deploy/contracts/cache/
+deploy/contracts/out/
+deploy/contracts/lib/

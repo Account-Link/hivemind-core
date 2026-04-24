@@ -47,6 +47,28 @@ services:
       HIVEMIND_LLM_BASE_URL: ${HIVEMIND_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-anthropic/claude-sonnet-4.5}
 
+      # On-chain app-auth registry (Tier 1 attestation binding).
+      # When set, the CLI auto-accepts an approved compose_hash and
+      # hard-aborts on a revoked one without any user prompt. Empty →
+      # CLI falls back to the local TOFU / change-prompt flow.
+      # Contract deployed on Sepolia 2026-04-25; owner holds the key in
+      # /Users/sxysun/Desktop/suapp/feedling-mcp-v1/contracts/.env.
+      HIVEMIND_APP_AUTH_CONTRACT: ${HIVEMIND_APP_AUTH_CONTRACT:-0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E}
+      HIVEMIND_APP_AUTH_CHAIN_ID: ${HIVEMIND_APP_AUTH_CHAIN_ID:-11155111}
+      HIVEMIND_APP_AUTH_RPC_URL: ${HIVEMIND_APP_AUTH_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      HIVEMIND_APP_AUTH_EXPLORER_BASE_URL: ${HIVEMIND_APP_AUTH_EXPLORER_BASE_URL:-https://sepolia.etherscan.io}
+
+      # TLS-in-enclave (Tier 3 attestation binding — feedling's first binding).
+      # Turn on to have the enclave terminate TLS with a deterministic
+      # dstack-KMS-derived cert whose sha256(DER) is bound into the TDX
+      # quote's REPORT_DATA (v2). The CLI reconstructs the binding from
+      # (APP_VERSION, observed_fingerprint) and aborts on mismatch.
+      # Requires: (a) the service URL uses ``-8100s.app.phala.network``
+      # (the ``s`` suffix is Phala's TCP-passthrough convention), so the
+      # CLI sees the enclave's self-signed cert directly. (b) the CLI
+      # must be >=0.3.1 to consume the v2 report_data layout.
+      HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-}
+
       # Docker sandbox — agents run as containers via host Docker daemon
       HIVEMIND_BRIDGE_HOST: "0.0.0.0"
       HIVEMIND_DOCKER_NETWORK_INTERNAL: "false"

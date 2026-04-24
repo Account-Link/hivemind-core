@@ -13,18 +13,24 @@ Usage:
   hivemind agents
 """
 
+import hashlib as _hashlib
 import io
 import json as _json
 import os
+import socket as _socket
+import ssl as _ssl
 import sys
 import tarfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse as _urlparse
 
 import click
 import httpx
 import yaml
 
+from . import dcap as _dcap
+from . import onchain as _onchain
 from . import trust as _trust
 
 _CONFIG_DIR = ".hivemind"
@@ -40,6 +46,66 @@ COPY agent.py .
 COPY prompt.md .
 CMD ["python", "/app/agent.py"]
 """
+
+
+# ── Pinned httpx wrappers ──
+#
+# When the enclave terminates TLS (``HIVEMIND_ENCLAVE_TLS=1``) the
+# server serves a self-signed cert derived from dstack-KMS. Default
+# ``httpx.get/post/...`` would reject it with a CA-chain error. After
+# ``_require_trust`` has cryptographically verified that the live
+# cert fingerprint matches what's bound into the TDX quote, we save
+# the verified PEM and pin *every* subsequent service call to it via
+# ``verify=<path>``. That turns the one-shot quote check into a
+# continuous transport-level binding for the rest of the process.
+#
+# When TLS-in-enclave is off, ``_SERVICE_VERIFY`` stays ``True`` and
+# behavior is identical to plain ``httpx.get/post``.
+
+_SERVICE_VERIFY: str | bool = True
+
+
+def _hget(url: str, **kw):
+    kw.setdefault("verify", _SERVICE_VERIFY)
+    return httpx.get(url, **kw)
+
+
+def _hpost(url: str, **kw):
+    kw.setdefault("verify", _SERVICE_VERIFY)
+    return httpx.post(url, **kw)
+
+
+def _hput(url: str, **kw):
+    kw.setdefault("verify", _SERVICE_VERIFY)
+    return httpx.put(url, **kw)
+
+
+def _hdelete(url: str, **kw):
+    kw.setdefault("verify", _SERVICE_VERIFY)
+    return httpx.delete(url, **kw)
+
+
+def _pin_service_cert(observed_fp: bytes, cert_pem: str) -> None:
+    """Persist the verified enclave cert and wire it as the default verify.
+
+    Called by ``_require_trust`` after ``_verify_tls_pin`` has
+    cryptographically confirmed the cert. Subsequent service requests
+    through ``_hget/_hpost/...`` will use this cert as their CA — so a
+    mid-session MITM that serves a different cert fails the TLS
+    handshake rather than returning plausible garbage.
+    """
+    global _SERVICE_VERIFY
+    if not cert_pem:
+        return
+    pin_dir = Path.home() / ".hivemind"
+    pin_dir.mkdir(parents=True, exist_ok=True)
+    fp8 = observed_fp.hex()[:16]
+    pin_path = pin_dir / f"enclave-tls-{fp8}.pem"
+    try:
+        pin_path.write_text(cert_pem, encoding="utf-8")
+    except OSError:
+        return
+    _SERVICE_VERIFY = str(pin_path)
 
 
 # ── Config helpers ──
@@ -142,7 +208,7 @@ def _api_error(resp: httpx.Response) -> str:
 
 def _http_get(url: str, headers: dict, timeout: float = 30) -> dict:
     try:
-        r = httpx.get(url, headers=headers, timeout=timeout)
+        r = _hget(url, headers=headers, timeout=timeout)
     except httpx.ConnectError:
         click.echo(f"Error: Cannot reach {url}", err=True)
         raise SystemExit(2)
@@ -165,23 +231,314 @@ def _http_get(url: str, headers: dict, timeout: float = 30) -> dict:
 #   HIVEMIND_TRUST_ALL=1          auto-approve any change
 #   HIVEMIND_TRUST_HASH=0x...     abort unless hash matches (strict CI)
 #   HIVEMIND_NO_TRUST_CHECK=1     skip the check entirely (dev)
+#
+# If the attestation bundle includes an ``app_auth`` block with a
+# non-empty contract address, the CLI queries the on-chain registry
+# first. An approved hash auto-accepts silently; a revoked hash
+# hard-aborts with no y/N prompt. Unknown/unreachable contracts fall
+# back to the local TOFU / change-prompt flow (fail-closed on the
+# local store — never fail-open on the RPC).
 
 
-def _fetch_attestation(service: str) -> dict:
+def _fetch_attestation(service: str) -> tuple[dict, bytes | None]:
+    """Fetch ``/v1/attestation`` and capture the peer cert fingerprint.
+
+    Returns ``(bundle, observed_fingerprint_or_None)``. The fingerprint
+    is ``sha256(cert.DER)`` of the cert the server presented during the
+    TLS handshake — non-None only when the service URL is ``https://``.
+
+    Self-signed certs are tolerated (verify_mode=CERT_NONE) because
+    feedling's trust model pins the cert via attestation, not via the
+    public-CA chain — the CLI re-verifies the observed fingerprint
+    against the value cryptographically bound into the TDX quote's
+    REPORT_DATA v2 immediately after. A MITM that served its own cert
+    would be caught in that check.
+    """
     url = f"{service.rstrip('/')}/v1/attestation"
+    parsed = _urlparse(url)
+    if parsed.scheme == "https":
+        return _fetch_attestation_https(parsed)
+    # Plain http — no TLS, no fingerprint to pin.
     try:
-        r = httpx.get(url, timeout=5)
+        r = _hget(url, timeout=5)
     except (httpx.ConnectError, httpx.TimeoutException) as e:
-        return {"ready": False, "reason": f"fetch_failed: {e!r}"}
+        return ({"ready": False, "reason": f"fetch_failed: {e!r}"}, None)
     if r.status_code != 200:
-        return {
-            "ready": False,
-            "reason": f"http_{r.status_code}: {_api_error(r)}",
-        }
+        return (
+            {
+                "ready": False,
+                "reason": f"http_{r.status_code}: {_api_error(r)}",
+            },
+            None,
+        )
     try:
-        return r.json()
+        return (r.json(), None)
     except ValueError:
-        return {"ready": False, "reason": "invalid_json"}
+        return ({"ready": False, "reason": "invalid_json"}, None)
+
+
+def _fetch_attestation_https(parsed) -> tuple[dict, bytes | None]:
+    """Fetch /v1/attestation over HTTPS, capturing peer cert DER.
+
+    Uses http.client directly so we can reach into the underlying
+    ssl socket and call ``getpeercert(binary_form=True)`` before the
+    connection closes. httpx doesn't expose the raw cert reliably.
+    """
+    import http.client as _httpc
+
+    host = parsed.hostname or ""
+    port = parsed.port or 443
+    path = parsed.path or "/v1/attestation"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        conn = _httpc.HTTPSConnection(host, port, timeout=5, context=ctx)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = resp.read()
+        fp: bytes | None = None
+        try:
+            der = conn.sock.getpeercert(binary_form=True)  # type: ignore[union-attr]
+        except Exception:
+            der = None
+        if der:
+            fp = _hashlib.sha256(der).digest()
+        conn.close()
+    except (OSError, _ssl.SSLError) as e:
+        return ({"ready": False, "reason": f"fetch_failed: {e!r}"}, None)
+
+    if resp.status != 200:
+        return (
+            {"ready": False, "reason": f"http_{resp.status}"},
+            fp,
+        )
+    try:
+        return (_json.loads(body.decode("utf-8")), fp)
+    except (ValueError, UnicodeDecodeError):
+        return ({"ready": False, "reason": "invalid_json"}, fp)
+
+
+def _dcap_augment(bundle: dict) -> dict:
+    """Cryptographically verify the quote and pin the compose_hash.
+
+    If verification succeeds, returns a new bundle whose
+    ``attestation.compose_hash`` is the hash extracted from the
+    verified ``mr_config_id`` register — overriding whatever the server
+    claimed. If verification can't run, the bundle passes through
+    unchanged (unless HIVEMIND_REQUIRE_DCAP=1, which hard-aborts).
+    """
+    if os.environ.get("HIVEMIND_DISABLE_DCAP"):
+        return bundle
+    if not bundle.get("ready"):
+        return bundle
+
+    require = bool(os.environ.get("HIVEMIND_REQUIRE_DCAP"))
+
+    if not _dcap.available():
+        if require:
+            click.echo(
+                "Error: HIVEMIND_REQUIRE_DCAP=1 but the dcap_qvl wheel "
+                "is not installed. Build it from "
+                "/Users/sxysun/Desktop/suapp/feedling-mcp-v1/ios/vendor/"
+                "dcap-qvl/python-bindings (maturin build --release) and "
+                "`uv pip install` the wheel.",
+                err=True,
+            )
+            raise SystemExit(4)
+        return bundle
+
+    att = bundle.get("attestation") or {}
+    quote_hex = att.get("tdx_quote_hex") or ""
+    if not quote_hex:
+        return bundle
+
+    result = _dcap.verify_quote(quote_hex)
+
+    if result.status == "verified":
+        # Replace the server-claimed hash with the cryptographically
+        # verified one and annotate the bundle for downstream UX.
+        new_att = {
+            **att,
+            "compose_hash": result.verified_compose_hash
+            or att.get("compose_hash", ""),
+            "dcap": {
+                "status": result.status,
+                "tcb_status": result.tcb_status,
+                "advisory_ids": list(result.advisory_ids),
+            },
+        }
+        return {**bundle, "attestation": new_att}
+
+    if result.status in {"revoked", "invalid"}:
+        click.echo(
+            f"\nError: TDX quote verification FAILED ({result.status}).\n"
+            f"  Reason: {result.reason or result.tcb_status}\n"
+            "The CVM's attestation cannot be trusted. Aborting.",
+            err=True,
+        )
+        raise SystemExit(4)
+
+    if result.status == "tcb_issue":
+        click.echo(
+            f"! TCB warning: status={result.tcb_status}; "
+            f"advisories={list(result.advisory_ids)}. "
+            "Quote cryptographically valid but platform TCB is not "
+            "UpToDate. Continuing.",
+            err=True,
+        )
+        new_att = {
+            **att,
+            "compose_hash": result.verified_compose_hash
+            or att.get("compose_hash", ""),
+            "dcap": {
+                "status": result.status,
+                "tcb_status": result.tcb_status,
+                "advisory_ids": list(result.advisory_ids),
+            },
+        }
+        return {**bundle, "attestation": new_att}
+
+    # network / unavailable → warn and fall back
+    if require:
+        click.echo(
+            f"Error: HIVEMIND_REQUIRE_DCAP=1 but DCAP failed "
+            f"({result.status}): {result.reason}",
+            err=True,
+        )
+        raise SystemExit(4)
+    click.echo(
+        f"! DCAP skipped ({result.status}): {result.reason or '(no detail)'}. "
+        "Falling back to server-claimed compose hash.",
+        err=True,
+    )
+    return bundle
+
+
+def _consult_app_auth(bundle: dict, compose_hash: str) -> bool | None:
+    """Ask the on-chain registry whether `compose_hash` is approved.
+
+    Returns True  → approved  (auto-accept, no prompt).
+            False → revoked   (hard-abort).
+            None  → unknown / not configured / RPC unreachable
+                    (fall back to local TOFU / change-prompt flow).
+
+    The contract address and RPC URL are carried in the attestation
+    bundle itself — the CLI trusts *where to look*, not *what the
+    answer is*. The answer comes from the chain.
+
+    Override via env:
+      HIVEMIND_APP_AUTH_RPC   — override the RPC URL (mirrored in bundle).
+      HIVEMIND_DISABLE_APP_AUTH=1 — skip the check entirely.
+    """
+    if os.environ.get("HIVEMIND_DISABLE_APP_AUTH"):
+        return None
+    if not compose_hash:
+        return None
+    att = (bundle.get("attestation") or {}).get("app_auth") or {}
+    contract = att.get("contract") or ""
+    if not contract:
+        return None
+    rpc_url = (
+        os.environ.get("HIVEMIND_APP_AUTH_RPC", "").strip()
+        or att.get("rpc_url")
+        or ""
+    )
+    if not rpc_url:
+        return None
+    return _onchain.is_app_allowed(rpc_url, contract, compose_hash)
+
+
+def _verify_tls_pin(bundle: dict, observed_fp: bytes | None) -> None:
+    """Verify the live TLS fingerprint matches what's bound into the quote.
+
+    This is feedling's first binding translated for hivemind: the
+    enclave's deterministic TLS cert has ``sha256(cert.DER)`` folded
+    into REPORT_DATA v2 during quote generation. The CLI extracts the
+    raw report_data from the verified quote, reconstructs the
+    binding from (app_version, observed_fingerprint), and aborts on
+    mismatch — that's the signal that something between us and the
+    enclave is serving its own cert.
+
+    No-op when:
+      - bundle is ``report_data_version=1`` (TLS-in-enclave off),
+      - we didn't observe a fingerprint (plain http://),
+      - dcap wheel isn't installed (can't parse quote).
+
+    Toggle ``HIVEMIND_DISABLE_TLS_PIN=1`` to skip (dev only). Strict
+    mode via ``HIVEMIND_REQUIRE_TLS_PIN=1`` aborts if we can't run
+    the check (mirror of ``HIVEMIND_REQUIRE_DCAP``).
+    """
+    if os.environ.get("HIVEMIND_DISABLE_TLS_PIN"):
+        return
+    if not bundle.get("ready"):
+        return
+    att = bundle.get("attestation") or {}
+    if att.get("report_data_version") != 2:
+        return
+    strict = bool(os.environ.get("HIVEMIND_REQUIRE_TLS_PIN"))
+    if observed_fp is None:
+        if strict:
+            click.echo(
+                "Error: HIVEMIND_REQUIRE_TLS_PIN=1 but service URL is "
+                "not https:// — no live cert to pin against.",
+                err=True,
+            )
+            raise SystemExit(4)
+        return
+    quote_hex = att.get("tdx_quote_hex") or ""
+    if not quote_hex:
+        return
+    rd_hex = _dcap.extract_report_data_hex(quote_hex)
+    if not rd_hex:
+        if strict:
+            click.echo(
+                "Error: HIVEMIND_REQUIRE_TLS_PIN=1 but report_data could "
+                "not be extracted from the quote.",
+                err=True,
+            )
+            raise SystemExit(4)
+        return
+    hv = att.get("hivemind_version", "")
+    if _dcap.verify_report_data_v2(
+        rd_hex,
+        observed_fingerprint=observed_fp,
+        hivemind_version=hv,
+    ):
+        # Sanity check against the bundle's declared fingerprint too.
+        declared = (att.get("tls") or {}).get(
+            "cert_fingerprint_sha256_hex", ""
+        ).lower()
+        if declared and declared != observed_fp.hex():
+            click.echo(
+                f"\nError: bundle's declared cert fingerprint "
+                f"({declared[:16]}…) disagrees with observed "
+                f"({observed_fp.hex()[:16]}…) despite quote-binding "
+                "match. This is an inconsistent server, not MITM, but "
+                "it's suspicious enough to abort.",
+                err=True,
+            )
+            raise SystemExit(4)
+        # Pin: save the enclave's PEM and default every subsequent
+        # httpx call to verify against it.
+        cert_pem = (att.get("tls") or {}).get("cert_pem", "")
+        if cert_pem:
+            _pin_service_cert(observed_fp, cert_pem)
+        return
+
+    # The cert on the wire is NOT the one bound into the quote.
+    click.echo(
+        "\nError: TLS cert fingerprint does not match the value bound "
+        "into the TDX quote's REPORT_DATA.\n"
+        f"  Observed sha256(cert.DER): {observed_fp.hex()}\n"
+        "  This is either a man-in-the-middle between your CLI and the "
+        "enclave, or the server is running an old image whose quote was "
+        "generated for a different cert.",
+        err=True,
+    )
+    raise SystemExit(4)
 
 
 def _require_trust(config: dict) -> None:
@@ -199,8 +556,60 @@ def _require_trust(config: dict) -> None:
         return
 
     service = config["service"]
-    bundle = _fetch_attestation(service)
+    bundle, observed_fp = _fetch_attestation(service)
+
+    # ── DCAP quote verification (feedling's second binding) ──
+    # When the vendored dcap_qvl wheel is installed, we cryptographically
+    # verify the TDX quote against the Intel SGX Root CA before trusting
+    # any claim in the bundle. On success we replace the server-claimed
+    # compose_hash with the hash extracted from the verified
+    # mr_config_id — the server can't forge that.
+    #
+    # Toggles:
+    #   HIVEMIND_REQUIRE_DCAP=1  → abort if DCAP can't run or fails.
+    #   HIVEMIND_DISABLE_DCAP=1  → skip DCAP entirely (dev).
+    bundle = _dcap_augment(bundle)
+
+    # ── TLS-cert-fingerprint pinning (feedling's first binding) ──
+    # When the bundle is report_data_version=2 and we observed a cert
+    # fingerprint on the wire, reconstruct the expected REPORT_DATA
+    # first-32-byte binding from (app_version, observed_fp) and compare
+    # against the quote. Mismatch → MITM. Layout matches feedling's
+    # build_report_data exactly, so the verifier is a direct translation.
+    _verify_tls_pin(bundle, observed_fp)
+
     decision = _trust.evaluate(service, bundle)
+
+    # ── On-chain governance gate (feedling's third binding) ──
+    # Runs before the local trust store because the chain is the
+    # authoritative source: an approved hash short-circuits every
+    # prompt; a revoked hash hard-aborts with no escape hatch.
+    if decision.status in {"trusted", "tofu", "changed"}:
+        onchain_verdict = _consult_app_auth(bundle, decision.current_hash)
+        if onchain_verdict is True:
+            # Silent auto-accept. Record in local store so subsequent
+            # runs print the "(on-chain: approved)" context if desired.
+            if decision.status != "trusted":
+                _trust.record_approval(
+                    service, decision.current_hash, decision.app_id
+                )
+            return
+        if onchain_verdict is False:
+            att = (bundle.get("attestation") or {}).get("app_auth") or {}
+            contract = att.get("contract", "")
+            chain_id = att.get("chain_id", _onchain.ETH_SEPOLIA_CHAIN_ID)
+            link = _onchain.explorer_link(contract, chain_id) if contract else ""
+            click.echo(
+                f"\nError: Remote compose hash is NOT approved on-chain.\n"
+                f"  Hash:     {decision.current_hash}\n"
+                f"  Contract: {contract}"
+                + (f"\n  View:     {link}" if link else "")
+                + "\n\nThe contract owner must call addComposeHash() "
+                "before the CLI will connect.",
+                err=True,
+            )
+            raise SystemExit(4)
+        # onchain_verdict is None → fall through to local flow.
 
     if decision.status == "trusted":
         return
@@ -296,7 +705,7 @@ def init(service: str, api_key: str):
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     try:
-        resp = httpx.get(f"{service}/v1/health", headers=headers, timeout=10)
+        resp = _hget(f"{service}/v1/health", headers=headers, timeout=10)
         resp.raise_for_status()
         health = resp.json()
     except httpx.ConnectError:
@@ -408,7 +817,7 @@ def scope(
     headers = _headers(config)
 
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{service}/v1/agents/upload",
             files={
                 "archive": ("scope-agent.tar.gz", tarball, "application/gzip")
@@ -444,7 +853,7 @@ def scope(
         for _ in range(60):
             time.sleep(2)
             try:
-                sr = httpx.get(
+                sr = _hget(
                     f"{service}/v1/agent-runs/{run_id}",
                     headers=headers,
                     timeout=10,
@@ -606,7 +1015,7 @@ def load_cmd(
 
     def _post(sql: str, params: list):
         try:
-            r = httpx.post(
+            r = _hpost(
                 store_url,
                 headers=headers,
                 json={"sql": sql, "params": params},
@@ -745,7 +1154,7 @@ def query_cmd(question: str, endpoint: str | None, use_async: bool):
 
 def _query_sync(service: str, headers: dict, payload: dict) -> None:
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{service}/v1/query",
             json=payload,
             headers=headers,
@@ -776,7 +1185,7 @@ def _query_sync(service: str, headers: dict, payload: dict) -> None:
 
 def _query_async(service: str, headers: dict, payload: dict) -> None:
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{service}/v1/query/submit",
             json=payload,
             headers=headers,
@@ -793,7 +1202,7 @@ def _query_async(service: str, headers: dict, payload: dict) -> None:
     for _ in range(120):
         time.sleep(2)
         try:
-            sr = httpx.get(
+            sr = _hget(
                 f"{service}/v1/query/runs/{run_id}",
                 headers=headers,
                 timeout=10,
@@ -935,7 +1344,7 @@ def run_cmd(
         click.echo(f"Uploading to {service}...")
 
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{service}/v1/query-agents/submit",
             files={
                 "archive": (archive_name, archive_bytes, "application/gzip"),
@@ -970,7 +1379,7 @@ def run_cmd(
     last_status = ""
     while time.time() < deadline:
         try:
-            sr = httpx.get(
+            sr = _hget(
                 f"{service}/v1/agent-runs/{run_id}",
                 headers=headers,
                 timeout=15,
@@ -1043,7 +1452,7 @@ def _emit_run_result(
         for a in artifacts:
             fname = a["filename"]
             try:
-                r = httpx.get(
+                r = _hget(
                     _artifact_url(service, run_id, fname),
                     headers=headers,
                     timeout=60,
@@ -1244,7 +1653,7 @@ def rotate_key(as_json: bool):
         raise SystemExit(1)
 
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{service}/v1/tenant/rotate-key", headers=headers, timeout=30,
         )
     except httpx.RequestError as e:
@@ -1316,7 +1725,7 @@ def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json:
     """Provision a new tenant. Prints the one-time API key."""
     url = _resolve_admin_service(service)
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{url}/v1/admin/tenants",
             headers=_admin_headers(admin_key),
             json={"name": name},
@@ -1377,7 +1786,7 @@ def admin_register_existing(
     if tenant_id:
         body["tenant_id"] = tenant_id
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{url}/v1/admin/tenants/register",
             headers=_admin_headers(admin_key),
             json=body,
@@ -1412,7 +1821,7 @@ def admin_list_tenants(service: str | None, admin_key: str, as_json: bool):
     """List all tenants."""
     url = _resolve_admin_service(service)
     try:
-        resp = httpx.get(
+        resp = _hget(
             f"{url}/v1/admin/tenants",
             headers={"Authorization": f"Bearer {admin_key}"},
             timeout=15,
@@ -1456,7 +1865,7 @@ def admin_delete_tenant(tenant_id: str, service: str | None, admin_key: str):
     """Delete a tenant: drops its Postgres DB and revokes its key."""
     url = _resolve_admin_service(service)
     try:
-        resp = httpx.delete(
+        resp = _hdelete(
             f"{url}/v1/admin/tenants/{tenant_id}",
             headers={"Authorization": f"Bearer {admin_key}"},
             timeout=60,
@@ -1497,7 +1906,7 @@ def admin_rename_database(
     """
     url = _resolve_admin_service(service)
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{url}/v1/admin/rename-database",
             headers=_admin_headers(admin_key),
             json={"old_name": old_name, "new_name": new_name},
@@ -1536,7 +1945,7 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
 
     url = _resolve_admin_service(service)
     try:
-        resp = httpx.post(
+        resp = _hpost(
             f"{url}/v1/admin/migrate-to-roles",
             headers=_admin_headers(admin_key),
             timeout=180,
@@ -1570,6 +1979,225 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
             click.echo(f"  SKIP {r['db_name']} ({r['skipped']})")
         elif r.get("error"):
             click.echo(f"  ERR  {r['db_name']}: {r['error']}", err=True)
+
+
+# ── Admin: on-chain HivemindAppAuth ──
+#
+# Thin wrappers around `cast send` so the contract owner can approve
+# or revoke compose hashes without leaving the hivemind CLI. The
+# private key never leaves the operator's machine. Reads
+# (`view-release`) go through httpx — no private key required.
+
+
+@admin_cli.command("approve-hash")
+@click.argument("compose_hash")
+@click.option(
+    "--contract",
+    envvar="HIVEMIND_APP_AUTH_CONTRACT",
+    required=True,
+    help="HivemindAppAuth contract address (or HIVEMIND_APP_AUTH_CONTRACT)",
+)
+@click.option(
+    "--rpc-url",
+    envvar="ETH_SEPOLIA_RPC_URL",
+    default="https://ethereum-sepolia-rpc.publicnode.com",
+    show_default=True,
+    help="EVM JSON-RPC URL (or ETH_SEPOLIA_RPC_URL)",
+)
+@click.option(
+    "--private-key",
+    envvar="PRIVATE_KEY",
+    required=True,
+    help="Contract owner's EOA key (or PRIVATE_KEY env var)",
+)
+@click.option(
+    "--git-commit",
+    default="uncommitted",
+    show_default=True,
+    help="Git commit sha bound to this compose hash",
+)
+@click.option(
+    "--compose-yaml-uri",
+    default="",
+    help="Raw-URL pointer to the compose file (defaults to a github.com stub)",
+)
+def admin_approve_hash(
+    compose_hash: str,
+    contract: str,
+    rpc_url: str,
+    private_key: str,
+    git_commit: str,
+    compose_yaml_uri: str,
+) -> None:
+    """Approve a compose_hash on the HivemindAppAuth contract.
+
+    After this lands, any CLI connecting to a CVM running this hash
+    gets a silent auto-accept (no y/N prompt). Requires the contract
+    owner's EOA private key.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("cast") is None:
+        click.echo(
+            "Error: 'cast' (foundry) not on PATH. Install foundry or "
+            "write the transaction with another tool.",
+            err=True,
+        )
+        raise SystemExit(2)
+
+    if not compose_yaml_uri:
+        compose_yaml_uri = (
+            f"https://github.com/account-link/hivemind-core/blob/"
+            f"{git_commit}/deploy/phala/docker-compose.core.yaml"
+        )
+
+    if not compose_hash.startswith("0x"):
+        compose_hash = "0x" + compose_hash
+
+    cmd = [
+        "cast", "send",
+        contract,
+        "addComposeHash(bytes32,string,string)",
+        compose_hash,
+        git_commit,
+        compose_yaml_uri,
+        "--rpc-url", rpc_url,
+        "--private-key", private_key,
+    ]
+    click.echo(f"Approving {compose_hash} on {contract}...")
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        click.echo(f"Error: cast send failed.\n{res.stderr}", err=True)
+        raise SystemExit(3)
+    # Extract tx hash from cast output
+    for line in res.stdout.splitlines():
+        if line.lower().startswith("transactionhash"):
+            click.echo(line.strip())
+            break
+    click.echo("Approved.")
+
+
+@admin_cli.command("revoke-hash")
+@click.argument("compose_hash")
+@click.option(
+    "--contract",
+    envvar="HIVEMIND_APP_AUTH_CONTRACT",
+    required=True,
+    help="HivemindAppAuth contract address",
+)
+@click.option(
+    "--rpc-url",
+    envvar="ETH_SEPOLIA_RPC_URL",
+    default="https://ethereum-sepolia-rpc.publicnode.com",
+    show_default=True,
+)
+@click.option(
+    "--private-key",
+    envvar="PRIVATE_KEY",
+    required=True,
+)
+@click.confirmation_option(
+    prompt=(
+        "Revoke this compose hash on-chain? All CLI users will be "
+        "hard-rejected when they try to connect. Continue?"
+    )
+)
+def admin_revoke_hash(
+    compose_hash: str,
+    contract: str,
+    rpc_url: str,
+    private_key: str,
+) -> None:
+    """Revoke a compose_hash on the HivemindAppAuth contract."""
+    import shutil
+    import subprocess
+
+    if shutil.which("cast") is None:
+        click.echo("Error: 'cast' (foundry) not on PATH.", err=True)
+        raise SystemExit(2)
+
+    if not compose_hash.startswith("0x"):
+        compose_hash = "0x" + compose_hash
+
+    cmd = [
+        "cast", "send",
+        contract,
+        "revoke(bytes32)",
+        compose_hash,
+        "--rpc-url", rpc_url,
+        "--private-key", private_key,
+    ]
+    click.echo(f"Revoking {compose_hash} on {contract}...")
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        click.echo(f"Error: cast send failed.\n{res.stderr}", err=True)
+        raise SystemExit(3)
+    for line in res.stdout.splitlines():
+        if line.lower().startswith("transactionhash"):
+            click.echo(line.strip())
+            break
+    click.echo("Revoked.")
+
+
+@admin_cli.command("list-hashes")
+@click.option(
+    "--contract",
+    envvar="HIVEMIND_APP_AUTH_CONTRACT",
+    required=True,
+    help="HivemindAppAuth contract address",
+)
+@click.option(
+    "--rpc-url",
+    envvar="ETH_SEPOLIA_RPC_URL",
+    default="https://ethereum-sepolia-rpc.publicnode.com",
+    show_default=True,
+)
+def admin_list_hashes(contract: str, rpc_url: str) -> None:
+    """Print every compose_hash the on-chain registry has ever seen."""
+    import shutil
+    import subprocess
+
+    if shutil.which("cast") is None:
+        click.echo("Error: 'cast' (foundry) not on PATH.", err=True)
+        raise SystemExit(2)
+
+    count_res = subprocess.run(
+        ["cast", "call", contract, "releaseCount()(uint256)",
+         "--rpc-url", rpc_url],
+        capture_output=True, text=True,
+    )
+    if count_res.returncode != 0:
+        click.echo(f"Error: {count_res.stderr}", err=True)
+        raise SystemExit(3)
+    try:
+        count = int(count_res.stdout.strip().split()[0])
+    except (ValueError, IndexError):
+        click.echo(f"Error: unexpected output: {count_res.stdout!r}", err=True)
+        raise SystemExit(3)
+
+    if count == 0:
+        click.echo("(no releases)")
+        return
+
+    click.echo(f"{'HASH':<68} {'STATUS':<10} COMMIT")
+    for i in range(count):
+        r = subprocess.run(
+            ["cast", "call", contract,
+             "getRelease(uint256)(bytes32,bool,uint64,uint64,string,string)",
+             str(i), "--rpc-url", rpc_url],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            click.echo(f"  (error at index {i}: {r.stderr.strip()})", err=True)
+            continue
+        # cast prints one value per line for tuples.
+        lines = [ln.strip() for ln in r.stdout.strip().splitlines() if ln.strip()]
+        if len(lines) < 5:
+            continue
+        h, approved, _approved_at, _revoked_at, commit = lines[0], lines[1], lines[2], lines[3], lines[4]
+        status = "approved" if approved == "true" else "revoked"
+        click.echo(f"{h:<68} {status:<10} {commit}")
 
 
 # ── Trust store inspection (``hivemind trust ...``) ──
@@ -1641,7 +2269,7 @@ def trust_approve(service: str | None):
         config = _load_config(check_trust=False)
         service = config["service"]
     service = service.rstrip("/")
-    bundle = _fetch_attestation(service)
+    bundle, _observed_fp = _fetch_attestation(service)
     if not bundle.get("ready"):
         click.echo(
             f"Cannot approve — attestation unavailable: "

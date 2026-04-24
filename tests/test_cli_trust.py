@@ -37,7 +37,13 @@ def _sandbox(tmp_path, monkeypatch):
 
 
 def _stub_attestation(monkeypatch, bundle: dict):
-    monkeypatch.setattr(_cli_mod, "_fetch_attestation", lambda service: bundle)
+    # _fetch_attestation returns (bundle, observed_fingerprint_or_None).
+    # For these trust-flow tests we're on http:// (no TLS), so fp is None.
+    monkeypatch.setattr(
+        _cli_mod,
+        "_fetch_attestation",
+        lambda service: (bundle, None),
+    )
 
 
 def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):

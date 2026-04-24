@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     artifact_retention_seconds: int = 86400
     artifact_sweep_interval_seconds: int = 3600
 
+    # On-chain governance (feedling's third attestation binding).
+    # `app_auth_contract` is the deployed HivemindAppAuth address; when
+    # set, the CLI queries `isAppAllowed(compose_hash)` on every
+    # `_require_trust` and auto-accepts approved hashes / hard-rejects
+    # revoked ones. Empty string disables on-chain gating (TOFU only).
+    app_auth_contract: str = ""
+    app_auth_chain_id: int = 11155111  # Ethereum Sepolia
+    app_auth_rpc_url: str = "https://ethereum-sepolia-rpc.publicnode.com"
+    app_auth_explorer_base_url: str = "https://sepolia.etherscan.io"
+
     # Default agents (Docker images) — empty = not available
     autoload_default_agents: bool = True
     default_index_agent: str = ""

@@ -1273,15 +1273,56 @@ app = _LazyApp()
 
 
 def main():
+    import os
+    import tempfile
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     settings = Settings()
+
+    # When enclave-terminated TLS is on, bootstrap attestation BEFORE
+    # uvicorn.run() so we have the cert/key in hand before the socket
+    # opens. The lifespan call becomes a no-op thanks to bootstrap's
+    # idempotency guard.
+    ssl_kwargs: dict = {}
+    if os.environ.get("HIVEMIND_ENCLAVE_TLS"):
+        from . import attestation as _att
+
+        logger.info("HIVEMIND_ENCLAVE_TLS=1 — bootstrapping TLS before listen")
+        _att.bootstrap()
+        tls = _att.get_tls_material()
+        if tls is None:
+            logger.error(
+                "Enclave TLS requested but derivation failed; falling back to HTTP. "
+                "Check DSTACK_SIMULATOR_ENDPOINT / /var/run/dstack.sock."
+            )
+        else:
+            cert_pem, key_pem = tls
+            # uvicorn wants filesystem paths. tmpfs mounts are safe inside
+            # the enclave; the cert/key are derived fresh every boot anyway.
+            tdir = tempfile.mkdtemp(prefix="hivemind-tls-")
+            cert_path = os.path.join(tdir, "cert.pem")
+            key_path = os.path.join(tdir, "key.pem")
+            with open(cert_path, "wb") as f:
+                f.write(cert_pem)
+            with open(key_path, "wb") as f:
+                f.write(key_pem)
+            os.chmod(key_path, 0o600)
+            ssl_kwargs = {
+                "ssl_certfile": cert_path,
+                "ssl_keyfile": key_path,
+            }
+            logger.info(
+                "TLS cert derived from dstack-KMS; "
+                "fingerprint bound into REPORT_DATA v2"
+            )
+
     uvicorn.run(
         create_app(settings),
         host=settings.host,
         port=settings.port,
         log_level="info",
+        **ssl_kwargs,
     )
 
 
