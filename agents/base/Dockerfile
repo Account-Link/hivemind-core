@@ -7,12 +7,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI (latest; diagnostic bump from 2.1.109 → 2.1.112+)
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Pin to known-compatible versions. Post-2.1.109 claude-code + 0.1.66
+# claude-agent-sdk crashed at session start (observed 2026-04-25);
+# 2.1.109 is the npm `stable` dist-tag.
+RUN npm install -g @anthropic-ai/claude-code@2.1.109
 
-# Install Python Agent SDK + aiohttp for bridge tool calls
-# (diagnostic bump to pick up 0.1.61+ message-reader fixes)
-RUN pip install --no-cache-dir --upgrade "claude-agent-sdk>=0.1.61" aiohttp
+RUN pip install --no-cache-dir "claude-agent-sdk==0.1.61" aiohttp
 
 RUN useradd -m -s /bin/bash agent
 
