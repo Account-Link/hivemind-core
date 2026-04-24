@@ -103,14 +103,30 @@ deploy_and_seal() {
 }
 
 # Resolve service URL (looks up CVM app_id + builds the gateway URL).
+# If `tls_passthrough=1`, use the `-<port>s.` suffix — Phala's gateway
+# convention for TCP-passthrough routes, required when the container
+# terminates TLS itself (HIVEMIND_ENCLAVE_TLS=1).
 service_url() {
     local name="$1"
     local port="$2"
+    local tls_passthrough="${3:-0}"
     local app_id
     app_id=$(phala cvms list 2>/dev/null \
         | awk -v n="${name}" '$2==n { print $1; exit }')
     [ -n "${app_id}" ] || die "could not resolve app_id for ${name}"
-    echo "https://${app_id}-${port}.dstack-pha-prod5.phala.network"
+    local suffix=""
+    [ "${tls_passthrough}" = "1" ] && suffix="s"
+    echo "https://${app_id}-${port}${suffix}.dstack-pha-prod5.phala.network"
+}
+
+# Does this core compose have enclave TLS enabled (default or override)?
+core_tls_enabled() {
+    local compose="$1"
+    # Enabled if compose sets a truthy default for HIVEMIND_ENCLAVE_TLS
+    # (e.g. `${HIVEMIND_ENCLAVE_TLS:-1}`) OR the env file overrides it.
+    grep -qE '^[[:space:]]*HIVEMIND_ENCLAVE_TLS:[[:space:]]*\$\{HIVEMIND_ENCLAVE_TLS:-[^}]+\}' "${compose}" && return 0
+    grep -qE '^[[:space:]]*HIVEMIND_ENCLAVE_TLS=[1-9]' "${ENV_FILE}" 2>/dev/null && return 0
+    return 1
 }
 
 # Poll URL until HTTP 200 or timeout. On timeout, dump serial logs so
@@ -146,8 +162,12 @@ wait_healthy() {
 deploy_core() {
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
-    local url
-    url=$(service_url "${CORE_NAME}" 8100)
+    local url tls=0
+    if core_tls_enabled "${CORE_COMPOSE}"; then
+        tls=1
+        log "HIVEMIND_ENCLAVE_TLS enabled — health will poll -8100s. (TCP passthrough)"
+    fi
+    url=$(service_url "${CORE_NAME}" 8100 "${tls}")
     wait_healthy "${CORE_NAME}" "${url}${CORE_HEALTH_PATH}"
 }
 
