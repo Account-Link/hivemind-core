@@ -563,11 +563,13 @@ class DockerRunner:
         if self.settings.container_no_new_privileges:
             security_opt.append("no-new-privileges:true")
         try:
+            # Order matters: _ensure_network attaches us to the sandbox
+            # network and records self IP, which _resolve_bridge_url reads.
+            network_name = await _to_thread_with_deadline(self._ensure_network)
             container_bridge_url = await _to_thread_with_deadline(
                 self._resolve_bridge_url,
                 port,
             )
-            network_name = await _to_thread_with_deadline(self._ensure_network)
 
             container_env = dict(env or {})
             container_env["BRIDGE_URL"] = container_bridge_url
