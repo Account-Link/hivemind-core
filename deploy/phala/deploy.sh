@@ -68,9 +68,14 @@ pin_compose() {
     local image_name="$2"
     local pinned_ref="$3"
 
-    # Create a temp copy with pinned image reference
+    # Create a temp copy with pinned image reference.
+    # Match any existing tag on the image (commonly `:latest` in committed
+    # compose files) and replace with the digest-pinned ref — lets us deploy
+    # alternate tags (e.g. IMAGE_TAG=v0.4.0-rotate from workflow_dispatch)
+    # without editing the compose files.
     local tmp="${compose_file}.pinned"
-    sed "s|${REGISTRY}/${NAMESPACE}/${image_name}:${TAG}|${pinned_ref}|g" \
+    local full="${REGISTRY}/${NAMESPACE}/${image_name}"
+    sed -E "s|${full}:[A-Za-z0-9._-]+|${pinned_ref}|g" \
         "${compose_file}" > "${tmp}"
     echo "${tmp}"
 }
@@ -129,9 +134,9 @@ deploy_postgres() {
     echo "  sql-proxy: ${sql_pinned}"
 
     local tmp="${compose}.pinned"
-    sed \
-        -e "s|${REGISTRY}/${NAMESPACE}/hivemind-postgres:${TAG}|${pg_pinned}|g" \
-        -e "s|${REGISTRY}/${NAMESPACE}/hivemind-sql-proxy:${TAG}|${sql_pinned}|g" \
+    sed -E \
+        -e "s|${REGISTRY}/${NAMESPACE}/hivemind-postgres:[A-Za-z0-9._-]+|${pg_pinned}|g" \
+        -e "s|${REGISTRY}/${NAMESPACE}/hivemind-sql-proxy:[A-Za-z0-9._-]+|${sql_pinned}|g" \
         "${compose}" > "${tmp}"
 
     echo "  Compose diff:"

@@ -41,5 +41,10 @@ if [ -n "${WALG_S3_PREFIX:-}" ]; then
     cron
 fi
 
+# --- Background: align hivemind-role password to POSTGRES_PASSWORD on every boot ---
+# See reset-password.sh. Cheap no-op when values already match; fixes the
+# case where the deploy-time env drifts from the initdb-time password.
+/usr/local/bin/reset-password.sh &
+
 # --- Hand off to official postgres entrypoint ---
 exec docker-entrypoint.sh "$@"
