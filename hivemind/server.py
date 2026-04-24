@@ -180,6 +180,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Ensure hivemind-agent-base:latest exists before accepting uploads.
+        # Runs off the event loop because image build can take minutes.
+        try:
+            from .agent_base_bootstrap import ensure_agent_base_image
+            await asyncio.to_thread(ensure_agent_base_image)
+        except Exception as e:
+            logger.warning("agent-base bootstrap raised: %s", e)
         registry = TenantRegistry(settings)
         app.state.registry = registry
         yield
