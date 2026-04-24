@@ -64,3 +64,6 @@ services:
       HIVEMIND_DEFAULT_MEDIATOR_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_IMAGE:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # dstack socket — lets hivemind fetch its TDX quote + measurements
+      # for the /v1/attestation endpoint (compose-hash binding).
+      - /var/run/dstack.sock:/var/run/dstack.sock
