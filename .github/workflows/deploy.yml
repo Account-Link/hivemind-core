@@ -206,29 +206,39 @@ jobs:
             ./deploy/phala/deploy.sh "${TARGET}"
           REMOTE
 
-      # On-chain compose-hash registration. After a successful core
-      # deploy, the new image's `compose_hash` (which dstack writes
-      # into the TDX quote's `mr_config_id`) must be approved on the
-      # HivemindAppAuth contract before any CLI client can connect
-      # without a manual TOFU prompt. We do this from CI rather than
-      # by hand because (a) the hash changes every time the compose
-      # file or any image pin changes, and (b) `cast send` with the
-      # owner key is the actual gate — keeping that key in GH secrets
-      # means the owner doesn't have to be online to ship.
+      # On-chain compose-hash registration. After a deploy, the new
+      # image's `compose_hash` (which dstack writes into the TDX
+      # quote's `mr_config_id`) must be approved on the HivemindAppAuth
+      # contract before any CLI client can connect without a manual
+      # TOFU prompt. We do this from CI rather than by hand because
+      # (a) the hash changes every time the compose file or any image
+      # pin changes, and (b) `cast send` with the owner key is the
+      # actual gate — keeping that key in GH secrets means the owner
+      # doesn't have to be online to ship.
+      #
+      # Runs on `always()` (gated only on target!=postgres) so that a
+      # partially-applied deploy — where `phala deploy` pushed the new
+      # compose to dstack-state but timed out at `[Wait for CVM Ready]`
+      # — still gets reconciled. Without this, the CVM sits on an
+      # unapproved hash and every CLI client fails the attestation
+      # gate. The approve step itself reads live `/v1/attestation`,
+      # so it's authoritative regardless of whether the deploy step
+      # reported success.
       #
       # Idempotent: skipped silently if `isAppAllowed` already true,
-      # so re-runs of the same image are no-ops.
+      # so re-runs of the same image (or a deploy that failed before
+      # touching the compose) are no-ops.
       #
       # Skipped on postgres-only deploys (hivemind-pg has its own
       # compose_hash but isn't gated by this contract).
       - name: Install foundry (for cast)
-        if: github.event.inputs.target != 'postgres'
+        if: always() && github.event.inputs.target != 'postgres'
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
 
       - name: Approve compose_hash on-chain
-        if: github.event.inputs.target != 'postgres'
+        if: always() && github.event.inputs.target != 'postgres'
         env:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"

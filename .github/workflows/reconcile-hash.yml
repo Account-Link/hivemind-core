@@ -1,0 +1,112 @@
+name: Reconcile compose_hash on-chain
+
+# Manually reconcile the on-chain HivemindAppAuth registry with the
+# compose_hash currently running on the live core CVM.
+#
+# Why this exists: deploy.yml's approve step now runs on `always()` so
+# a partial deploy still registers the new hash. But there are escape
+# paths it doesn't cover — out-of-band restarts (`phala cvms restart`),
+# manual compose edits via the dashboard, GH outages during a deploy,
+# old workflows that ran before the always() fix landed. This workflow
+# is the catch-all: fetch the live attestation, check on-chain, approve
+# if needed. Idempotent and safe to re-run.
+#
+# Same EC2-relay pattern is NOT used here — the friendly URL is
+# publicly reachable and `/v1/attestation` requires no auth, so the GH
+# runner can hit it directly. Only `cast send` needs PRIVATE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Hivemind service URL (default: friendly prod URL)"
+        required: false
+        default: "https://hivemind.teleport.computer"
+      dry_run:
+        description: "Plan only — print live hash + on-chain status, no approve"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+concurrency:
+  group: phala-cvm-reconcile-hash
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install foundry (for cast)
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Fetch live compose_hash and reconcile
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"
+          RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
+          SERVICE: ${{ github.event.inputs.service }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          ATTEST_URL="${SERVICE%/}/v1/attestation"
+          echo "fetching compose_hash from ${ATTEST_URL}"
+          HASH=""
+          for i in 1 2 3 4 5; do
+            HASH=$(curl -fsk --max-time 15 "${ATTEST_URL}" 2>/dev/null \
+              | jq -r '.attestation.compose_hash // empty')
+            [ -n "${HASH}" ] && break
+            echo "  attempt ${i}: empty/unavailable, retrying in 5s…"
+            sleep 5
+          done
+          if [ -z "${HASH}" ]; then
+            echo "::error::could not fetch compose_hash from ${ATTEST_URL}"
+            exit 1
+          fi
+          echo "live compose_hash: ${HASH}"
+
+          ALREADY=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
+            'isAppAllowed(bytes32)(bool)' "0x${HASH}" 2>/dev/null || echo "false")
+          echo "on-chain isAppAllowed: ${ALREADY}"
+
+          if [ "${ALREADY}" = "true" ]; then
+            echo "✓ already approved — nothing to do"
+            exit 0
+          fi
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "── dry-run: would approve 0x${HASH} ──"
+            exit 0
+          fi
+
+          if [ -z "${PRIVATE_KEY:-}" ]; then
+            echo "::error::PRIVATE_KEY secret not set — cannot approve"
+            exit 1
+          fi
+
+          GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "reconcile")
+          COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/main/deploy/phala/docker-compose.core.yaml"
+
+          echo "approving on ${CONTRACT} (Sepolia)"
+          cast send "${CONTRACT}" \
+            'addComposeHash(bytes32,string,string)' \
+            "0x${HASH}" \
+            "${GIT_SHA}" \
+            "${COMPOSE_URI}" \
+            --rpc-url "${RPC_URL}" \
+            --private-key "${PRIVATE_KEY}" \
+            --confirmations 1
+
+          AFTER=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
+            'isAppAllowed(bytes32)(bool)' "0x${HASH}")
+          if [ "${AFTER}" != "true" ]; then
+            echo "::error::post-tx verification failed (isAppAllowed=${AFTER})"
+            exit 1
+          fi
+          echo "✓ compose_hash 0x${HASH} approved on-chain"
