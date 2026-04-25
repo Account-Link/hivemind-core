@@ -1,0 +1,179 @@
+name: Migrate hivemind-pg data (via EC2 relay)
+
+# One-shot data migration between two hivemind-pg CVMs (e.g. cluster
+# move from prod5 → prod9). Like deploy.yml, the GitHub-hosted runner
+# never sees production secrets — it SSHes into the EC2 relay which
+# already holds the authoritative `deploy/phala/.env` file containing
+# SQL_PROXY_KEY and SQL_PROXY_ADMIN_KEY. The relay runs
+# `scripts/migrate_pg.py`, which talks HTTP to both pg CVMs and copies
+# data table-by-table.
+#
+# This workflow is intentionally guarded:
+#   - default dry_run = true (validates schema reconstruction without
+#     writes)
+#   - non-dry-run requires `confirm` input set to "MIGRATE" (typo guard)
+#   - separate concurrency group from deploy.yml so a long-running
+#     migration doesn't block a deploy and vice versa
+#
+# Required GH secrets (already configured for deploy.yml — same set):
+#   EC2_HOST, EC2_USER, EC2_SSH_PRIVATE_KEY
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_url:
+        description: "Source sql-proxy base URL (old pg, port-8080 gateway URL)"
+        required: true
+        default: "https://2181af2d134123a46613f62a0311dd1f5af984be-8080.dstack-pha-prod5.phala.network"
+      dst_url:
+        description: "Destination sql-proxy base URL (new pg, port-8080 gateway URL)"
+        required: true
+        default: "https://ec76f3a3947408e0f22ac52eacc52222155a9d9f-8080.dstack-pha-prod9.phala.network"
+      dbs:
+        description: "Comma-separated DB names to migrate. Empty = all non-system DBs on src."
+        required: false
+        default: ""
+      batch_size:
+        description: "Rows per /import/csv batch (5000 is a safe default; raise on small tables, lower on huge bytea)."
+        required: false
+        default: "5000"
+      dry_run:
+        description: "Plan only — list tables, validate schema reconstruction, no writes."
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      truncate_dst:
+        description: "If a dst table is non-empty: TRUNCATE before load (otherwise: skip with warning)."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      confirm:
+        description: "Type MIGRATE here to authorize a non-dry-run. Ignored when dry_run=true."
+        required: false
+        default: ""
+
+concurrency:
+  group: phala-pg-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: "pg migrate (dry_run=${{ github.event.inputs.dry_run }})"
+    runs-on: ubuntu-latest
+    # The watch_history table is ~2.27M rows / 1.7 GB. At 5k/batch over
+    # HTTP (gateway latency + CSV serialization + COPY parse on dst) we
+    # see ~3-5k rows/s in practice → ~10 min. Round up generously.
+    timeout-minutes: 60
+
+    steps:
+      - name: Validate confirm token
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN}" != "true" ] && [ "${CONFIRM}" != "MIGRATE" ]; then
+            echo "::error::confirm input must be 'MIGRATE' for a non-dry-run. Got: '${CONFIRM}'"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run migrator on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          SRC_URL: ${{ github.event.inputs.src_url }}
+          DST_URL: ${{ github.event.inputs.dst_url }}
+          DBS: ${{ github.event.inputs.dbs }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          TRUNCATE_DST: ${{ github.event.inputs.truncate_dst }}
+        run: |
+          set -euo pipefail
+
+          # Long-running ssh: keep the connection alive aggressively so
+          # gateway-side stalls during big-table batches don't get
+          # mistaken for dead links.
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "SRC_URL='${SRC_URL}' DST_URL='${DST_URL}' DBS='${DBS}' BATCH_SIZE='${BATCH_SIZE}' DRY_RUN='${DRY_RUN}' TRUNCATE_DST='${TRUNCATE_DST}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          echo "── fetch + checkout main ────────────────────────"
+          git fetch --prune origin
+          git checkout --detach origin/main
+          echo "HEAD: $(git rev-parse --short HEAD)"
+
+          echo "── source proxy keys from deploy/phala/.env ─────"
+          # SQL_PROXY_KEY + SQL_PROXY_ADMIN_KEY live in the relay's
+          # canonical .env (same one deploy.sh consumes). Don't echo the
+          # values themselves — just confirm they're set.
+          set -a
+          # shellcheck disable=SC1091
+          . deploy/phala/.env
+          set +a
+          : "${SQL_PROXY_KEY:?SQL_PROXY_KEY missing from deploy/phala/.env on relay}"
+          : "${SQL_PROXY_ADMIN_KEY:?SQL_PROXY_ADMIN_KEY missing from deploy/phala/.env on relay}"
+          echo "proxy keys: present"
+
+          echo "── ensure python + httpx available ─────────────"
+          # Prefer uv if present (the relay sometimes has it from prior
+          # work); otherwise fall back to a one-shot venv.
+          if command -v uv >/dev/null 2>&1; then
+            RUN_PY=(uv run --with httpx python)
+          else
+            python3 -m venv .migrate-venv
+            # shellcheck disable=SC1091
+            . .migrate-venv/bin/activate
+            pip install --quiet --upgrade pip
+            pip install --quiet httpx
+            RUN_PY=(python)
+          fi
+
+          ARGS=(
+            scripts/migrate_pg.py
+            --src "${SRC_URL}"
+            --dst "${DST_URL}"
+            --batch-size "${BATCH_SIZE}"
+          )
+          if [ -n "${DBS:-}" ]; then
+            ARGS+=(--dbs "${DBS}")
+          fi
+          if [ "${DRY_RUN}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          if [ "${TRUNCATE_DST}" = "true" ]; then
+            ARGS+=(--truncate-dst)
+          fi
+
+          echo "── running migrator ─────────────────────────────"
+          echo "src=${SRC_URL}"
+          echo "dst=${DST_URL}"
+          echo "dry_run=${DRY_RUN}  truncate_dst=${TRUNCATE_DST}  batch_size=${BATCH_SIZE}"
+          SQL_PROXY_KEY="${SQL_PROXY_KEY}" \
+          SQL_PROXY_ADMIN_KEY="${SQL_PROXY_ADMIN_KEY}" \
+            "${RUN_PY[@]}" "${ARGS[@]}"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
