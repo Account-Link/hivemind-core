@@ -133,6 +133,24 @@ hivemind rotate-key
 
 Treat any tenant key that has not been rotated as bootstrap-only.
 
+### Remote / TEE deployment
+
+The examples above assume a local server (`http://localhost:8100`). To
+talk to a Phala CVM instead, pass `--service https://<cvm>-8100s.<gateway>`
+to every command (or set it once via `hivemind init --service ...`).
+
+Two extra ceremonies kick in for remote deploys, both documented in
+**[deploy/phala/DEPLOY.md](deploy/phala/DEPLOY.md)**:
+
+- **Compose-hash trust prompt** — first connection asks you to approve
+  the deployed image's hash (TOFU). Manage it with `hivemind trust
+  {show,approve,reset}`.
+- **On-chain approval** — if `HIVEMIND_APP_AUTH_CONTRACT` is set on the
+  server (default in the shipped compose), the contract owner must
+  `hivemind admin approve-hash <hash>` once before any client can
+  connect. Run `curl $URL/v1/attestation | jq .attestation.compose_hash`
+  to find the hash to approve.
+
 ## Configuration
 
 Settings load from `.env` with the `HIVEMIND_` prefix. The ones you actually touch:

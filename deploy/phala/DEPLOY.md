@@ -105,6 +105,56 @@ curl https://<core_cvm_id>-8100.app.phala.network/v1/healthz
 # {"ok": true}
 ```
 
+> **Enclave-TLS URLs.** The shipped compose sets `HIVEMIND_ENCLAVE_TLS=1`,
+> which means the CVM terminates TLS itself with a dstack-KMS-derived cert
+> bound into the TDX quote. Use the `-8100s.` (TCP-passthrough) suffix —
+> e.g. `https://<core_cvm_id>-8100s.dstack-pha-prod5.phala.network`. The
+> `hivemind` CLI auto-pins this cert; for raw `curl` you can pass
+> `--cacert ~/.hivemind/enclave-tls-<fp16>.pem` (written by the CLI on
+> first connection) or `-k` if you've already verified the fingerprint
+> out of band.
+
+## Step 2.5: Approve the compose_hash
+
+Before any CLI can talk to the new CVM, the deployed image's
+`compose_hash` must be approved. There are two layers:
+
+**(a) Local trust store (always on).** On first connection to a remote
+service, the CLI prompts to approve the current `compose_hash` (TOFU).
+On a redeploy with a new hash, it prompts again. State lives in
+`~/.hivemind/trust.json`.
+
+```bash
+hivemind trust show                          # inspect current state
+hivemind trust approve <service_url>         # force-approve without prompt
+hivemind trust reset --all                   # nuke and start over
+```
+
+**(b) On-chain registry (optional but ON by default).** The shipped
+compose sets `HIVEMIND_APP_AUTH_CONTRACT=0x29b475…36E` (Sepolia). When
+this is set, the CLI hard-rejects any hash not approved on-chain —
+operators can revoke a bad deploy without touching every client. The
+contract owner has to approve the hash *before* clients connect:
+
+```bash
+# Find the hash the CVM is actually running (no auth required)
+curl https://<core_cvm_id>-8100s.dstack-pha-prod5.phala.network/v1/attestation \
+  | jq -r .attestation.compose_hash
+# → 77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd
+
+# Approve it (one-time, requires the contract owner's EOA key)
+PRIVATE_KEY=0x... hivemind admin approve-hash \
+  77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd \
+  --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+
+# Audit / revoke later
+hivemind admin list-hashes  --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+hivemind admin revoke-hash <hash> --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+```
+
+To run *without* on-chain governance, leave `HIVEMIND_APP_AUTH_CONTRACT`
+empty in `.env` — the CLI then falls back to layer (a) only.
+
 ## Step 3: Provision Your First Tenant
 
 Now that the control plane is up, mint a tenant API key. The admin key
