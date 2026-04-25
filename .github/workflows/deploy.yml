@@ -77,6 +77,10 @@ on:
         description: "Override CVM name for hivemind-pg (e.g. hivemind-pg-prod9 for first-time create alongside legacy). Leave empty for canonical 'hivemind-pg'."
         required: false
         default: ""
+      db_url_override:
+        description: "Optional: rewrite HIVEMIND_DATABASE_URL in the relay's deploy/phala/.env (persistent — used for pg cutover). Leave empty to keep the existing value."
+        required: false
+        default: ""
 
 concurrency:
   group: phala-deploy-${{ github.event.inputs.target }}-${{ github.event.inputs.core_name }}${{ github.event.inputs.pg_name }}
@@ -94,6 +98,7 @@ jobs:
       NODE_ID: ${{ github.event.inputs.node_id }}
       CORE_NAME: ${{ github.event.inputs.core_name }}
       PG_NAME: ${{ github.event.inputs.pg_name }}
+      DB_URL_OVERRIDE: ${{ github.event.inputs.db_url_override }}
 
     steps:
       - name: Configure SSH
@@ -143,7 +148,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' NODE_ID='${NODE_ID}' CORE_NAME='${CORE_NAME}' PG_NAME='${PG_NAME}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' CLOUDFLARE_API_TOKEN_OVERRIDE='${CLOUDFLARE_API_TOKEN}' bash -s" <<'REMOTE'
+            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' NODE_ID='${NODE_ID}' CORE_NAME='${CORE_NAME}' PG_NAME='${PG_NAME}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' CLOUDFLARE_API_TOKEN_OVERRIDE='${CLOUDFLARE_API_TOKEN}' DB_URL_OVERRIDE='${DB_URL_OVERRIDE}' bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 
@@ -170,6 +175,22 @@ jobs:
             else
               echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN_OVERRIDE}" >> deploy/phala/.env
             fi
+          fi
+
+          if [ -n "${DB_URL_OVERRIDE:-}" ]; then
+            echo "── DB URL override: patching HIVEMIND_DATABASE_URL in deploy/phala/.env (persistent) ──"
+            # Used for pg cutover (e.g. prod5 → prod9). Persistent: the
+            # relay's .env keeps the new value for subsequent deploys
+            # until explicitly overridden again. Don't echo the URL —
+            # the gateway URL alone isn't a secret, but stay consistent
+            # with how we treat the rest of the .env contents.
+            if grep -q '^HIVEMIND_DATABASE_URL=' deploy/phala/.env; then
+              sed -i -E "s|^HIVEMIND_DATABASE_URL=.*|HIVEMIND_DATABASE_URL=${DB_URL_OVERRIDE}|" \
+                deploy/phala/.env
+            else
+              echo "HIVEMIND_DATABASE_URL=${DB_URL_OVERRIDE}" >> deploy/phala/.env
+            fi
+            echo "HIVEMIND_DATABASE_URL line is now: $(grep ^HIVEMIND_DATABASE_URL= deploy/phala/.env | sed -E 's|=.*|=<rewritten>|')"
           fi
 
           echo "── deploy ($TARGET) ─────────────────────────────"
