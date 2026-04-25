@@ -141,8 +141,29 @@ deploy_and_seal() {
     log "re-sealing env vars on ${name}"
     phala envs update --cvm-id "${name}" -e "${env_file}"
 
+    # `phala cvms restart` polls for status=running and exits non-zero
+    # at its hardcoded 300s timeout. On prod9 with enclave-TLS + ACME
+    # DNS-01, a stop/start cycle routinely takes longer than that
+    # (observed 6+ min on run 24931388444). Worse, when restart times
+    # out it sometimes leaves the CVM in `stopped` state — so we have
+    # to (a) treat the CLI timeout as advisory and (b) explicitly call
+    # `phala cvms start` if the CVM didn't actually come back up. The
+    # post-deploy `wait_healthy` poll is the real correctness check.
+    # Without this guard the workflow exited before the on-chain
+    # approval step could run, even though the deploy itself succeeded.
     log "restarting ${name} to pick up re-sealed envs"
-    phala cvms restart --cvm-id "${name}" >/dev/null
+    if ! phala cvms restart --cvm-id "${name}" >/dev/null 2>&1; then
+        warn "phala cvms restart timed out (CLI 300s limit); checking state"
+        local s
+        s=$(phala cvms get --cvm-id "${name}" --json 2>/dev/null \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))')
+        log "post-restart status: ${s}"
+        if [ "${s}" = "stopped" ]; then
+            warn "CVM left in stopped state — issuing explicit start"
+            phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
+                || warn "phala cvms start also returned non-zero; wait_healthy will verify"
+        fi
+    fi
 }
 
 # Resolve service URL (looks up CVM app_id + builds the gateway URL).
