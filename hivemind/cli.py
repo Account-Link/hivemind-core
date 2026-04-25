@@ -712,8 +712,8 @@ def _require_trust(config: dict) -> None:
     # Interactive prompt.
     skip_hint = (
         "  Skip this prompt next time:\n"
-        "    --yes        auto-approve (TLS pin + on-chain revoke still enforced)\n"
-        "    --insecure   disable all verification (DEV / localhost only)"
+        "    --yes                            auto-approve (TLS pin + on-chain revoke still enforced)\n"
+        "    --dangerously-skip-attestations  disable all verification (DEV / localhost only)"
     )
     if decision.status == "tofu":
         click.echo(
@@ -745,7 +745,8 @@ def _require_trust(config: dict) -> None:
     except (click.Abort, EOFError):
         click.echo(
             "Aborted — no input available. Re-run with --yes (auto-approve) "
-            "or --insecure (full skip, dev only) for non-interactive use.\n"
+            "or --dangerously-skip-attestations (full skip, dev only) for "
+            "non-interactive use.\n"
             "Env-var equivalents: HIVEMIND_TRUST_ALL=1, "
             "HIVEMIND_TRUST_HASH=<hex>, HIVEMIND_NO_TRUST_CHECK=1.",
             err=True,
@@ -771,13 +772,14 @@ def _require_trust(config: dict) -> None:
     "tampered or revoked hash still hard-aborts. Use in CI / scripts.",
 )
 @click.option(
-    "--insecure",
+    "--dangerously-skip-attestations",
+    "skip_attestations",
     is_flag=True,
     help="Disable ALL attestation verification — no TLS pin, no on-chain "
     "check, no compose-hash prompt. Only meaningful against a local "
     "dev server (no TEE). Never use against a Phala CVM.",
 )
-def cli(auto_yes: bool, insecure: bool) -> None:
+def cli(auto_yes: bool, skip_attestations: bool) -> None:
     """Hivemind — conditional recall for the privacy-quality frontier."""
     # Set the same env vars the trust layer already reads, so we don't
     # have to thread a context object into every subcommand. Flags win
@@ -785,7 +787,7 @@ def cli(auto_yes: bool, insecure: bool) -> None:
     # leave it alone (most permissive of {flag, env} wins).
     if auto_yes:
         os.environ["HIVEMIND_TRUST_ALL"] = "1"
-    if insecure:
+    if skip_attestations:
         os.environ["HIVEMIND_NO_TRUST_CHECK"] = "1"
 
 
