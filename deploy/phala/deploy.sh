@@ -215,7 +215,13 @@ wait_healthy() {
     local started=$(date +%s)
     local code
     while : ; do
-        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "${url}" 2>/dev/null || echo "000")
+        # -k: accept core's self-signed quote-bound cert on -8100s
+        # (HIVEMIND_ENCLAVE_TLS=1 / TCP passthrough). The actual security
+        # gate is the CLI's Tier-3 cross-pin via /v1/attestation, not this
+        # health probe. Without -k, curl returns "000" (cert verify fail)
+        # even when core is fully serving — which used to make every
+        # post-prod9 deploy report a false negative.
+        code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 8 "${url}" 2>/dev/null || echo "000")
         if [ "${code}" = "200" ]; then
             local elapsed=$(( $(date +%s) - started ))
             log "${name} healthy after ${elapsed}s"

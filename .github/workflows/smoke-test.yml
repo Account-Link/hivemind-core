@@ -1,0 +1,95 @@
+name: Smoke test (multi-tenant isolation, via EC2 relay)
+
+# Runs scripts/smoke_multi_tenant.py against the live core CVM. Same
+# relay pattern as deploy.yml / migrate-pg-data.yml: GH runner SSHes
+# into EC2, sources HIVEMIND_ADMIN_KEY from deploy/phala/.env, and
+# executes the smoke test there so the admin key never lands in GH.
+#
+# What this proves:
+#   - core's /v1/admin/tenants is reachable and accepts the admin key
+#   - per-tenant DB provisioning works (CREATE DATABASE on the pg CVM
+#     core is currently pointing at)
+#   - tenant-A vs. tenant-B isolation holds (independent DBs, no
+#     cross-reads)
+#   - wrong API key is rejected (401)
+#
+# Use this after a pg cutover to verify end-to-end against the new pg.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Core URL to test against (default: friendly URL)"
+        required: false
+        default: "https://hivemind.teleport.computer"
+
+concurrency:
+  group: phala-smoke-test
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: "smoke test → ${{ github.event.inputs.base_url }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run smoke test on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          BASE_URL: ${{ github.event.inputs.base_url }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "BASE_URL='${BASE_URL}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          echo "── fetch + checkout main ────────────────────────"
+          git fetch --prune origin
+          git checkout --detach origin/main
+          echo "HEAD: $(git rev-parse --short HEAD)"
+
+          echo "── source admin key from deploy/phala/.env ──────"
+          set -a
+          # shellcheck disable=SC1091
+          . deploy/phala/.env
+          set +a
+          : "${HIVEMIND_ADMIN_KEY:?HIVEMIND_ADMIN_KEY missing from deploy/phala/.env on relay}"
+
+          echo "── ensure uv available ──────────────────────────"
+          if ! command -v uv >/dev/null 2>&1; then
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "installing uv to ~/.local/bin (no sudo)"
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          echo "── running smoke test ───────────────────────────"
+          echo "base=${BASE_URL}"
+          HIVEMIND_BASE_URL="${BASE_URL}" \
+          HIVEMIND_ADMIN_KEY="${HIVEMIND_ADMIN_KEY}" \
+            uv run --with httpx --python 3.12 python \
+            scripts/smoke_multi_tenant.py
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
