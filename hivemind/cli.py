@@ -2019,19 +2019,23 @@ def schema_cmd(as_json: bool):
     data = _http_get(
         f"{service}/v1/admin/schema", headers=_headers(config), timeout=30
     )
-    schema = data.get("schema") or {}
+    schema = data.get("schema") or []
     if as_json:
         click.echo(_json.dumps(schema, indent=2, default=str))
         return
     if not schema:
         click.echo("(no tables)")
         return
-    for table, cols in sorted(schema.items()):
+    by_table: dict[str, list] = {}
+    for row in schema:
+        by_table.setdefault(row.get("table_name", "?"), []).append(row)
+    for table, cols in sorted(by_table.items()):
         click.echo(f"{table}")
         for col in cols:
-            name = col.get("name") or col.get("column_name") or "?"
-            typ = col.get("type") or col.get("data_type") or "?"
-            click.echo(f"  {name:<28} {typ}")
+            name = col.get("column_name") or col.get("name") or "?"
+            typ = col.get("data_type") or col.get("type") or "?"
+            nullable = "" if col.get("is_nullable") == "YES" else " NOT NULL"
+            click.echo(f"  {name:<28} {typ}{nullable}")
 
 
 @cli.command("attestation")
