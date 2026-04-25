@@ -31,6 +31,7 @@ import yaml
 
 from . import dcap as _dcap
 from . import onchain as _onchain
+from . import reproduce as _reproduce
 from . import trust as _trust
 
 # Machine-global profile root. Holds named tenant identities, a side-by-
@@ -680,6 +681,36 @@ def _consult_app_auth(bundle: dict, compose_hash: str) -> bool | None:
     return _onchain.is_app_allowed(rpc_url, contract, compose_hash)
 
 
+def _release_metadata_for(
+    bundle: dict, compose_hash: str
+) -> dict | None:
+    """Read `(approved, git_commit, compose_uri)` for ``compose_hash``.
+
+    Same env / bundle plumbing as ``_consult_app_auth``; returns the
+    decoded tuple from the on-chain `releases(bytes32)` getter, or
+    ``None`` on any failure (no contract, RPC down, decode error,
+    user disabled). Cheap separate call rather than hoisting into
+    `_consult_app_auth` so the existing boolean-only code path stays
+    untouched and the metadata fetch is best-effort UX sugar.
+    """
+    if os.environ.get("HIVEMIND_DISABLE_APP_AUTH"):
+        return None
+    if not compose_hash:
+        return None
+    att = (bundle.get("attestation") or {}).get("app_auth") or {}
+    contract = att.get("contract") or ""
+    if not contract:
+        return None
+    rpc_url = (
+        os.environ.get("HIVEMIND_APP_AUTH_RPC", "").strip()
+        or att.get("rpc_url")
+        or ""
+    )
+    if not rpc_url:
+        return None
+    return _onchain.release_metadata(rpc_url, contract, compose_hash)
+
+
 def _verify_tls_pin(
     bundle: dict,
     observed_fp: bytes | None,
@@ -874,12 +905,29 @@ def _require_trust(config: dict) -> None:
     if decision.status in {"trusted", "tofu", "changed"}:
         onchain_verdict = _consult_app_auth(bundle, decision.current_hash)
         if onchain_verdict is True:
-            # Silent auto-accept. Record in local store so subsequent
-            # runs print the "(on-chain: approved)" context if desired.
-            if decision.status != "trusted":
+            # Silent auto-accept on subsequent connects (status=trusted).
+            # On first-trust (tofu) or hash-change, surface the source
+            # pointer once so the user can eyeball where the running
+            # build came from. _trust.record_approval flips the local
+            # state to "trusted" so this only fires once per service per
+            # compose_hash — same cadence as the existing TOFU prompt.
+            first_or_changed = decision.status != "trusted"
+            if first_or_changed:
                 _trust.record_approval(
                     service, decision.current_hash, decision.app_id
                 )
+                meta = _release_metadata_for(bundle, decision.current_hash)
+                if meta and meta.get("compose_uri"):
+                    src = _reproduce.short_source(
+                        meta.get("git_commit", ""),
+                        meta.get("compose_uri", ""),
+                    )
+                    click.echo(
+                        f"  ✓ Source: {src}\n"
+                        f"    (run `hivemind attestation --reproduce` "
+                        f"to walk the chain back to source).",
+                        err=True,
+                    )
             return
         if onchain_verdict is False:
             att = (bundle.get("attestation") or {}).get("app_auth") or {}
@@ -2111,7 +2159,16 @@ def schema_cmd(as_json: bool):
 @click.option(
     "--raw", is_flag=True, help="Emit the full /v1/attestation JSON payload."
 )
-def attestation_cmd(service: str | None, raw: bool):
+@click.option(
+    "--reproduce",
+    is_flag=True,
+    help=(
+        "Walk the chain of trust from compose_hash → live app_compose "
+        "→ on-chain-registered git_sha → repo YAML, and print which "
+        "links held."
+    ),
+)
+def attestation_cmd(service: str | None, raw: bool, reproduce: bool):
     """Fetch and print the CVM's attestation bundle (TDX quote + binding).
 
     No auth — this endpoint is public so out-of-band verifiers can pin
@@ -2137,6 +2194,9 @@ def attestation_cmd(service: str | None, raw: bool):
     if raw:
         click.echo(_json.dumps(bundle, indent=2, default=str))
         return
+    if reproduce:
+        _run_reproduce(bundle)
+        return
     if not bundle.get("ready"):
         click.echo(f"ready:    false")
         click.echo(f"reason:   {bundle.get('reason', '?')}")
@@ -2152,6 +2212,15 @@ def attestation_cmd(service: str | None, raw: bool):
         click.echo(f"app_auth:")
         click.echo(f"  contract:   {app_auth.get('contract', '?')}")
         click.echo(f"  chain_id:   {app_auth.get('chain_id', '?')}")
+    # On-chain source pointer for the running compose_hash. Best-effort:
+    # we hit the registry to fetch (git_commit, compose_uri) so the user
+    # can click through to the YAML that produced this build. RPC down
+    # / contract not configured → silently skip.
+    meta = _release_metadata_for(bundle, att.get("compose_hash") or "")
+    if meta and meta.get("compose_uri"):
+        click.echo(f"source:")
+        click.echo(f"  git_commit: {meta.get('git_commit', '?')}")
+        click.echo(f"  compose:    {meta.get('compose_uri', '?')}")
     if tls := att.get("tls"):
         if tls.get("enabled"):
             click.echo(f"tls:")
@@ -2160,7 +2229,179 @@ def attestation_cmd(service: str | None, raw: bool):
             )
             if pin := tls.get("pinning_url"):
                 click.echo(f"  pin URL:     {pin}")
-    click.echo("(use --raw for full JSON including the TDX quote)")
+    click.echo(
+        "(use --raw for full JSON, --reproduce to verify the chain "
+        "back to source)"
+    )
+
+
+def _run_reproduce(bundle: dict) -> None:
+    """Walk the full chain of trust and print which links held.
+
+    Steps:
+      1. ``app_compose`` (live, from the dstack 8090 page) → ``compose_hash``.
+         ``sha256(app_compose_str)`` IS the compose_hash by construction,
+         so this is cryptographic and self-verifying.
+      2. On-chain registry → ``(git_commit, compose_uri)`` for that hash.
+      3. GitHub raw at the registered ``git_commit`` → repo YAML.
+      4. Byte-compare repo YAML vs ``docker_compose_file`` from app_compose.
+      5. Image refs from the YAML (informational; ``ghcr.io/.../<sha>``
+         tags can be cross-checked against the build-images workflow).
+
+    Each step prints "✓" on pass, "✗" on fail, "·" on skip with a
+    one-line reason. Returns silently after all steps.
+    """
+    if not bundle.get("ready"):
+        click.echo(
+            "Error: attestation bundle is not ready — "
+            f"reason: {bundle.get('reason', '?')}",
+            err=True,
+        )
+        raise SystemExit(2)
+    att = bundle.get("attestation") or {}
+    compose_hash = (att.get("compose_hash") or "").lower()
+    app_id = att.get("app_id") or ""
+    pin_url = ((att.get("tls") or {}).get("pinning_url") or "").strip()
+    gateway = (
+        _reproduce.gateway_from_pinning_url(pin_url)
+        if pin_url
+        else "dstack-pha-prod9.phala.network"
+    )
+
+    click.echo(f"Compose hash:  {compose_hash}")
+    click.echo(f"App ID:        {app_id}")
+    click.echo(f"Gateway:       {gateway}")
+    click.echo("")
+
+    # Step 1 — live app_compose from the dstack 8090 page.
+    click.echo("[1/4] Fetching live app_compose from dstack tcb-info page…")
+    try:
+        tcb = _reproduce.fetch_tcb_info(app_id, gateway)
+    except (httpx.HTTPError, ValueError) as e:
+        click.echo(f"      ✗ failed: {e}", err=True)
+        raise SystemExit(3)
+    app_compose_str = tcb.get("app_compose") or ""
+    claimed_hash = (tcb.get("compose_hash") or "").lower()
+    computed = _reproduce.verify_app_compose_hash(app_compose_str, claimed_hash)
+    if computed != compose_hash:
+        click.echo(
+            f"      ✗ sha256(app_compose) != attested compose_hash\n"
+            f"        attested: {compose_hash}\n"
+            f"        computed: {computed}",
+            err=True,
+        )
+        raise SystemExit(4)
+    if claimed_hash and claimed_hash != compose_hash:
+        click.echo(
+            f"      ✗ tcb-info claims a different hash ({claimed_hash}) "
+            f"than /v1/attestation ({compose_hash})",
+            err=True,
+        )
+        raise SystemExit(4)
+    click.echo(
+        f"      ✓ sha256(app_compose) == compose_hash "
+        f"({len(app_compose_str)} bytes)"
+    )
+
+    # Step 2 — on-chain (git_commit, compose_uri).
+    click.echo("[2/4] Reading on-chain registry for source pointer…")
+    meta = _release_metadata_for(bundle, compose_hash)
+    if not meta:
+        click.echo(
+            "      · skipped: registry not configured or RPC unreachable",
+            err=True,
+        )
+        click.echo("")
+        click.echo(
+            "Partial: live app_compose verified, but no on-chain source "
+            "pointer to compare against."
+        )
+        return
+    git_commit = meta.get("git_commit") or ""
+    compose_uri = meta.get("compose_uri") or ""
+    click.echo(f"      ✓ git_commit:  {git_commit}")
+    click.echo(f"      ✓ compose URI: {compose_uri}")
+
+    # Step 3 — fetch the repo YAML at the registered ref.
+    click.echo("[3/4] Fetching repo YAML at registered ref from GitHub…")
+    raw_url = _reproduce.blob_to_raw(compose_uri)
+    if not raw_url:
+        click.echo(
+            f"      · skipped: cannot derive raw URL from {compose_uri}",
+            err=True,
+        )
+        click.echo("")
+        click.echo(
+            "Partial: source pointer recovered but URL shape isn't a "
+            "GitHub blob — eyeball the YAML against app_compose by hand."
+        )
+        return
+    try:
+        repo_yaml = _reproduce.fetch_repo_yaml(compose_uri)
+    except (httpx.HTTPError, ValueError) as e:
+        click.echo(f"      ✗ failed: {e}", err=True)
+        raise SystemExit(5)
+    click.echo(f"      ✓ {len(repo_yaml)} bytes from {raw_url}")
+
+    # Step 4 — byte-compare repo YAML vs the docker_compose_file embedded
+    # in the verified app_compose.
+    click.echo(
+        "[4/4] Comparing repo YAML to docker_compose_file in app_compose…"
+    )
+    try:
+        ac = _reproduce.parse_app_compose(app_compose_str)
+    except _json.JSONDecodeError as e:
+        click.echo(f"      ✗ app_compose is not valid JSON: {e}", err=True)
+        raise SystemExit(6)
+    deployed_yaml = ac.get("docker_compose_file") or ""
+    yaml_match = deployed_yaml == repo_yaml
+    if yaml_match:
+        click.echo(
+            f"      ✓ byte-identical "
+            f"(sha256: {_hashlib.sha256(repo_yaml.encode()).hexdigest()[:16]}…)"
+        )
+    else:
+        deployed_h = _hashlib.sha256(deployed_yaml.encode()).hexdigest()
+        repo_h = _hashlib.sha256(repo_yaml.encode()).hexdigest()
+        click.echo(
+            f"      ✗ YAML differs\n"
+            f"        deployed sha256: {deployed_h}\n"
+            f"        repo    sha256: {repo_h}",
+            err=True,
+        )
+
+    # Image references (always shown — useful for human cross-check
+    # against the build-images CI workflow regardless of YAML match).
+    refs = _reproduce.extract_image_refs(deployed_yaml)
+    if refs:
+        click.echo("")
+        click.echo("Live image references (deployed):")
+        for ref in refs:
+            click.echo(f"  · {ref}")
+        click.echo(
+            "  (Tags ending in a 7-char hex are short git SHAs from "
+            "build-images CI — verify they match a commit on the "
+            "registered ref.)"
+        )
+
+    click.echo("")
+    if yaml_match:
+        click.echo(
+            "✓ Full chain verified: the docker-compose YAML running in "
+            "the enclave is byte-identical to the one at "
+            f"{_reproduce.short_source(git_commit, compose_uri)}."
+        )
+    else:
+        click.echo(
+            "✗ Chain broken at step 4: the docker-compose YAML running "
+            "in the enclave does NOT match the one at the on-chain-"
+            "registered ref. Either the registered git_commit/URI is "
+            "stale (e.g. the reconcile workflow recorded `main` instead "
+            "of the deploy SHA) or someone deployed code that wasn't "
+            "registered. Inspect `live image references` above and "
+            f"compare against the YAML at {raw_url}."
+        )
+        raise SystemExit(7)
 
 
 @cli.command("index")
