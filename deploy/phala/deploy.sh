@@ -35,13 +35,25 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 # Observed ~5–8 minutes end-to-end on dstack-pha-prod9.
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 
-CORE_NAME="hivemind-core"
+# CVM names are env-overridable so a one-time prod9 first-deploy can
+# use a fresh name (e.g. `hivemind-core-prod9`) without colliding with
+# the legacy prod5 CVM still listed in the workspace. Subsequent CICD
+# redeploys leave these unset → use the canonical name.
+CORE_NAME="${CORE_NAME:-hivemind-core}"
 CORE_COMPOSE="${SCRIPT_DIR}/docker-compose.core.yaml"
 CORE_HEALTH_PATH="/v1/attestation"
 
-PG_NAME="hivemind-pg"
+PG_NAME="${PG_NAME:-hivemind-pg}"
 PG_COMPOSE="${SCRIPT_DIR}/docker-compose.postgres.yaml"
 PG_HEALTH_PATH="/health"
+
+# `NODE_ID` switches the deploy_and_seal helper from update-mode
+# (`phala deploy --cvm-id <name>`) to create-mode (`phala deploy -n
+# <name> --node-id <id>`). Use it ONLY for the first-time prod9
+# migration: setting it on a name that already exists in the workspace
+# returns "name already taken" and aborts. Prod9 node-id is 18, prod5 26
+# (run `phala nodes list --json` to confirm).
+NODE_ID="${NODE_ID:-}"
 
 # ── Helpers ──
 
@@ -91,13 +103,31 @@ precheck_env() {
 # The envs-update step is what makes this robust: `phala deploy --cvm-id`
 # drops any var not in -e; we re-seal the complete set afterwards to
 # make double-sure nothing was lost in translation.
+#
+# Two modes:
+#   - update (default): NODE_ID empty → `phala deploy --cvm-id <name>`
+#     touches an existing CVM in place. Cannot migrate clusters.
+#   - create:           NODE_ID set    → `phala deploy -n <name>
+#     --node-id <id>` provisions a brand new CVM on the chosen node.
+#     Used once when migrating prod5 → prod9 (the gateway routing pattern
+#     dstack-ingress relies on only works on prod9). After the new CVM is
+#     up, leave NODE_ID unset for subsequent redeploys so they update
+#     in place via --cvm-id. The post-deploy seal+restart still uses
+#     --cvm-id <name> in both modes (same name resolves to the new CVM
+#     because the create just registered it).
 deploy_and_seal() {
     local name="$1"
     local compose="$2"
     local env_file="$3"
 
-    log "deploying ${name} (compose=${compose})"
-    phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait
+    if [ -n "${NODE_ID}" ]; then
+        log "creating ${name} on node-id=${NODE_ID} (compose=${compose})"
+        phala deploy -n "${name}" --node-id "${NODE_ID}" \
+            -c "${compose}" -e "${env_file}" --wait
+    else
+        log "updating ${name} in place (compose=${compose})"
+        phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait
+    fi
 
     log "re-sealing env vars on ${name}"
     phala envs update --cvm-id "${name}" -e "${env_file}"
@@ -110,17 +140,27 @@ deploy_and_seal() {
 # If `tls_passthrough=1`, use the `-<port>s.` suffix — Phala's gateway
 # convention for TCP-passthrough routes, required when the container
 # terminates TLS itself (HIVEMIND_ENCLAVE_TLS=1).
+#
+# Gateway hostname is derived from the CVM's own `gateway.base_domain`
+# (returned by `phala cvms get --json`) rather than hardcoded — this
+# is what lets the script handle a mixed-cluster workspace correctly
+# (e.g. hivemind-pg on prod5, hivemind-core on prod9 during migration).
 service_url() {
     local name="$1"
     local port="$2"
     local tls_passthrough="${3:-0}"
-    local app_id
-    app_id=$(phala cvms list 2>/dev/null \
-        | awk -v n="${name}" '$2==n { print $1; exit }')
-    [ -n "${app_id}" ] || die "could not resolve app_id for ${name}"
+    local meta app_id base_domain
+    meta=$(phala cvms get --cvm-id "${name}" --json 2>/dev/null) \
+        || die "could not fetch CVM metadata for ${name}"
+    app_id=$(printf '%s' "${meta}" \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin).get("app_id",""))')
+    base_domain=$(printf '%s' "${meta}" \
+        | python3 -c 'import sys,json; print((json.load(sys.stdin).get("gateway") or {}).get("base_domain",""))')
+    [ -n "${app_id}" ]     || die "could not resolve app_id for ${name}"
+    [ -n "${base_domain}" ] || die "could not resolve gateway base_domain for ${name}"
     local suffix=""
     [ "${tls_passthrough}" = "1" ] && suffix="s"
-    echo "https://${app_id}-${port}${suffix}.dstack-pha-prod9.phala.network"
+    echo "https://${app_id}-${port}${suffix}.${base_domain}"
 }
 
 # Does this core compose have enclave TLS enabled (default or override)?
