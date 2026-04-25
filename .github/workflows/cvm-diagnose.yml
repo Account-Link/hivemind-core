@@ -1,0 +1,111 @@
+name: Diagnose Phala CVM (via EC2 relay)
+
+# Read-only diagnostic — pulls `phala cvms get --json` + serial logs
+# for a CVM. Used when a deploy fails and the GH log only shows
+# `[Wait for CVM Ready] Timeout`. The Phala CLI's wait label hides the
+# underlying boot error; serial logs reveal it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cvm_id:
+        description: "CVM name or app_id (default: hivemind-core)"
+        required: false
+        default: "hivemind-core"
+      tail_lines:
+        description: "How many serial-log lines to dump"
+        required: false
+        default: "200"
+      action:
+        description: "Optional recovery action after diagnostics"
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none
+          - start
+          - restart
+
+concurrency:
+  group: phala-cvm-diagnose-${{ github.event.inputs.cvm_id }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run diagnostics on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          CVM_ID: ${{ github.event.inputs.cvm_id }}
+          TAIL_LINES: ${{ github.event.inputs.tail_lines }}
+          ACTION: ${{ github.event.inputs.action }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "CVM_ID='${CVM_ID}' TAIL_LINES='${TAIL_LINES}' ACTION='${ACTION}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          echo "── phala status ─────────────────────────────────"
+          phala status | head -10 || true
+
+          echo
+          echo "── phala cvms get --cvm-id ${CVM_ID} --json ────"
+          if meta=$(phala cvms get --cvm-id "${CVM_ID}" --json 2>&1); then
+            echo "${meta}" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          gw = d.get('gateway') or {}
+          hosted = d.get('hosted') or {}
+          print('  app_id      :', d.get('app_id'))
+          print('  name        :', d.get('name'))
+          print('  status      :', d.get('status'))
+          print('  in_progress :', d.get('in_progress'))
+          print('  base_domain :', gw.get('base_domain'))
+          print('  node_url    :', d.get('node_url') or hosted.get('node_url'))
+          print('  compose_hash:', d.get('compose_hash'))
+          "
+            echo
+            echo "── full JSON ──"
+            echo "${meta}" | python3 -m json.tool 2>/dev/null || echo "${meta}"
+          else
+            echo "::error::phala cvms get failed: ${meta}"
+          fi
+
+          echo
+          echo "── phala cvms serial-logs (last ${TAIL_LINES}) ─"
+          # Hard-cap the call: the CLI has been seen to hang for many
+          # minutes if the gateway is misbehaving.
+          timeout 60 phala cvms serial-logs --cvm-id "${CVM_ID}" 2>&1 \
+            | tail -"${TAIL_LINES}" || echo "(serial-logs timed out)"
+
+          if [ "${ACTION}" = "start" ]; then
+            echo
+            echo "── action: phala cvms start --cvm-id ${CVM_ID} ──"
+            phala cvms start --cvm-id "${CVM_ID}" || echo "(start non-zero)"
+          elif [ "${ACTION}" = "restart" ]; then
+            echo
+            echo "── action: phala cvms restart --cvm-id ${CVM_ID} ──"
+            phala cvms restart --cvm-id "${CVM_ID}" || echo "(restart non-zero)"
+          fi
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
