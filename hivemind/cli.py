@@ -710,11 +710,16 @@ def _require_trust(config: dict) -> None:
         return
 
     # Interactive prompt.
+    skip_hint = (
+        "  To skip this prompt next time, rerun with --trust-all (auto-approve\n"
+        "  redeploys) or --no-trust-check (DEV ONLY — disable every gate)."
+    )
     if decision.status == "tofu":
         click.echo(
             f"\nFirst connection to {service}.\n"
             f"  App ID:        {decision.app_id or '(unknown)'}\n"
-            f"  Compose hash:  {decision.current_hash}\n",
+            f"  Compose hash:  {decision.current_hash}\n\n"
+            f"{skip_hint}\n",
             err=True,
         )
         prompt = "Trust this compose hash and continue? [y/N]: "
@@ -724,7 +729,8 @@ def _require_trust(config: dict) -> None:
             f"  Service:   {service}\n"
             f"  App ID:    {decision.app_id or '(unknown)'}\n"
             f"  Old hash:  {decision.approved_hash}\n"
-            f"  New hash:  {decision.current_hash}\n",
+            f"  New hash:  {decision.current_hash}\n\n"
+            f"{skip_hint}\n",
             err=True,
         )
         prompt = "Approve the new hash and continue? [y/N]: "
@@ -737,9 +743,10 @@ def _require_trust(config: dict) -> None:
         )
     except (click.Abort, EOFError):
         click.echo(
-            "Aborted — no input available. Set HIVEMIND_TRUST_ALL=1, "
-            "HIVEMIND_TRUST_HASH=<hex>, or HIVEMIND_NO_TRUST_CHECK=1 "
-            "for non-interactive use.",
+            "Aborted — no input available. Re-run with --trust-all "
+            "(or --no-trust-check for full skip) for non-interactive use.\n"
+            "Env-var equivalents: HIVEMIND_TRUST_ALL=1, "
+            "HIVEMIND_TRUST_HASH=<hex>, HIVEMIND_NO_TRUST_CHECK=1.",
             err=True,
         )
         raise SystemExit(4)
@@ -753,9 +760,29 @@ def _require_trust(config: dict) -> None:
 
 
 @click.group()
-def cli():
+@click.option(
+    "--trust-all",
+    is_flag=True,
+    help="Auto-approve any TOFU/changed compose-hash prompt. Still hard-aborts "
+    "on revoked-on-chain hashes. Equivalent to HIVEMIND_TRUST_ALL=1.",
+)
+@click.option(
+    "--no-trust-check",
+    is_flag=True,
+    help="Skip the entire attestation/trust check (DEV ONLY — disables every "
+    "compose-hash, TLS-pin, and on-chain gate). Equivalent to "
+    "HIVEMIND_NO_TRUST_CHECK=1.",
+)
+def cli(trust_all: bool, no_trust_check: bool) -> None:
     """Hivemind — conditional recall for the privacy-quality frontier."""
-    pass
+    # Set the same env vars the trust layer already reads, so we don't
+    # have to thread a context object into every subcommand. Flags win
+    # over the absence of an env var; if the env var is already set,
+    # leave it alone (most permissive of {flag, env} wins).
+    if trust_all:
+        os.environ["HIVEMIND_TRUST_ALL"] = "1"
+    if no_trust_check:
+        os.environ["HIVEMIND_NO_TRUST_CHECK"] = "1"
 
 
 @cli.command()
