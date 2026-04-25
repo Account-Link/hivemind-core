@@ -360,36 +360,81 @@ def copy_table(
     if src_count == 0:
         return 0, 0
 
-    # Build select expressions: cast types the proxy can't JSON-serialize
-    # to text. UUID is the known offender (uuid.UUID is not JSON-native);
-    # numeric/Decimal would be the next likely if it shows up in any
-    # tenant table. The destination COPY parses the text form back into
-    # the typed column.
-    def _select_expr(col: dict) -> str:
-        name = quote_ident(col["column_name"])
+    # Cast types the proxy can't JSON-serialize to text. UUID is the
+    # known offender (uuid.UUID is not JSON-native); numeric/Decimal
+    # would be the next likely if it shows up in any tenant table.
+    # The destination COPY parses the text form back into the typed
+    # column.
+    def _is_uuidish(col: dict) -> bool:
         udt = (col.get("udt_name") or "").lower()
         dt = (col.get("data_type") or "").lower()
-        if udt == "uuid" or dt == "uuid":
+        return udt == "uuid" or dt == "uuid"
+
+    def _select_expr(col: dict) -> str:
+        name = quote_ident(col["column_name"])
+        if _is_uuidish(col):
             # Alias back to the original name so the JSON dict key matches.
             return f"{name}::text AS {name}"
         return name
 
+    def _key_expr(col: dict) -> str:
+        """ORDER BY / WHERE form. Text-cast for UUID so ordering and
+        comparison agree with what the SELECT returns. Lexicographic
+        order on canonical UUID text matches Postgres' native uuid order
+        because the canonical form is fixed-width hex."""
+        name = quote_ident(col["column_name"])
+        if _is_uuidish(col):
+            return f"{name}::text"
+        return name
+
     select_list = ", ".join(_select_expr(c) for c in cols_meta)
-    order_by = quote_ident(columns[0])
+    pk_names = fetch_pk_columns(src, db, table)
+    pk_meta = [c for c in cols_meta if c["column_name"] in pk_names]
+
+    # Keyset pagination when a PK exists: each batch's WHERE is anchored
+    # on the previous batch's last PK tuple, so the cost is O(N) instead
+    # of OFFSET's O(N²). For tables without a PK we fall back to
+    # OFFSET — those are tiny in this dataset.
+    use_keyset = bool(pk_meta)
+    order_by = ", ".join(_key_expr(c) for c in pk_meta) if use_keyset else quote_ident(columns[0])
 
     copied = 0
-    offset = 0
     started = time.time()
-    while offset < src_count:
-        batch = src.execute(
-            db,
-            f"SELECT {select_list} "
-            f"FROM {quote_ident(table)} "
-            f"ORDER BY {order_by} "
-            f"OFFSET {offset} LIMIT {batch_size}",
-        )
+    last_key: list | None = None  # last PK tuple from the previous batch
+    offset = 0  # only used in OFFSET fallback path
+
+    while True:
+        if use_keyset:
+            if last_key is None:
+                sql = (
+                    f"SELECT {select_list} FROM {quote_ident(table)} "
+                    f"ORDER BY {order_by} LIMIT {batch_size}"
+                )
+                params: list = []
+            else:
+                # Row-comparison form: (pk1, pk2, ...) > (last1, last2, ...).
+                # Postgres treats this as lexicographic comparison.
+                key_list = "(" + ", ".join(_key_expr(c) for c in pk_meta) + ")"
+                placeholders = "(" + ", ".join(["%s"] * len(pk_meta)) + ")"
+                sql = (
+                    f"SELECT {select_list} FROM {quote_ident(table)} "
+                    f"WHERE {key_list} > {placeholders} "
+                    f"ORDER BY {order_by} LIMIT {batch_size}"
+                )
+                params = list(last_key)
+            batch = src.execute(db, sql, params)
+        else:
+            if offset >= src_count:
+                break
+            batch = src.execute(
+                db,
+                f"SELECT {select_list} FROM {quote_ident(table)} "
+                f"ORDER BY {order_by} OFFSET {offset} LIMIT {batch_size}",
+            )
+
         if not batch:
             break
+
         csv_payload = rows_to_csv(batch, columns)
         try:
             n = dst.import_csv(db, table, csv_payload, columns)
@@ -399,22 +444,34 @@ def copy_table(
             # quoting edge case). 200 chars is plenty for triage and
             # doesn't drown the log on wide rows.
             sample = batch[0] if batch else {}
+            cursor = f"key={last_key}" if use_keyset else f"offset={offset}"
             print(
-                f"      ! batch failed at offset={offset}, sample row keys={list(sample)[:6]}, "
+                f"      ! batch failed at {cursor}, sample row keys={list(sample)[:6]}, "
                 f"first 200 chars of csv={csv_payload[:200]!r}",
                 flush=True,
             )
             raise
         copied += n
-        offset += len(batch)
+
+        if use_keyset:
+            last_row = batch[-1]
+            last_key = [last_row.get(c) for c in pk_names]
+        else:
+            offset += len(batch)
+
         elapsed = time.time() - started
         rate = copied / elapsed if elapsed > 0 else 0
         eta = (src_count - copied) / rate if rate > 0 else float("inf")
         print(
             f"      {table}: {copied}/{src_count} "
             f"({100 * copied / src_count:.1f}%) "
-            f"@ {rate:.0f} rows/s, ETA {eta:.0f}s"
+            f"@ {rate:.0f} rows/s, ETA {eta:.0f}s",
+            flush=True,
         )
+
+        if len(batch) < batch_size:
+            # Last partial batch — cheaper than another empty round-trip.
+            break
 
     return src_count, copied
 
