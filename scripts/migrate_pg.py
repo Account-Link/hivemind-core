@@ -49,14 +49,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
-import csv
-import io
 import json
 import os
 import sys
 import time
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
@@ -108,7 +105,14 @@ class Proxy:
             headers=self._proxy_headers(db),
             json={"sql": sql, "params": params or []},
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            try:
+                err = (r.json() or {}).get("error") or r.text
+            except Exception:
+                err = r.text
+            raise RuntimeError(
+                f"/execute_commit {r.status_code}: {err} (sql={sql[:160]!r})"
+            )
         body = r.json()
         if "error" in body:
             raise RuntimeError(f"/execute_commit error: {body['error']} (sql={sql!r})")
@@ -270,16 +274,18 @@ def fetch_pk_columns(p: Proxy, db: str, table: str) -> list[str]:
 # ── Data copy ───────────────────────────────────────────────────────
 
 
-def coerce_for_csv(value: Any) -> str:
+def coerce_for_csv(value: Any) -> str | None:
     """Render a JSON-decoded value back to a Postgres-COPY-friendly token.
 
     The /execute endpoint round-trips most types as JSON: ints/strs/bools
     pass through, timestamps come back as ISO strings, arrays as Python
-    lists, jsonb as nested dicts/lists. We convert everything to a single
-    string token; the csv module then handles quoting/escaping."""
+    lists, jsonb as nested dicts/lists. Returns None for SQL NULL —
+    callers must distinguish None (NULL) from "" (empty string) when
+    writing the CSV row. Postgres' default CSV NULL marker is an
+    unquoted empty field; an empty string must be written as a quoted
+    "" to avoid being parsed as NULL."""
     if value is None:
-        # Empty unquoted field is the COPY default for NULL.
-        return ""
+        return None
     if isinstance(value, bool):
         return "t" if value else "f"
     if isinstance(value, (int, float)):
@@ -302,13 +308,27 @@ def coerce_for_csv(value: Any) -> str:
     return str(value)
 
 
+def _csv_field(v: str | None) -> str:
+    """Manual encoder. Python's csv module collapses None and "" into
+    the same on-wire bytes (an unquoted empty field), and Postgres COPY
+    in CSV format treats unquoted empty as NULL. We need to distinguish
+    so empty-string source columns survive a NOT NULL constraint on
+    the destination."""
+    if v is None:
+        return ""  # NULL: unquoted empty → COPY's default NULL marker
+    if v == "" or "," in v or '"' in v or "\n" in v or "\r" in v:
+        # Empty string forced into quotes so COPY reads it as ''.
+        return '"' + v.replace('"', '""') + '"'
+    return v
+
+
 def rows_to_csv(rows: list[dict], columns: list[str]) -> str:
-    buf = io.StringIO()
-    w = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
-    w.writerow(columns)
+    parts: list[str] = []
+    parts.append(",".join(_csv_field(c) for c in columns))
     for r in rows:
-        w.writerow([coerce_for_csv(r.get(c)) for c in columns])
-    return buf.getvalue()
+        parts.append(",".join(_csv_field(coerce_for_csv(r.get(c))) for c in columns))
+    # Trailing newline matters: COPY treats it as the row terminator.
+    return "\r\n".join(parts) + "\r\n"
 
 
 def copy_table(
