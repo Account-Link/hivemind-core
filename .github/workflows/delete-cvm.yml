@@ -1,0 +1,132 @@
+name: Delete Phala CVM (via EC2 relay)
+
+# Destroys a Phala CVM by app_id. Same EC2-relay pattern as deploy.yml
+# / migrate-pg-data.yml — the GitHub runner never sees PHALA_CLOUD_API_KEY
+# or .env contents; it SSHes into the relay which already has an
+# authenticated `phala` CLI.
+#
+# Intended use: after a cluster move (e.g. prod5 → prod9 hivemind-pg
+# migration), once the new CVM has been fully validated end-to-end, use
+# this workflow to retire the old one. Defaults are populated for the
+# prod5 hivemind-pg CVM that was migrated to prod9 on 2026-04-25.
+#
+# Guards:
+#   - default cvm_id IS the prod5 pg app_id; change it if deleting
+#     something else
+#   - non-dry-run requires `confirm` input set to "DELETE" (typo guard)
+#   - workflow prints the CVM metadata before deletion so the audit log
+#     shows exactly what was destroyed
+#   - separate concurrency group so a delete doesn't collide with a
+#     deploy or migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      cvm_id:
+        description: "CVM app_id to delete (40-char hex, e.g. 2181af2d... for prod5 pg)"
+        required: true
+        default: "2181af2d134123a46613f62a0311dd1f5af984be"
+      dry_run:
+        description: "Plan only — fetch + print metadata, no delete."
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      confirm:
+        description: "Type DELETE here to authorize a non-dry-run. Ignored when dry_run=true."
+        required: false
+        default: ""
+
+concurrency:
+  group: phala-cvm-delete
+  cancel-in-progress: false
+
+jobs:
+  delete:
+    name: "delete cvm ${{ github.event.inputs.cvm_id }} (dry_run=${{ github.event.inputs.dry_run }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate confirm token
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN}" != "true" ] && [ "${CONFIRM}" != "DELETE" ]; then
+            echo "::error::confirm input must be 'DELETE' for a non-dry-run. Got: '${CONFIRM}'"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run delete on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          CVM_ID: ${{ github.event.inputs.cvm_id }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "CVM_ID='${CVM_ID}' DRY_RUN='${DRY_RUN}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          echo "── target CVM metadata ──────────────────────────"
+          # Print app_id, name, status, base_domain so the audit trail
+          # shows exactly what's being destroyed. `phala cvms get` accepts
+          # either app_id or name as --cvm-id.
+          if ! meta=$(phala cvms get --cvm-id "${CVM_ID}" --json 2>&1); then
+            echo "::error::could not fetch CVM ${CVM_ID}: ${meta}"
+            exit 1
+          fi
+          echo "${meta}" | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          gw = d.get("gateway") or {}
+          print(f"  app_id      : {d.get(\"app_id\")}")
+          print(f"  name        : {d.get(\"name\")}")
+          print(f"  status      : {d.get(\"status\")}")
+          print(f"  base_domain : {gw.get(\"base_domain\")}")
+          print(f"  node_url    : {d.get(\"node_url\") or (d.get(\"hosted\") or {}).get(\"node_url\")}")
+          '
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "── dry-run: not deleting ────────────────────────"
+            exit 0
+          fi
+
+          echo "── deleting CVM ${CVM_ID} ───────────────────────"
+          # `phala cvms delete` is interactive by default; --force skips
+          # the y/N prompt. We've already gated on the DELETE token in
+          # the workflow input, so this is the authoritative confirm.
+          phala cvms delete --cvm-id "${CVM_ID}" --force
+
+          echo "── post-delete verification ─────────────────────"
+          # `phala cvms get` should now fail / return not-found. Either
+          # outcome is success here — the CVM is gone.
+          if phala cvms get --cvm-id "${CVM_ID}" --json >/dev/null 2>&1; then
+            echo "::warning::CVM ${CVM_ID} still resolvable after delete (may be eventual consistency)"
+          else
+            echo "CVM ${CVM_ID} no longer resolvable — delete confirmed"
+          fi
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
