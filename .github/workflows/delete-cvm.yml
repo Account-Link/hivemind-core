@@ -95,16 +95,20 @@ jobs:
             echo "::error::could not fetch CVM ${CVM_ID}: ${meta}"
             exit 1
           fi
-          echo "${meta}" | python3 -c '
+          # Pipe through python -c with no f-strings / no nested quote
+          # escapes — those break inside a literal-heredoc bash here-doc.
+          # Plain `print(...)` + comma-separated args sidesteps the issue.
+          echo "${meta}" | python3 -c "
           import json, sys
           d = json.load(sys.stdin)
-          gw = d.get("gateway") or {}
-          print(f"  app_id      : {d.get(\"app_id\")}")
-          print(f"  name        : {d.get(\"name\")}")
-          print(f"  status      : {d.get(\"status\")}")
-          print(f"  base_domain : {gw.get(\"base_domain\")}")
-          print(f"  node_url    : {d.get(\"node_url\") or (d.get(\"hosted\") or {}).get(\"node_url\")}")
-          '
+          gw = d.get('gateway') or {}
+          hosted = d.get('hosted') or {}
+          print('  app_id      :', d.get('app_id'))
+          print('  name        :', d.get('name'))
+          print('  status      :', d.get('status'))
+          print('  base_domain :', gw.get('base_domain'))
+          print('  node_url    :', d.get('node_url') or hosted.get('node_url'))
+          "
 
           if [ "${DRY_RUN}" = "true" ]; then
             echo "── dry-run: not deleting ────────────────────────"
