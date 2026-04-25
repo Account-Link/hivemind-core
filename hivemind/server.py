@@ -389,6 +389,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"tenant '{tenant_id}' not found")
         return {"status": "ok", "tenant_id": tenant_id}
 
+    @app.post(
+        "/v1/admin/agents/sweep-broken",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_sweep_broken_agents(request: Request, dry_run: bool = False):
+        """Find agents whose images are missing from the runtime.
+
+        Iterates every non-suspended tenant, lists their agents, and
+        checks each agent's image against the local Docker daemon. If
+        the image isn't present, the agent is registered orphan and
+        (unless dry_run=true) deleted from the tenant's agent_store.
+
+        Why we need this: after a CVM redeploy the daemon's image cache
+        is wiped. Agents whose images were either ``:local`` (built
+        in-place on the previous CVM) or pulled from a private registry
+        (denied on the new CVM) become unrunnable but still appear in
+        listings. ``hivemind run`` fails 500 against them.
+        """
+        from .sandbox.backend import _create_runner
+
+        sandbox_settings = build_sandbox_settings(settings)
+        runner = _create_runner(sandbox_settings)
+        registry = _registry(request)
+
+        orphans: list[dict] = []
+        for tenant in await asyncio.to_thread(registry.list_tenants):
+            if tenant.get("suspended"):
+                continue
+            tenant_id = tenant["id"]
+            try:
+                hm = await asyncio.to_thread(registry.for_tenant, tenant_id)
+                if hm is None:
+                    continue
+                agents = await asyncio.to_thread(hm.agent_store.list_agents)
+                for ag in agents:
+                    try:
+                        present = await asyncio.to_thread(
+                            runner.image_exists, ag.image
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "image_exists(%s) raised: %s — skipping",
+                            ag.image, e,
+                        )
+                        continue
+                    if present:
+                        continue
+                    record = {
+                        "tenant_id": tenant_id,
+                        "tenant_name": tenant.get("name"),
+                        "agent_id": ag.agent_id,
+                        "name": ag.name,
+                        "agent_type": ag.agent_type,
+                        "image": ag.image,
+                        "deleted": False,
+                    }
+                    if not dry_run:
+                        try:
+                            await asyncio.to_thread(
+                                hm.agent_store.delete, ag.agent_id
+                            )
+                            record["deleted"] = True
+                        except Exception as e:
+                            logger.warning(
+                                "delete(%s) raised: %s",
+                                ag.agent_id, e,
+                            )
+                            record["error"] = str(e)
+                    orphans.append(record)
+            except Exception as e:
+                logger.warning(
+                    "sweep-broken: tenant %s skipped: %s", tenant_id, e
+                )
+
+        return {
+            "dry_run": dry_run,
+            "count": len(orphans),
+            "deleted": sum(1 for o in orphans if o.get("deleted")),
+            "orphans": orphans,
+        }
+
     # ── Tenant: self-service key rotation ──
     #
     # Intended as a mandatory first step: the admin who creates a tenant

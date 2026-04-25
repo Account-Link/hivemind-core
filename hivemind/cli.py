@@ -2464,6 +2464,77 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
             click.echo(f"  ERR  {r['db_name']}: {r['error']}", err=True)
 
 
+@admin_cli.command("sweep-broken-agents")
+@click.option("--service", default=None, help="Hivemind service URL")
+@click.option(
+    "--admin-key",
+    envvar="HIVEMIND_ADMIN_KEY",
+    default="",
+    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
+    "the active profile's api_key when role=admin.",
+)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Default: dry-run (just list orphans). Pass --no-dry-run to delete.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
+def admin_sweep_broken_agents(
+    service: str | None, admin_key: str, dry_run: bool, as_json: bool,
+):
+    """Find (and optionally delete) agents whose Docker image is missing.
+
+    Use after a CVM redeploy to clean up stale agents whose images were
+    in the old daemon's cache. Default is dry-run; pass --no-dry-run to
+    actually delete.
+    """
+    import json as _json
+
+    admin_key = _resolve_admin_key(admin_key)
+    url = _resolve_admin_service(service)
+    try:
+        resp = _hpost(
+            f"{url}/v1/admin/agents/sweep-broken",
+            headers=_admin_headers(admin_key),
+            params={"dry_run": "true" if dry_run else "false"},
+            timeout=120,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+
+    orphans = data.get("orphans", [])
+    if not orphans:
+        click.echo("No broken agents found.")
+        return
+
+    verb = "would delete" if data.get("dry_run") else "deleted"
+    click.echo(
+        f"Found {data['count']} orphan agent(s) — {verb} "
+        f"{data.get('deleted', 0)}:"
+    )
+    click.echo(
+        f"  {'TENANT_ID':<16} {'AGENT_ID':<14} {'TYPE':<10} {'NAME':<24} IMAGE"
+    )
+    for o in orphans:
+        click.echo(
+            f"  {o.get('tenant_id',''):<16} "
+            f"{o.get('agent_id',''):<14} "
+            f"{o.get('agent_type',''):<10} "
+            f"{(o.get('name') or '')[:24]:<24} "
+            f"{o.get('image','')}"
+        )
+    if data.get("dry_run"):
+        click.echo("\nRe-run with --no-dry-run to actually delete.")
+
+
 # ── Admin: on-chain HivemindAppAuth ──
 #
 # Thin wrappers around `cast send` so the contract owner can approve

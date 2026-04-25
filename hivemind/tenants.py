@@ -338,6 +338,47 @@ class TenantRegistry:
 
     # ── Hot path: bearer → Hivemind ─────────────────────────────────
 
+    def for_tenant(self, tenant_id: str) -> Hivemind | None:
+        """Admin-side: load a tenant's Hivemind by tenant_id (no api_key).
+
+        Used by admin endpoints that need to operate on a tenant's data
+        plane without minting / rotating its API key. Goes through the
+        same LRU cache as ``resolve`` so subsequent tenant requests reuse
+        the warmed instance.
+        """
+        rows = self._control_db.execute(
+            "SELECT id, db_name, suspended FROM _tenants WHERE id = %s",
+            [tenant_id],
+        )
+        if not rows or rows[0]["suspended"]:
+            return None
+        db_name = rows[0]["db_name"]
+        with self._lock:
+            hm = self._cache.get(tenant_id)
+            if hm is not None:
+                self._cache.move_to_end(tenant_id)
+                return hm
+        hm = Hivemind(self.settings, tenant_db=db_name, tenant_id=tenant_id)
+        with self._lock:
+            existing = self._cache.get(tenant_id)
+            if existing is not None:
+                try:
+                    hm.db.close()
+                except Exception:
+                    pass
+                self._cache.move_to_end(tenant_id)
+                return existing
+            self._cache[tenant_id] = hm
+            self._cache.move_to_end(tenant_id)
+            while len(self._cache) > self._cache_max:
+                evicted_id, evicted_hm = self._cache.popitem(last=False)
+                logger.info("Evicting tenant '%s' from cache", evicted_id)
+                try:
+                    evicted_hm.db.close()
+                except Exception:
+                    pass
+        return hm
+
     def resolve(self, api_key: str) -> tuple[str, Hivemind] | None:
         """Bearer token → (tenant_id, per-tenant Hivemind). None if invalid."""
         if not api_key:
