@@ -1501,9 +1501,13 @@ def _emit_run_result(
     as_json: bool,
     fetch: bool,
 ) -> None:
-    result = data.get("result") or {}
-    output = result.get("output", "")
-    mediated = result.get("mediated")
+    # Server returns these as top-level columns from the runs table
+    # (see hivemind/sandbox/run_store.py). The legacy ``result.output``
+    # nesting never existed in this code path; reading it always
+    # returned None and printed "(empty)" even when the agent succeeded.
+    output = data.get("output") or ""
+    index_output = data.get("index_output") or ""
+    mediated = data.get("mediated")  # reserved for future mediator runs
     artifacts = data.get("artifacts", []) or []
 
     artifact_urls = [
@@ -1560,6 +1564,10 @@ def _emit_run_result(
     click.echo("")
     click.echo("── Output ──")
     click.echo(output or "(empty)")
+    if index_output:
+        click.echo("")
+        click.echo("── Index agent output ──")
+        click.echo(index_output)
     if mediated:
         click.echo(f"\n(mediated: {mediated})", err=True)
     if artifact_urls:
@@ -1603,25 +1611,41 @@ def runs_cmd(run_id: str | None, limit: int, as_json: bool):
         click.echo(f"Created:  {data.get('created_at')}")
         click.echo(f"Updated:  {data.get('updated_at')}")
 
-        stages = data.get("stages") or {}
-        if stages:
+        # Stages are flattened into <stage>_started_at / <stage>_ended_at
+        # columns by run_store, not nested under a ``stages`` key.
+        stage_names = ("build", "scope", "query", "mediator", "index")
+        stage_lines = []
+        for name in stage_names:
+            started = data.get(f"{name}_started_at")
+            ended = data.get(f"{name}_ended_at")
+            if started is None and ended is None:
+                continue
+            if started and ended:
+                dur = f"{ended - started:.1f}s"
+            elif started:
+                dur = "(running)"
+            else:
+                dur = "(unknown)"
+            stage_lines.append(f"  {name}: {dur}")
+        if stage_lines:
             click.echo("Stages:")
-            for name, s in stages.items():
-                started = s.get("started_at")
-                ended = s.get("ended_at")
-                dur = (
-                    f"{ended - started:.1f}s"
-                    if started and ended
-                    else "(running)"
-                )
-                click.echo(f"  {name}: {dur}")
+            for line in stage_lines:
+                click.echo(line)
 
-        result = data.get("result") or {}
-        output = result.get("output")
+        # ``output`` and ``index_output`` are top-level columns on the
+        # run row — reading ``data["result"]["output"]`` (the prior
+        # shape) always returned None and silently dropped the agent's
+        # answer.
+        output = data.get("output")
         if output:
             click.echo("")
             click.echo("── Output ──")
             click.echo(output)
+        index_output = data.get("index_output")
+        if index_output:
+            click.echo("")
+            click.echo("── Index agent output ──")
+            click.echo(index_output)
 
         artifacts = data.get("artifacts") or []
         if artifacts:
