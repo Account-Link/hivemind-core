@@ -78,6 +78,39 @@ hivemind query "What tables are available?"
 
 Every `--json` output is a stable, pipe-friendly record: `{status, run_id, output, mediated, artifacts:[{filename,url,...}], fetched:[...]}`. Artifact URLs remain fetchable for the server's retention window (default 24h).
 
+### Named profiles (multi-identity on one laptop)
+
+Profiles let you keep separate identities — admin, watch-history tenant,
+alice-tenant — under different names without `cd`-ing between
+directories. Each profile is a YAML file under `~/.hivemind/profiles/`
+holding a `service` URL + `api_key`. Trust pins (`trust.json`,
+`enclave-tls-*.pem`) live alongside and are shared across profiles.
+
+```bash
+# Create a profile per identity (each writes its own YAML file)
+hivemind --profile admin          init --service https://hivemind.teleport.computer --api-key hmk_admin_...
+hivemind --profile watch-history  init --service https://hivemind.teleport.computer --api-key hmk_2roP...
+hivemind --profile alice          init --service https://hivemind.teleport.computer --api-key hmk_alice_...
+
+# Use them
+hivemind --profile watch-history query "how many rows in watch_history?"
+hivemind --profile alice          load events.jsonl --table events
+
+# Or pin one for the shell
+export HIVEMIND_PROFILE=watch-history
+hivemind query "..."
+
+# Manage them
+hivemind profile list             # * marks the active profile
+hivemind profile show alice       # print the YAML
+hivemind profile path             # absolute path of active profile
+hivemind profile delete old-tenant
+```
+
+Profiles created with `hivemind init` (no `--profile`) live as
+`default` — your existing CWD-scoped `./.hivemind/config.yaml` is
+auto-migrated to `~/.hivemind/profiles/default.yaml` on first use.
+
 ## How it works
 
 Three HTTP endpoints, one enforcement primitive:
@@ -127,13 +160,14 @@ Hand the `hmk_...` key to the tenant — they use it as their normal
 
 **First action for every new tenant: rotate the key.** The admin who
 minted it briefly saw the plaintext in the API response. Rotation issues
-a fresh key (the admin's copy stops working immediately) and updates
-`.hivemind/config.yaml` automatically:
+a fresh key (the admin's copy stops working immediately) and updates the
+active profile's YAML automatically:
 
 ```bash
-hivemind init --api-key hmk_bootstrap_...
-hivemind rotate-key
+hivemind --profile alice init --api-key hmk_bootstrap_...
+hivemind --profile alice rotate-key
 # → prints a fresh hmk_... that only the TEE + the tenant know
+#   and rewrites ~/.hivemind/profiles/alice.yaml
 ```
 
 Treat any tenant key that has not been rotated as bootstrap-only.

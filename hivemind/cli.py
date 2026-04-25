@@ -33,8 +33,18 @@ from . import dcap as _dcap
 from . import onchain as _onchain
 from . import trust as _trust
 
-_CONFIG_DIR = ".hivemind"
-_CONFIG_FILE = "config.yaml"
+# Machine-global profile root. Holds named tenant identities, a side-by-
+# side `trust.json`, and pinned enclave-TLS PEMs. Multi-profile support
+# means you can keep separate identities (admin vs. watch-history tenant
+# vs. alice tenant) on one laptop without `cd`-ing between dirs.
+_HIVEMIND_HOME = Path.home() / ".hivemind"
+_PROFILES_DIR = _HIVEMIND_HOME / "profiles"
+_DEFAULT_PROFILE = "default"
+
+# Legacy CWD-scoped config we auto-migrate from (one-shot).
+_LEGACY_CONFIG_DIR = ".hivemind"
+_LEGACY_CONFIG_FILE = "config.yaml"
+
 _REPO_ROOT = Path(__file__).parent.parent
 _AGENTS_DIR = _REPO_ROOT / "agents"
 _DEFAULT_SERVICE = "http://localhost:8100"
@@ -169,12 +179,46 @@ def _warm_pin_from_trust(service: str) -> None:
 # ── Config helpers ──
 
 
-def _config_path() -> Path:
-    return Path(_CONFIG_DIR) / _CONFIG_FILE
+def _profile_name() -> str:
+    """Active profile name. Set by --profile (which exports HIVEMIND_PROFILE)."""
+    return os.environ.get("HIVEMIND_PROFILE", "").strip() or _DEFAULT_PROFILE
+
+
+def _config_path(profile: str | None = None) -> Path:
+    name = profile or _profile_name()
+    return _PROFILES_DIR / f"{name}.yaml"
+
+
+def _legacy_config_path() -> Path:
+    return Path(_LEGACY_CONFIG_DIR) / _LEGACY_CONFIG_FILE
+
+
+def _maybe_migrate_legacy(target: Path) -> bool:
+    """One-shot migration from `./.hivemind/config.yaml` → global default profile.
+
+    Triggered when someone upgrades and runs a non-init command in the
+    same directory they used the old layout from. Returns True if a
+    migration happened.
+    """
+    legacy = _legacy_config_path()
+    if not legacy.exists() or target.exists():
+        return False
+    if _profile_name() != _DEFAULT_PROFILE:
+        # User explicitly asked for a non-default profile; don't silently
+        # claim someone else's name.
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(legacy.read_bytes())
+    click.echo(
+        f"Migrated legacy {legacy} → {target} (default profile). "
+        f"You can delete {_LEGACY_CONFIG_DIR}/ when ready.",
+        err=True,
+    )
+    return True
 
 
 def _load_config(*, check_trust: bool = True) -> dict:
-    """Load .hivemind/config.yaml or exit with error.
+    """Load the active profile's config or exit with error.
 
     When ``check_trust`` is True (default) this also runs the remote
     compose-hash consent check — prompting the user on first-use or on
@@ -183,9 +227,16 @@ def _load_config(*, check_trust: bool = True) -> dict:
     contacting the CVM).
     """
     p = _config_path()
+    _maybe_migrate_legacy(p)
     if not p.exists():
+        profile = _profile_name()
+        hint = (
+            f"Run 'hivemind init --api-key …' to create profile '{profile}'."
+            if profile == _DEFAULT_PROFILE
+            else f"Run 'hivemind --profile {profile} init --api-key …' to create it."
+        )
         click.echo(
-            "Error: No .hivemind/config.yaml found. Run 'hivemind init' first.",
+            f"Error: profile '{profile}' not found at {p}. {hint}",
             err=True,
         )
         raise SystemExit(1)
@@ -193,11 +244,11 @@ def _load_config(*, check_trust: bool = True) -> dict:
         with open(p) as f:
             config = yaml.safe_load(f) or {}
     except yaml.YAMLError as e:
-        click.echo(f"Error: Corrupt config file: {e}", err=True)
+        click.echo(f"Error: Corrupt config file {p}: {e}", err=True)
         raise SystemExit(1)
     if not config.get("service"):
         click.echo(
-            "Error: Config missing 'service' URL. Run 'hivemind init' again.",
+            f"Error: Config {p} missing 'service' URL. Run 'hivemind init' again.",
             err=True,
         )
         raise SystemExit(1)
@@ -212,8 +263,9 @@ def _load_config(*, check_trust: bool = True) -> dict:
 
 
 def _save_config(config: dict) -> None:
-    Path(_CONFIG_DIR).mkdir(exist_ok=True)
-    with open(_config_path(), "w") as f:
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
 
 
@@ -857,7 +909,17 @@ def _require_trust(config: dict) -> None:
     "check, no compose-hash prompt. Only meaningful against a local "
     "dev server (no TEE). Never use against a Phala CVM.",
 )
-def cli(auto_yes: bool, skip_attestations: bool) -> None:
+@click.option(
+    "--profile",
+    "profile",
+    default="",
+    envvar="HIVEMIND_PROFILE",
+    metavar="NAME",
+    help="Named identity to use. Each profile is an independent "
+    "service+api_key pair stored at ~/.hivemind/profiles/<NAME>.yaml. "
+    "Defaults to 'default'. Example: hivemind --profile alice query '...'",
+)
+def cli(auto_yes: bool, skip_attestations: bool, profile: str) -> None:
     """Hivemind — conditional recall for the privacy-quality frontier."""
     # Set the same env vars the trust layer already reads, so we don't
     # have to thread a context object into every subcommand. Flags win
@@ -867,6 +929,8 @@ def cli(auto_yes: bool, skip_attestations: bool) -> None:
         os.environ["HIVEMIND_TRUST_ALL"] = "1"
     if skip_attestations:
         os.environ["HIVEMIND_NO_TRUST_CHECK"] = "1"
+    if profile:
+        os.environ["HIVEMIND_PROFILE"] = profile
 
 
 @cli.command()
@@ -907,9 +971,18 @@ def init(service: str, api_key: str):
         raise SystemExit(1)
 
     _save_config({"service": service, "api_key": api_key})
-    click.echo(f"Initialized .hivemind/ — connected to {service}")
+    profile = _profile_name()
+    click.echo(
+        f"Initialized profile '{profile}' at {_config_path()} "
+        f"— connected to {service}"
+    )
     click.echo(f"  Tables: {health.get('table_count', '?')}")
     click.echo(f"  Version: {health.get('version', '?')}")
+    if profile == _DEFAULT_PROFILE:
+        click.echo(
+            "  Tip: pass --profile NAME to keep separate identities "
+            "(admin / tenant_a / tenant_b) on the same laptop."
+        )
 
 
 @cli.command()
@@ -1880,13 +1953,95 @@ def rotate_key(as_json: bool):
         click.echo(_json.dumps(data, indent=2))
         return
     click.echo(f"Tenant: {data['tenant_id']}")
-    click.echo("New API key (saved to .hivemind/config.yaml):")
+    click.echo(
+        f"New API key (saved to profile '{_profile_name()}' "
+        f"at {_config_path()}):"
+    )
     click.echo(f"  {new_key}")
     click.echo("")
     click.echo(
         "Previous key is now revoked. Anyone who held the old key "
         "(including the admin who minted it) can no longer reach your data."
     )
+
+
+# ── Profiles ──
+#
+# Each profile is a separate identity: service URL + tenant API key,
+# stored at ``~/.hivemind/profiles/<name>.yaml``. Trust pins
+# (``trust.json``, ``enclave-tls-*.pem``) live alongside, so all
+# profiles share the same set of approved enclaves.
+
+
+@cli.group("profile")
+def profile_cli():
+    """Manage named identities (admin / tenant_a / tenant_b / …)."""
+    pass
+
+
+@profile_cli.command("list")
+def profile_list():
+    """List all profiles in ~/.hivemind/profiles/."""
+    active = _profile_name()
+    if not _PROFILES_DIR.exists():
+        click.echo(f"No profiles yet. Run 'hivemind init …' to create '{active}'.")
+        return
+    rows: list[tuple[str, str, str]] = []
+    for p in sorted(_PROFILES_DIR.glob("*.yaml")):
+        name = p.stem
+        try:
+            cfg = yaml.safe_load(p.read_text()) or {}
+        except yaml.YAMLError:
+            cfg = {}
+        service = str(cfg.get("service") or "?")
+        has_key = "yes" if cfg.get("api_key") else "no"
+        rows.append((name, service, has_key))
+    if not rows:
+        click.echo(f"No profiles in {_PROFILES_DIR}.")
+        return
+    click.echo(f"{'ACTIVE':<7} {'NAME':<24} {'API_KEY':<8} SERVICE")
+    for name, service, has_key in rows:
+        marker = "*" if name == active else " "
+        click.echo(f"  {marker:<5} {name:<24} {has_key:<8} {service}")
+
+
+@profile_cli.command("show")
+@click.argument("name", required=False)
+def profile_show(name: str | None):
+    """Print the YAML for the active profile (or NAME)."""
+    p = _config_path(name) if name else _config_path()
+    if not p.exists():
+        click.echo(f"Error: profile not found at {p}", err=True)
+        raise SystemExit(1)
+    click.echo(f"# {p}")
+    click.echo(p.read_text(), nl=False)
+
+
+@profile_cli.command("delete")
+@click.argument("name")
+@click.confirmation_option(
+    prompt="Delete this profile's local config? "
+    "(does NOT revoke the API key on the server)"
+)
+def profile_delete(name: str):
+    """Delete a profile's local config file."""
+    p = _config_path(name)
+    if not p.exists():
+        click.echo(f"Error: profile not found at {p}", err=True)
+        raise SystemExit(1)
+    p.unlink()
+    click.echo(f"Deleted {p}")
+    click.echo(
+        "Note: the API key on the server is still valid until you "
+        "rotate it via 'hivemind rotate-key' or delete the tenant."
+    )
+
+
+@profile_cli.command("path")
+@click.argument("name", required=False)
+def profile_path(name: str | None):
+    """Print the filesystem path of the active profile (or NAME)."""
+    click.echo(str(_config_path(name) if name else _config_path()))
 
 
 # ── Admin: tenant management ──
