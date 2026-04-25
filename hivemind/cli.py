@@ -797,8 +797,10 @@ def _verify_tls_pin(
             # what an auditor compares. Full URL still available via
             # `hivemind attestation --raw` for anyone who wants it.
             click.echo(
-                f"  Enclave cert verified against TDX quote "
-                f"(sha256: {alt_fp.hex()[:16]}…)",
+                f"  ✓ Live remote attestation verified — your connection "
+                f"terminates inside\n"
+                f"    a TDX enclave bound to this quote "
+                f"(cert sha256: {alt_fp.hex()[:16]}…).",
                 err=True,
             )
             cert_pem = (att.get("tls") or {}).get("cert_pem", "")
