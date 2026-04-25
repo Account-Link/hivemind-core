@@ -1,0 +1,106 @@
+name: Cleanup relay env (one-shot)
+
+# One-shot consolidation pass: bring the EC2 relay's
+# `~/hivemind-core/deploy/phala/.env` into the same shape as our
+# canonical `.env.example` (no dead vars, no duplicates) and remove
+# the stale `.env.core` / `.env.postgres` siblings that no automation
+# reads anymore.
+#
+# What it does (idempotent):
+#   1. Backs up the current `.env` to `.env.bak.<timestamp>`.
+#   2. Drops `HIVEMIND_API_KEY=` (legacy single-tenant, dead since v0.3).
+#   3. Drops `HIVEMIND_SQL_PROXY_KEY=` (duplicate of `SQL_PROXY_KEY`).
+#   4. Removes `.env.core` and `.env.postgres` if present.
+#   5. Prints which vars survived (names only, NOT values) and the
+#      host portion of `HIVEMIND_DATABASE_URL` for sanity-cross-check.
+#
+# Safety: the live CVMs already have their env sealed via the encrypted
+# Phala env channel — editing `.env` on disk only affects the *next*
+# `phala deploy` / `phala envs update`. So this is purely tidy-up; no
+# deploy is triggered, no envs update is run.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: phala-cleanup-relay-env
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run cleanup on relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            "${EC2_USER}@${EC2_HOST}" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd ~/hivemind-core
+
+          ENV=deploy/phala/.env
+          if [ ! -f "$ENV" ]; then
+            echo "FAIL: $ENV missing on relay"
+            exit 1
+          fi
+
+          ts=$(date -u +%Y%m%dT%H%M%SZ)
+          BAK="${ENV}.bak.${ts}"
+          cp -p "$ENV" "$BAK"
+          echo "── backup: ${BAK}"
+
+          echo "── before:"
+          awk -F= '/^[A-Z_][A-Z0-9_]*=/ {print "    " $1}' "$ENV" | sort
+
+          # Strip dead/duplicate vars. Use a temp file (sed -i has Linux
+          # vs BSD portability gotchas around -i'').
+          tmp=$(mktemp)
+          grep -vE '^(HIVEMIND_API_KEY|HIVEMIND_SQL_PROXY_KEY)=' "$ENV" > "$tmp"
+          mv "$tmp" "$ENV"
+          chmod 600 "$ENV"
+
+          echo "── after:"
+          awk -F= '/^[A-Z_][A-Z0-9_]*=/ {print "    " $1}' "$ENV" | sort
+
+          # Remove stale variants. Doc-only references; no automation
+          # uses them.
+          for f in deploy/phala/.env.core deploy/phala/.env.postgres; do
+            if [ -f "$f" ]; then
+              rm -f "$f"
+              echo "── removed: $f"
+            else
+              echo "── absent (ok): $f"
+            fi
+          done
+
+          # Sanity print: just the URL HOST of HIVEMIND_DATABASE_URL,
+          # so the operator can confirm prod9 vs prod5 without leaking
+          # the proxy key (which lives in a separate var anyway).
+          # shellcheck disable=SC1091
+          . "$ENV"
+          if [ -n "${HIVEMIND_DATABASE_URL:-}" ]; then
+            host=$(echo "$HIVEMIND_DATABASE_URL" | sed -E 's#^https?://([^/]+).*#\1#')
+            echo "── HIVEMIND_DATABASE_URL host: ${host}"
+          fi
+          echo "── done"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519

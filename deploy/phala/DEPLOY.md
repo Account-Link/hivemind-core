@@ -43,24 +43,27 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Put these in `deploy/phala/.env.postgres` and `deploy/phala/.env.core`:
+Put these in a single `deploy/phala/.env` (one source of truth — feeds
+both CVMs). Start from the committed template:
+
+```bash
+cp deploy/phala/.env.example deploy/phala/.env
+chmod 600 deploy/phala/.env
+vi deploy/phala/.env
+```
+
+Required values:
 
 ```ini
-# .env.postgres
+# Postgres CVM
 DB_PASS=<db password>
 SQL_PROXY_KEY=<data-plane key>
 SQL_PROXY_ADMIN_KEY=<admin key>
-# R2 backup config — optional
-WALG_S3_PREFIX=
-WALG_LIBSODIUM_KEY=
-R2_ENDPOINT=
-R2_ACCESS_KEY_ID=
-R2_SECRET_ACCESS_KEY=
 
-# .env.core
-HIVEMIND_DATABASE_URL=https://<pg_cvm_id>-8080.app.phala.network
-SQL_PROXY_KEY=<same data-plane key as above>
-SQL_PROXY_ADMIN_KEY=<same admin key as above>
+# Core CVM → postgres CVM link
+HIVEMIND_DATABASE_URL=https://<pg_cvm_id>-8080.<gateway>.phala.network
+
+# Core CVM
 HIVEMIND_ADMIN_KEY=<hivemind admin key>
 HIVEMIND_LLM_API_KEY=<OpenRouter / Anthropic key>
 
@@ -68,9 +71,17 @@ HIVEMIND_LLM_API_KEY=<OpenRouter / Anthropic key>
 # Token scope: Zone.DNS:Edit on the teleport.computer zone.
 # Mint at https://dash.cloudflare.com/profile/api-tokens
 CLOUDFLARE_API_TOKEN=cfat_...
-HIVEMIND_FRIENDLY_DOMAIN=hivemind.teleport.computer
-CERTBOT_EMAIL=ops@yourdomain.example
+
+# R2 backups (optional but strongly recommended for the pg CVM)
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_ENDPOINT=
+WALG_S3_PREFIX=s3://<bucket>/wal-g
 ```
+
+The full annotated set lives in `deploy/phala/.env.example`. There are
+no `.env.core` / `.env.postgres` variants — `deploy/phala/deploy.sh` and
+every relay-side workflow source the same `.env`.
 
 ## Step 0.5: Cloudflare DNS / dstack-ingress prerequisites
 
@@ -107,12 +118,10 @@ pre-check before any CVM changes — see the `${VAR:?...}` guard on
 
 ## Step 1: Deploy Postgres CVM
 
-Edit `deploy/phala/.env.postgres`, fill in `DB_PASS` and `SQL_PROXY_KEY`:
-
 ```bash
 phala deploy -n hivemind-pg \
   -c deploy/phala/docker-compose.postgres.yaml \
-  -e deploy/phala/.env.postgres --wait
+  -e deploy/phala/.env --wait
 ```
 
 After deploy, note the CVM ID. SQL proxy is at:
@@ -130,12 +139,13 @@ curl https://<pg_cvm_id>-8080.app.phala.network/health
 
 ## Step 2: Deploy App CVM
 
-Edit `deploy/phala/.env.core`, fill in the SQL proxy URL and keys:
+After Step 1, copy the postgres CVM's gateway URL into
+`HIVEMIND_DATABASE_URL` in `deploy/phala/.env`, then:
 
 ```bash
 phala deploy -n hivemind-core \
   -c deploy/phala/docker-compose.core.yaml \
-  -e deploy/phala/.env.core --wait
+  -e deploy/phala/.env --wait
 ```
 
 Verify liveness (no auth required):
@@ -314,7 +324,7 @@ TENANT_DB="$TENANT_DB" ./deploy/postgres/import-data.sh csv users users.csv
 # Redeploy core (safe, stateless)
 phala deploy --cvm-id hivemind-core \
   -c deploy/phala/docker-compose.core.yaml \
-  -e deploy/phala/.env.core --wait
+  -e deploy/phala/.env --wait
 
 # DO NOT casually redeploy postgres (data loss!)
 ```

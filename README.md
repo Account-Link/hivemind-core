@@ -295,8 +295,9 @@ Live instances:
 The friendly URL is fronted by `dstack-ingress` (the Phase E pattern feedling and hermes both ship). It terminates LE-issued TLS inside the enclave (ACME DNS-01 via Cloudflare). Tier-3 cert pinning still works — the CLI auto-discovers the raw passthrough URL from `/v1/attestation` and verifies the enclave cert there.
 
 ```bash
-phala deploy -n hivemind-pg   -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env.postgres --wait
-phala deploy -n hivemind-core -c deploy/phala/docker-compose.core.yaml    -e deploy/phala/.env.core     --wait
+# Single env file (deploy/phala/.env) feeds both CVMs.
+phala deploy -n hivemind-pg   -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env --wait
+phala deploy -n hivemind-core -c deploy/phala/docker-compose.core.yaml    -e deploy/phala/.env --wait
 ```
 
 Full deploy notes: [`deploy/phala/DEPLOY.md`](deploy/phala/DEPLOY.md).

@@ -11,6 +11,9 @@ build/
 venv/
 .env
 .env.*
+# Templates we DO want tracked (no secrets — operator copies & fills in).
+!.env.example
+!deploy/phala/.env.example
 *.db
 .pytest_cache/
 .mypy_cache/
