@@ -70,7 +70,23 @@ class Pipeline:
             timeout=settings.llm_timeout_seconds,
         )
         self.llm_model = settings.llm_model
+        self._role_models = {
+            "scope": (settings.scope_model or settings.llm_model),
+            "query": (settings.query_model or settings.llm_model),
+            "mediator": (settings.mediator_model or settings.llm_model),
+            "index": (settings.index_model or settings.llm_model),
+        }
         self._sandbox_settings = build_sandbox_settings(settings)
+
+    def _model_for(self, role: str, override: str | None = None) -> str:
+        """Resolve the LLM model for a given role.
+
+        Caller-supplied ``override`` wins; otherwise per-role config; otherwise
+        the global ``llm_model``.
+        """
+        if override:
+            return override
+        return self._role_models.get(role, self.llm_model)
 
     # -- Store pipeline --
 
@@ -125,6 +141,7 @@ class Pipeline:
 
         req_timeout = req.timeout_seconds
         req_max_calls = req.max_llm_calls
+        req_model = req.model
 
         if _disable_scope:
             pass
@@ -132,6 +149,7 @@ class Pipeline:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
                 max_calls=req_max_calls, timeout_seconds=req_timeout,
+                model=req_model,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -140,6 +158,7 @@ class Pipeline:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
                 max_calls=req_max_calls, timeout_seconds=req_timeout,
+                model=req_model,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -165,6 +184,7 @@ class Pipeline:
             max_tokens=query_max_tokens,
             timeout_seconds=req_timeout,
             return_usage=True,
+            model=req_model,
         )
         used = query_usage.get("total_tokens", 0)
         total_tokens += used
@@ -190,6 +210,7 @@ class Pipeline:
                         max_calls=req_max_calls,
                         timeout_seconds=req_timeout,
                         policy=req.policy,
+                        model=req_model,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
@@ -229,11 +250,12 @@ class Pipeline:
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
         extra_volumes: dict[str, dict[str, str]] | None = None,
+        model: str | None = None,
     ):
         """Run a Docker agent with tools and return its stdout."""
         backend = SandboxBackend(
             self.llm_client,
-            self.llm_model,
+            self._model_for(role, model),
             self._sandbox_settings,
             agent_config,
             agent_store=self.agent_store,
@@ -262,6 +284,7 @@ class Pipeline:
         max_tokens: int | None = None,
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
+        model: str | None = None,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -373,6 +396,7 @@ class Pipeline:
             timeout_seconds=timeout_seconds,
             return_budget_summary=True,
             extra_volumes=scope_volumes,
+            model=model,
         )
 
         try:
@@ -421,6 +445,7 @@ class Pipeline:
         return_usage: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
+        model: str | None = None,
     ):
         """Run query agent with SCOPED access, return output and optionally usage/tape."""
         agent_config = await asyncio.to_thread(
@@ -445,7 +470,7 @@ class Pipeline:
 
         backend = SandboxBackend(
             self.llm_client,
-            self.llm_model,
+            self._model_for("query", model),
             self._sandbox_settings,
             agent_config,
             agent_store=self.agent_store,
@@ -484,6 +509,7 @@ class Pipeline:
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
         policy: str | None = None,
+        model: str | None = None,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
         agent_config = await asyncio.to_thread(
@@ -501,7 +527,7 @@ class Pipeline:
         # Mediator has NO data access tools
         backend = SandboxBackend(
             self.llm_client,
-            self.llm_model,
+            self._model_for("mediator", model),
             self._sandbox_settings,
             agent_config,
             agent_store=self.agent_store,
@@ -534,6 +560,7 @@ class Pipeline:
             max_tokens=effective_max,
             max_calls=req.max_llm_calls,
             timeout_seconds=req.timeout_seconds,
+            model=req.model,
         )
 
         usage["max_tokens"] = effective_max
@@ -545,6 +572,7 @@ class Pipeline:
         max_tokens: int | None = None,
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
+        model: str | None = None,
     ) -> tuple[str, dict, dict]:
         """Run index agent with FULL_READWRITE access. Returns (index_text, metadata, usage)."""
         index_agent_id = req.index_agent_id or self.settings.default_index_agent
@@ -582,6 +610,7 @@ class Pipeline:
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
             return_budget_summary=True,
+            model=model,
         )
 
         try:
@@ -616,6 +645,7 @@ class Pipeline:
         max_tokens: int | None = None,
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
+        model: str | None = None,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -656,6 +686,7 @@ class Pipeline:
                     scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                         req_for_scope, max_tokens=scope_budget,
                         max_calls=max_calls, timeout_seconds=timeout_seconds,
+                        model=model,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -709,7 +740,7 @@ class Pipeline:
 
             backend = SandboxBackend(
                 self.llm_client,
-                self.llm_model,
+                self._model_for("query", model),
                 self._sandbox_settings,
                 agent_config,
             )
@@ -760,6 +791,7 @@ class Pipeline:
                             max_tokens=remaining,
                             max_calls=max_calls,
                             timeout_seconds=timeout_seconds,
+                            model=model,
                         )
                     except ValueError as e:
                         if "not found" in str(e).lower():

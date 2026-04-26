@@ -1738,6 +1738,16 @@ def _parse_hmq_uri(uri: str) -> dict:
         "configured timeout, still capped by global_timeout_seconds)."
     ),
 )
+@click.option(
+    "--model",
+    type=str,
+    default=None,
+    help=(
+        "LLM model override for this call (e.g. moonshotai/kimi-k2.6, "
+        "moonshotai/kimi-k2.5, anthropic/claude-haiku-4.5). Empty falls "
+        "back to per-role server config, then to the global default."
+    ),
+)
 def ask(
     uri: str,
     question: str,
@@ -1745,6 +1755,7 @@ def ask(
     max_tokens: int | None,
     max_llm_calls: int | None,
     timeout_seconds: int | None,
+    model: str | None,
 ):
     """Send a query through a hmq:// URI shared by an owner.
 
@@ -1828,6 +1839,8 @@ def ask(
         payload["max_llm_calls"] = max_llm_calls
     if timeout_seconds is not None:
         payload["timeout_seconds"] = timeout_seconds
+    if model:
+        payload["model"] = model
     if force_sync:
         _query_sync(service, headers, payload)
     else:
@@ -1868,6 +1881,16 @@ def ask(
         "configured timeout, still capped by global_timeout_seconds)."
     ),
 )
+@click.option(
+    "--model",
+    type=str,
+    default=None,
+    help=(
+        "LLM model override for this call (e.g. moonshotai/kimi-k2.6, "
+        "moonshotai/kimi-k2.5, anthropic/claude-haiku-4.5). Empty falls "
+        "back to per-role server config, then to the global default."
+    ),
+)
 def query_cmd(
     question: str,
     endpoint: str | None,
@@ -1876,6 +1899,7 @@ def query_cmd(
     max_tokens: int | None,
     max_llm_calls: int | None,
     timeout_seconds: int | None,
+    model: str | None,
 ):
     """Send a natural-language query to the hivemind service."""
     config = _load_config()
@@ -1897,6 +1921,8 @@ def query_cmd(
         payload["max_llm_calls"] = max_llm_calls
     if timeout_seconds is not None:
         payload["timeout_seconds"] = timeout_seconds
+    if model:
+        payload["model"] = model
 
     if use_async:
         _query_async(service, headers, payload)

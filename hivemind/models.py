@@ -26,6 +26,11 @@ class QueryRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1)
     max_llm_calls: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
+    # Per-call LLM model override. Empty/None falls back to per-role
+    # config (HIVEMIND_SCOPE_MODEL/QUERY_MODEL/MEDIATOR_MODEL) and then
+    # to the global HIVEMIND_LLM_MODEL. Use to A/B different models per
+    # query, e.g. "moonshotai/kimi-k2.6" or "anthropic/claude-haiku-4.5".
+    model: str | None = None
     # Optional privacy/utility policy the scope agent should enforce.
     # Example: "Only allow conversations from the last 30 days; block
     # content from before that window." The scope agent reads this as
@@ -77,6 +82,7 @@ class IndexRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1)
     max_llm_calls: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
+    model: str | None = None
 
 
 class IndexResponse(BaseModel):
