@@ -215,6 +215,59 @@ service_url() {
     echo "https://${app_id}-${port}${suffix}.${base_domain}"
 }
 
+# Sync HIVEMIND_PINNING_GATEWAY in the env file from the CVM's actual
+# gateway.base_domain. Closes the drift loop where a stale env override
+# (or a fresh relay clone with a stale .env) causes hivemind-core's
+# attestation bundle to advertise a `tls.pinning_url` that points at
+# the wrong cluster — symptoms: CLI fails Tier-3 cert pin verification,
+# `hivemind schema` errors with "Cannot reach <friendly>" on SSL EOF
+# while the friendly URL is actually fine. (Real incident, 2026-04-26.)
+#
+# Two modes:
+#  - update (CVM exists): authoritative truth = the running CVM's
+#    `gateway.base_domain`. We rewrite the env file to match. Idempotent.
+#  - create (NODE_ID set): no CVM yet to query. We trust whatever the
+#    operator put in env (or the compose default). After the create
+#    completes, the next deploy will auto-correct via update mode.
+sync_pinning_gateway() {
+    local name="$1"
+    local env_file="$2"
+
+    if [ -n "${NODE_ID}" ]; then
+        log "sync_pinning_gateway: create-mode (NODE_ID=${NODE_ID}) — skipping (no CVM to query yet)"
+        return 0
+    fi
+
+    local meta base_domain
+    meta=$(phala cvms get --cvm-id "${name}" --json 2>/dev/null || true)
+    if [ -z "${meta}" ]; then
+        log "sync_pinning_gateway: ${name} not found in workspace — skipping (first deploy?)"
+        return 0
+    fi
+    base_domain=$(printf '%s' "${meta}" \
+        | python3 -c 'import sys,json; print((json.load(sys.stdin).get("gateway") or {}).get("base_domain",""))')
+    if [ -z "${base_domain}" ]; then
+        warn "sync_pinning_gateway: ${name} has no gateway.base_domain in metadata — skipping"
+        return 0
+    fi
+
+    local current
+    current=$(grep -E '^HIVEMIND_PINNING_GATEWAY=' "${env_file}" 2>/dev/null | head -1 | sed -E 's|^HIVEMIND_PINNING_GATEWAY=||' || true)
+
+    if [ "${current}" = "${base_domain}" ]; then
+        log "sync_pinning_gateway: env already matches CVM gateway (${base_domain})"
+        return 0
+    fi
+
+    if [ -z "${current}" ]; then
+        log "sync_pinning_gateway: appending HIVEMIND_PINNING_GATEWAY=${base_domain} (was unset)"
+        echo "HIVEMIND_PINNING_GATEWAY=${base_domain}" >> "${env_file}"
+    else
+        warn "sync_pinning_gateway: rewriting HIVEMIND_PINNING_GATEWAY (${current} → ${base_domain}) to match live CVM"
+        sed -i -E "s|^HIVEMIND_PINNING_GATEWAY=.*|HIVEMIND_PINNING_GATEWAY=${base_domain}|" "${env_file}"
+    fi
+}
+
 # Does this core compose have enclave TLS enabled (default or override)?
 core_tls_enabled() {
     local compose="$1"
@@ -267,6 +320,7 @@ wait_healthy() {
 # ── Per-service entry points ──
 
 deploy_core() {
+    sync_pinning_gateway "${CORE_NAME}" "${ENV_FILE}"
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
     local url tls=0

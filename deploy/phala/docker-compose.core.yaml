@@ -94,10 +94,18 @@ services:
 
       # Cluster-aware pinning surface. The CVM doesn't know its own
       # gateway base_domain from inside (dstack.info() doesn't expose
-      # it), so we pass it in. Defaults to prod9 in the code; override
-      # to prod5 here while hivemind-core lives on the legacy cluster.
-      # Without this, the bundle's `tls.pinning_url` points at the
-      # wrong cluster and the CLI's friendly→raw fallback can't run.
+      # it), so we pass it in. The bundle's `tls.pinning_url` is what
+      # the CLI uses for the friendly→raw Tier-3 cross-pin fallback —
+      # if it points at the wrong cluster, every CLI call fails the
+      # cert-fingerprint check.
+      #
+      # AUTO-MANAGED. `deploy/phala/deploy.sh` runs `sync_pinning_gateway`
+      # before each deploy, which reads the live CVM's `gateway.base_domain`
+      # via `phala cvms get` and rewrites this var in the relay's `.env`
+      # to match. So a fresh relay (or one whose `.env` has stale value)
+      # self-corrects on the next deploy. Don't hand-edit; if you need to
+      # force a value during a cluster cutover, do it via the `.env` and
+      # the next deploy will reconcile to whatever cluster the CVM is on.
       HIVEMIND_PINNING_GATEWAY: ${HIVEMIND_PINNING_GATEWAY:-dstack-pha-prod9.phala.network}
 
       # Docker sandbox — agents run as containers via host Docker daemon
