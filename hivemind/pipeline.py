@@ -123,11 +123,15 @@ class Pipeline:
         scope_fn_source = ""
         scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
 
+        req_timeout = req.timeout_seconds
+        req_max_calls = req.max_llm_calls
+
         if _disable_scope:
             pass
         elif req.scope_agent_id:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
+                max_calls=req_max_calls, timeout_seconds=req_timeout,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -135,6 +139,7 @@ class Pipeline:
         elif self.settings.default_scope_agent:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
+                max_calls=req_max_calls, timeout_seconds=req_timeout,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -156,7 +161,9 @@ class Pipeline:
             prompt=req.query,
             scope_fn=scope_fn,
             scope_fn_source=scope_fn_source,
+            max_calls=req_max_calls,
             max_tokens=query_max_tokens,
+            timeout_seconds=req_timeout,
             return_usage=True,
         )
         used = query_usage.get("total_tokens", 0)
@@ -180,6 +187,8 @@ class Pipeline:
                         raw_output=output,
                         prompt=req.query,
                         max_tokens=remaining,
+                        max_calls=req_max_calls,
+                        timeout_seconds=req_timeout,
                         policy=req.policy,
                     )
                 except ValueError as e:
@@ -215,6 +224,7 @@ class Pipeline:
         scope_query_agent_id: str | None = None,
         max_calls: int | None = None,
         max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
         return_budget_summary: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
@@ -239,6 +249,7 @@ class Pipeline:
             scope_query_agent_id=scope_query_agent_id,
             max_calls=max_calls,
             max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
             return_budget_summary=return_budget_summary,
             replay_tape=replay_tape,
             return_tape=return_tape,
@@ -249,6 +260,8 @@ class Pipeline:
         self,
         req: QueryRequest,
         max_tokens: int | None = None,
+        max_calls: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -355,7 +368,9 @@ class Pipeline:
             agent_store_for_bridge=self.agent_store,
             run_query_fn=run_query_fn,
             scope_query_agent_id=allowed_query_agent_id,
+            max_calls=max_calls,
             max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
             return_budget_summary=True,
             extra_volumes=scope_volumes,
         )
@@ -402,6 +417,7 @@ class Pipeline:
         scope_fn_source: str = "",
         max_calls: int | None = None,
         max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
         return_usage: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
@@ -442,6 +458,7 @@ class Pipeline:
             on_tool_call=on_tool_call,
             max_calls=max_calls,
             max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
             return_budget_summary=return_usage,
             replay_tape=replay_tape,
             return_tape=return_tape,
@@ -464,6 +481,8 @@ class Pipeline:
         raw_output: str,
         prompt: str,
         max_tokens: int | None = None,
+        max_calls: int | None = None,
+        timeout_seconds: int | None = None,
         policy: str | None = None,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
@@ -496,7 +515,9 @@ class Pipeline:
             env=env,
             tools=[],
             on_tool_call=noop_tool_call,
+            max_calls=max_calls,
             max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
             return_budget_summary=True,
         )
         return output, usage
@@ -511,6 +532,8 @@ class Pipeline:
         index_text, metadata, usage = await self._run_index_agent(
             req=req,
             max_tokens=effective_max,
+            max_calls=req.max_llm_calls,
+            timeout_seconds=req.timeout_seconds,
         )
 
         usage["max_tokens"] = effective_max
@@ -520,6 +543,8 @@ class Pipeline:
         self,
         req: IndexRequest,
         max_tokens: int | None = None,
+        max_calls: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> tuple[str, dict, dict]:
         """Run index agent with FULL_READWRITE access. Returns (index_text, metadata, usage)."""
         index_agent_id = req.index_agent_id or self.settings.default_index_agent
@@ -553,7 +578,9 @@ class Pipeline:
             env=env,
             tools=tools,
             on_tool_call=on_tool_call,
+            max_calls=max_calls,
             max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
             return_budget_summary=True,
         )
 
@@ -587,6 +614,8 @@ class Pipeline:
         scope_agent_id: str | None = None,
         mediator_agent_id: str | None = None,
         max_tokens: int | None = None,
+        max_calls: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -626,6 +655,7 @@ class Pipeline:
                     scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
                     scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                         req_for_scope, max_tokens=scope_budget,
+                        max_calls=max_calls, timeout_seconds=timeout_seconds,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -689,7 +719,9 @@ class Pipeline:
                 env=env,
                 tools=tools,
                 on_tool_call=on_tool_call,
+                max_calls=max_calls,
                 max_tokens=query_max_tokens,
+                timeout_seconds=timeout_seconds,
                 artifact_store=artifact_store,
                 artifact_retention_seconds=artifact_retention_seconds,
                 run_id=run_id,
@@ -726,6 +758,8 @@ class Pipeline:
                             raw_output=query_output,
                             prompt=prompt,
                             max_tokens=remaining,
+                            max_calls=max_calls,
+                            timeout_seconds=timeout_seconds,
                         )
                     except ValueError as e:
                         if "not found" in str(e).lower():
@@ -770,6 +804,8 @@ class Pipeline:
         document_data: str,
         document_metadata: str,
         max_tokens: int | None = None,
+        max_calls: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> None:
         """Run index agent with tracking. Updates run_store through lifecycle."""
         try:
@@ -783,9 +819,12 @@ class Pipeline:
                 metadata=json.loads(document_metadata) if document_metadata else {},
                 index_agent_id=index_agent_id,
                 max_tokens=max_tokens,
+                max_llm_calls=max_calls,
+                timeout_seconds=timeout_seconds,
             )
             index_text, metadata, usage = await self._run_index_agent(
                 req=req, max_tokens=max_tokens,
+                max_calls=max_calls, timeout_seconds=timeout_seconds,
             )
 
             await asyncio.to_thread(

@@ -107,6 +107,7 @@ class SandboxBackend:
         scope_query_agent_id: str | None = None,
         max_calls: int | None = None,
         max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
         return_budget_summary: bool = False,
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
@@ -129,7 +130,8 @@ class SandboxBackend:
             max_tokens or agent.max_tokens,
             self.settings.global_max_tokens,
         )
-        timeout = min(agent.timeout_seconds, self.settings.global_timeout_seconds)
+        requested_timeout = timeout_seconds or agent.timeout_seconds
+        timeout = min(requested_timeout, self.settings.global_timeout_seconds)
         memory_mb = min(agent.memory_mb, self.settings.container_memory_mb)
 
         agent = agent.model_copy(

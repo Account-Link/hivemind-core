@@ -24,6 +24,8 @@ class QueryRequest(BaseModel):
     scope_agent_id: str | None = None
     mediator_agent_id: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    max_llm_calls: int | None = Field(default=None, ge=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)
     # Optional privacy/utility policy the scope agent should enforce.
     # Example: "Only allow conversations from the last 30 days; block
     # content from before that window." The scope agent reads this as
@@ -73,6 +75,8 @@ class IndexRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
     index_agent_id: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    max_llm_calls: int | None = Field(default=None, ge=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)
 
 
 class IndexResponse(BaseModel):

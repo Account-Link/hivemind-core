@@ -1644,6 +1644,13 @@ def share(mint: bool, label: str, explicit_token: str | None):
         qs.append(f"files={files_digest}")
     if parsed.scheme and parsed.scheme != "https":
         qs.append(f"scheme={parsed.scheme}")
+    # Embed the owner's query agent id so `hivemind ask` doesn't need
+    # the recipient to know it. Without this the server falls back to
+    # default_query_agent (often unset on multi-tenant deploys), and
+    # the recipient gets "No query agent specified".
+    qa_id = (config.get("query_agent_id") or "").strip()
+    if qa_id:
+        qs.append(f"qa={qa_id}")
     uri = f"hmq://{host}/{scope_id}?" + "&".join(qs)
     click.echo(uri)
 
@@ -1692,6 +1699,7 @@ def _parse_hmq_uri(uri: str) -> dict:
         "token": token,
         "compose_hash": params.get("compose", "").lower(),
         "files_digest": params.get("files", "").lower(),
+        "query_agent_id": params.get("qa", ""),
     }
 
 
@@ -1699,9 +1707,45 @@ def _parse_hmq_uri(uri: str) -> dict:
 @click.argument("uri")
 @click.argument("question")
 @click.option(
-    "--async", "use_async", is_flag=True, help="Use async submit+poll."
+    "--sync",
+    "force_sync",
+    is_flag=True,
+    help=(
+        "Force synchronous /v1/query (60s gateway timeout). Default is "
+        "async submit+poll, which is the only mode that survives the "
+        "Phala gateway's nginx 60s read timeout for slow agent runs."
+    ),
 )
-def ask(uri: str, question: str, use_async: bool):
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=None,
+    help="Per-call cap on total bridge LLM tokens.",
+)
+@click.option(
+    "--max-llm-calls",
+    type=int,
+    default=None,
+    help="Per-call cap on number of bridge LLM calls.",
+)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    type=int,
+    default=None,
+    help=(
+        "Per-call container timeout in seconds (overrides the agent's "
+        "configured timeout, still capped by global_timeout_seconds)."
+    ),
+)
+def ask(
+    uri: str,
+    question: str,
+    force_sync: bool,
+    max_tokens: int | None,
+    max_llm_calls: int | None,
+    timeout_seconds: int | None,
+):
     """Send a query through a hmq:// URI shared by an owner.
 
     Verifies the trust pins (compose_hash, files_digest) encoded in the
@@ -1775,10 +1819,19 @@ def ask(uri: str, question: str, use_async: bool):
             raise SystemExit(4)
 
     payload: dict = {"query": question, "scope_agent_id": scope_id}
-    if use_async:
-        _query_async(service, headers, payload)
-    else:
+    qa_id = (parsed.get("query_agent_id") or "").strip()
+    if qa_id:
+        payload["query_agent_id"] = qa_id
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if max_llm_calls is not None:
+        payload["max_llm_calls"] = max_llm_calls
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
+    if force_sync:
         _query_sync(service, headers, payload)
+    else:
+        _query_async(service, headers, payload)
 
 
 @cli.command("query")
@@ -1793,11 +1846,36 @@ def ask(uri: str, question: str, use_async: bool):
     default=None,
     help="Query agent ID (persists to profile as the default).",
 )
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=None,
+    help="Per-call cap on total bridge LLM tokens.",
+)
+@click.option(
+    "--max-llm-calls",
+    type=int,
+    default=None,
+    help="Per-call cap on number of bridge LLM calls.",
+)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    type=int,
+    default=None,
+    help=(
+        "Per-call container timeout in seconds (overrides the agent's "
+        "configured timeout, still capped by global_timeout_seconds)."
+    ),
+)
 def query_cmd(
     question: str,
     endpoint: str | None,
     use_async: bool,
     query_agent: str | None,
+    max_tokens: int | None,
+    max_llm_calls: int | None,
+    timeout_seconds: int | None,
 ):
     """Send a natural-language query to the hivemind service."""
     config = _load_config()
@@ -1813,6 +1891,12 @@ def query_cmd(
         payload["query_agent_id"] = config["query_agent_id"]
     if config.get("scope_agent_id"):
         payload["scope_agent_id"] = config["scope_agent_id"]
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if max_llm_calls is not None:
+        payload["max_llm_calls"] = max_llm_calls
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
 
     if use_async:
         _query_async(service, headers, payload)
