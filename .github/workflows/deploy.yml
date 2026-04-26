@@ -288,16 +288,24 @@ jobs:
           # actually measured, not what we *thought* we shipped.
           ATTEST_URL="https://hivemind.teleport.computer/v1/attestation"
           echo "fetching compose_hash from ${ATTEST_URL}"
+          # Right after a deploy the gateway routes are sometimes still
+          # propagating (curl exits 35 = SSL connect error, or 28 = timeout).
+          # Retry on a longer schedule than wait_healthy used so we cover
+          # the gap between "core's own /v1/attestation is healthy" and
+          # "the dstack-ingress front for the canonical hostname is too".
+          # The ` || true` is mandatory — `set -o pipefail` otherwise aborts
+          # the whole script on the first curl failure before the loop's
+          # break-on-success check ever runs.
           HASH=""
-          for i in 1 2 3 4 5; do
-            HASH=$(curl -fsk --max-time 15 "${ATTEST_URL}" 2>/dev/null \
-              | jq -r '.attestation.compose_hash // empty')
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            HASH=$( (curl -fsk --max-time 20 "${ATTEST_URL}" 2>/dev/null \
+              | jq -r '.attestation.compose_hash // empty') || true)
             [ -n "${HASH}" ] && break
-            echo "  attempt ${i}: empty/unavailable, retrying in 10s…"
-            sleep 10
+            echo "  attempt ${i}/12: empty/unavailable, retrying in 15s…"
+            sleep 15
           done
           if [ -z "${HASH}" ]; then
-            echo "::error::could not fetch compose_hash from ${ATTEST_URL}"
+            echo "::error::could not fetch compose_hash from ${ATTEST_URL} after 3 minutes of retries"
             exit 1
           fi
           echo "live compose_hash: ${HASH}"
