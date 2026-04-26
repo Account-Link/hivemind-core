@@ -2,15 +2,24 @@
 
 Remote client for a hivemind-core service deployed in a TEE.
 
-Usage:
-  hivemind init [--service <url>] [--api-key <key>]
-  hivemind load <file> [--table <name>] [--format sql|csv|jsonl]
-  hivemind scope "<english rules>" | --from-file <path>
-  hivemind share
-  hivemind query "<question>"
-  hivemind run <path> [--prompt "..."] [--json] [--fetch]
-  hivemind runs [<run_id>]
-  hivemind agents
+Top-level (owner) commands:
+  init              wire up a profile (service URL + api_key)
+  load              bulk-load CSV / JSONL / SQL into the tenant DB
+  scope             upload a scope agent (default scope + custom rules)
+  share             emit a hmq:// URI bundling token + trust pins
+  ask               recipient-side: send a query through a hmq:// URI
+  query             send a query as the active profile
+  run               upload + run + collect a query agent in one shot
+  runs              list / inspect agent runs
+  schema            print the tenant's table schema
+  rotate-key        rotate the active profile's api_key
+
+Groups:
+  agents            list / rm / upload / attest registered agents
+  tokens            issue / list / revoke delegated capability tokens
+  profile           manage named local identities
+  trust             local compose-hash store + remote attestation
+  admin             multi-tenant + on-chain governance ops
 """
 
 import hashlib as _hashlib
@@ -826,7 +835,7 @@ def _verify_tls_pin(
             # an implementation detail of where the enclave cert lives;
             # the fingerprint is what's bound into the TDX quote and
             # what an auditor compares. Full URL still available via
-            # `hivemind attestation --raw` for anyone who wants it.
+            # `hivemind trust attest --raw` for anyone who wants it.
             click.echo(
                 f"  ✓ Live remote attestation verified — your connection "
                 f"terminates inside\n"
@@ -924,7 +933,7 @@ def _require_trust(config: dict) -> None:
                     )
                     click.echo(
                         f"  ✓ Source: {src}\n"
-                        f"    (run `hivemind attestation --reproduce` "
+                        f"    (run `hivemind trust attest --reproduce` "
                         f"to walk the chain back to source).",
                         err=True,
                     )
@@ -1527,26 +1536,249 @@ def _batch_insert(
 
 
 @cli.command()
-def share():
-    """Show the query endpoint and connection details."""
-    config = _load_config()
-    scope_id = config.get("scope_agent_id")
+@click.option(
+    "--mint",
+    is_flag=True,
+    help="Mint a fresh hmq_ token bound to the active scope agent.",
+)
+@click.option(
+    "--label", default="", help="Token label when --mint is used."
+)
+@click.option(
+    "--token",
+    "explicit_token",
+    default=None,
+    help="Use this hmq_ token instead of minting one.",
+)
+def share(mint: bool, label: str, explicit_token: str | None):
+    """Print a hmq:// URI bundling token + trust pins for a recipient.
 
+    The URI looks like::
+
+        hmq://<host>/<scope_agent_id>?token=hmq_...&compose=<sha256>&files=<sha256>
+
+    The recipient runs ``hivemind ask <URI> "<question>"`` — no profile,
+    no init, no YAML files. The pins encoded in the URI are verified
+    against the live service before each query.
+
+    You can either mint a fresh capability token (``--mint``) or hand in
+    one you already have (``--token hmq_...``). The owner ``hmk_`` key
+    in your profile is never embedded — recipients only ever see the
+    scoped ``hmq_`` token.
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    scope_id = config.get("scope_agent_id")
     if not scope_id:
         click.echo(
-            "Error: No scope agent registered. Run 'hivemind scope' first.",
+            "Error: No scope agent registered. Run 'hivemind scope ...' "
+            "or 'hivemind agents upload --type scope ...' first.",
             err=True,
         )
         raise SystemExit(1)
 
-    service = config["service"]
-    click.echo(f"Endpoint:    {service}/v1/query")
-    click.echo(f"Scope agent: {scope_id}")
-    if config.get("api_key"):
-        click.echo(f"API key:     {config['api_key']}")
-    click.echo()
-    click.echo("Example:")
-    click.echo('  hivemind query "What tables are available?"')
+    if explicit_token and mint:
+        click.echo("Error: pass --token OR --mint, not both.", err=True)
+        raise SystemExit(1)
+    if not explicit_token and not mint:
+        click.echo(
+            "Error: pass --mint to mint a fresh hmq_ token, or "
+            "--token hmq_... to embed one you already have.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if explicit_token:
+        if not explicit_token.startswith("hmq_"):
+            click.echo(
+                "Error: --token must be an hmq_ capability token.", err=True
+            )
+            raise SystemExit(1)
+        token = explicit_token
+    else:
+        try:
+            r = _hpost(
+                f"{service}/v1/tokens",
+                headers=headers,
+                json={
+                    "kind": "query",
+                    "label": label,
+                    "constraints": {"scope_agent_id": scope_id},
+                },
+                timeout=30,
+            )
+        except httpx.RequestError as e:
+            click.echo(f"Error minting token: {e}", err=True)
+            raise SystemExit(2)
+        if r.status_code >= 400:
+            click.echo(
+                f"Error {r.status_code}: {_api_error(r)}", err=True
+            )
+            raise SystemExit(3)
+        token = r.json()["token"]
+
+    try:
+        r = _hget(
+            f"{service}/v1/agents/{scope_id}/attest",
+            headers=headers,
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error fetching attestation pins: {e}", err=True)
+        raise SystemExit(2)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    pin = r.json()
+    files_digest = (pin.get("files_digest_sha256") or "").lower()
+    inner_att = (pin.get("attestation") or {}).get("attestation") or {}
+    compose_hash = (inner_att.get("compose_hash") or "").lower()
+
+    parsed = _urlparse(service)
+    host = parsed.netloc
+    qs: list[str] = [f"token={token}"]
+    if compose_hash:
+        qs.append(f"compose={compose_hash}")
+    if files_digest:
+        qs.append(f"files={files_digest}")
+    if parsed.scheme and parsed.scheme != "https":
+        qs.append(f"scheme={parsed.scheme}")
+    uri = f"hmq://{host}/{scope_id}?" + "&".join(qs)
+    click.echo(uri)
+
+
+def _parse_hmq_uri(uri: str) -> dict:
+    """Decompose a ``hmq://host/<scope_id>?token=...&compose=...&files=...`` URI.
+
+    Returns a dict with ``service``, ``scope_agent_id``, ``token``,
+    ``compose_hash`` (may be empty), ``files_digest`` (may be empty).
+    Aborts the CLI on malformed input.
+    """
+    if not uri.startswith("hmq://"):
+        click.echo("Error: URI must start with hmq://", err=True)
+        raise SystemExit(1)
+    rest = uri[len("hmq://"):]
+    if "/" not in rest:
+        click.echo(
+            "Error: URI is missing /<scope_agent_id> component.", err=True
+        )
+        raise SystemExit(1)
+    host_part, _, tail = rest.partition("/")
+    if "?" in tail:
+        scope_id, _, query_str = tail.partition("?")
+    else:
+        scope_id, query_str = tail, ""
+    if not scope_id:
+        click.echo("Error: URI is missing scope_agent_id.", err=True)
+        raise SystemExit(1)
+    params: dict[str, str] = {}
+    for kv in query_str.split("&"):
+        if not kv:
+            continue
+        k, _, v = kv.partition("=")
+        params[k] = v
+    token = params.get("token", "")
+    if not token.startswith("hmq_"):
+        click.echo(
+            "Error: URI is missing token=hmq_... or token has wrong prefix.",
+            err=True,
+        )
+        raise SystemExit(1)
+    scheme = params.get("scheme", "https")
+    return {
+        "service": f"{scheme}://{host_part}",
+        "scope_agent_id": scope_id,
+        "token": token,
+        "compose_hash": params.get("compose", "").lower(),
+        "files_digest": params.get("files", "").lower(),
+    }
+
+
+@cli.command()
+@click.argument("uri")
+@click.argument("question")
+@click.option(
+    "--async", "use_async", is_flag=True, help="Use async submit+poll."
+)
+def ask(uri: str, question: str, use_async: bool):
+    """Send a query through a hmq:// URI shared by an owner.
+
+    Verifies the trust pins (compose_hash, files_digest) encoded in the
+    URI against the live service before sending. No profile, no
+    pre-registered config — just the URI plus a question.
+
+    Example::
+
+        hivemind ask 'hmq://hivemind.example/abc123?token=hmq_xyz&compose=...' \\
+            "How many videos did I watch this month?"
+    """
+    parsed = _parse_hmq_uri(uri)
+    service = parsed["service"]
+    scope_id = parsed["scope_agent_id"]
+    headers = {"Authorization": f"Bearer {parsed['token']}"}
+
+    if parsed["compose_hash"]:
+        try:
+            r = _hget(f"{service}/v1/attestation", timeout=15)
+        except httpx.RequestError as e:
+            click.echo(f"Error fetching attestation: {e}", err=True)
+            raise SystemExit(2)
+        if r.status_code >= 400:
+            click.echo(
+                f"Error {r.status_code} fetching attestation: "
+                f"{_api_error(r)}",
+                err=True,
+            )
+            raise SystemExit(3)
+        live_compose = (
+            (r.json().get("attestation") or {}).get("compose_hash") or ""
+        ).lower()
+        if live_compose != parsed["compose_hash"]:
+            click.echo(
+                "Error: compose_hash pin mismatch.\n"
+                f"  Expected (URI):  {parsed['compose_hash']}\n"
+                f"  Live (service):  {live_compose}\n"
+                "Aborting — service may have been redeployed since the "
+                "URI was issued. Ask the owner for a fresh URI.",
+                err=True,
+            )
+            raise SystemExit(4)
+
+    if parsed["files_digest"]:
+        try:
+            r = _hget(
+                f"{service}/v1/agents/{scope_id}/attest",
+                headers=headers,
+                timeout=30,
+            )
+        except httpx.RequestError as e:
+            click.echo(f"Error fetching scope pins: {e}", err=True)
+            raise SystemExit(2)
+        if r.status_code >= 400:
+            click.echo(
+                f"Error {r.status_code} fetching scope pins: "
+                f"{_api_error(r)}",
+                err=True,
+            )
+            raise SystemExit(3)
+        live_files = (r.json().get("files_digest_sha256") or "").lower()
+        if live_files != parsed["files_digest"]:
+            click.echo(
+                "Error: files_digest pin mismatch.\n"
+                f"  Expected (URI):  {parsed['files_digest']}\n"
+                f"  Live (service):  {live_files}\n"
+                "Aborting — scope agent source has changed since the URI "
+                "was issued.",
+                err=True,
+            )
+            raise SystemExit(4)
+
+    payload: dict = {"query": question, "scope_agent_id": scope_id}
+    if use_async:
+        _query_async(service, headers, payload)
+    else:
+        _query_sync(service, headers, payload)
 
 
 @cli.command("query")
@@ -2047,7 +2279,13 @@ def runs_cmd(run_id: str | None, limit: int, as_json: bool):
         )
 
 
-@cli.command("agents")
+@cli.group("agents")
+def agents_cli():
+    """List / upload / inspect / remove agents on the service."""
+    pass
+
+
+@agents_cli.command("list")
 @click.option(
     "--type",
     "agent_type",
@@ -2055,7 +2293,7 @@ def runs_cmd(run_id: str | None, limit: int, as_json: bool):
     help="Filter by agent type (query/scope/mediator/index)",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
-def agents_cmd(agent_type: str | None, as_json: bool):
+def agents_list(agent_type: str | None, as_json: bool):
     """List agents registered with the service."""
     config = _load_config()
     service = config["service"]
@@ -2089,14 +2327,14 @@ def agents_cmd(agent_type: str | None, as_json: bool):
         )
 
 
-@cli.command("agent-rm")
+@agents_cli.command("rm")
 @click.argument("agent_id")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
-def agent_rm_cmd(agent_id: str, as_json: bool):
+def agents_rm(agent_id: str, as_json: bool):
     """Delete a single agent by ID.
 
-    Use ``hivemind agents`` to list. Bulk cleanup of agents whose
-    Docker images are missing is ``hivemind admin sweep-broken-agents``.
+    Use ``hivemind agents list`` to list. Bulk cleanup of agents whose
+    Docker images are missing is ``hivemind admin sweep``.
     """
     config = _load_config()
     service = config["service"]
@@ -2120,6 +2358,151 @@ def agent_rm_cmd(agent_id: str, as_json: bool):
         click.echo(_json.dumps(r.json(), indent=2))
     else:
         click.echo(f"deleted {agent_id}")
+
+
+@agents_cli.command("upload")
+@click.argument(
+    "path",
+    type=click.Path(
+        exists=True, file_okay=True, dir_okay=True, path_type=Path
+    ),
+)
+@click.option(
+    "--type",
+    "agent_type",
+    type=click.Choice(["scope", "query", "index", "mediator"]),
+    required=True,
+    help="Agent role.",
+)
+@click.option(
+    "--name",
+    default=None,
+    help="Agent name (defaults to the directory or archive basename).",
+)
+@click.option(
+    "--description", default="", help="Free-form description for the listing."
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def agents_upload(
+    path: Path,
+    agent_type: str,
+    name: str | None,
+    description: str,
+    as_json: bool,
+):
+    """Upload an arbitrary directory or .tar.gz to /v1/agents/upload.
+
+    Bring-your-own agent — use this when the default scope template
+    isn't enough (custom Dockerfile, extra runtime deps, alternative
+    LLM glue). Polls the build run, then prints the new agent_id. For
+    ``--type scope`` the new id is also saved to the active profile so
+    ``hivemind query`` / ``hivemind share`` pick it up automatically.
+    """
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+
+    if path.is_dir():
+        archive_bytes = _tarball_from_dir(path)
+        archive_name = f"{path.name}.tar.gz"
+        agent_name = name or path.name
+    elif path.suffix in {".gz", ".tgz"} or path.name.endswith(".tar.gz"):
+        archive_bytes = path.read_bytes()
+        archive_name = path.name
+        agent_name = name or path.stem.replace(".tar", "")
+    else:
+        raise click.ClickException(
+            f"Unsupported path: {path}. Pass a directory or .tar.gz."
+        )
+
+    if not as_json:
+        click.echo(
+            f"Uploading {archive_name} ({len(archive_bytes)} bytes) "
+            f"as {agent_type}…"
+        )
+
+    try:
+        resp = _hpost(
+            f"{service}/v1/agents/upload",
+            files={
+                "archive": (
+                    archive_name, archive_bytes, "application/gzip",
+                )
+            },
+            data={
+                "name": agent_name,
+                "agent_type": agent_type,
+                "description": description
+                or f"hivemind agents upload {path.name}",
+            },
+            headers=headers,
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(
+            f"Error: Upload failed ({resp.status_code}): "
+            f"{_api_error(resp)}",
+            err=True,
+        )
+        raise SystemExit(3)
+
+    result = resp.json()
+    agent_id = result["agent_id"]
+    run_id = result.get("run_id")
+
+    if run_id:
+        if not as_json:
+            click.echo(f"Building image (run: {run_id})…")
+        for _ in range(60):
+            time.sleep(2)
+            try:
+                sr = _hget(
+                    f"{service}/v1/agent-runs/{run_id}",
+                    headers=headers,
+                    timeout=10,
+                )
+                status = sr.json()
+                s = status.get("status", "")
+                if s == "completed":
+                    if not as_json:
+                        click.echo("Build complete.")
+                    break
+                if s == "failed":
+                    click.echo(
+                        f"Error: Build failed: {status.get('error', '?')}",
+                        err=True,
+                    )
+                    raise SystemExit(1)
+            except httpx.RequestError:
+                pass
+        else:
+            if not as_json:
+                click.echo(
+                    "Warning: Build still in progress. Check with "
+                    f"'hivemind runs {run_id}'.",
+                    err=True,
+                )
+
+    if agent_type == "scope":
+        config["scope_agent_id"] = agent_id
+        _save_config(config)
+
+    if as_json:
+        click.echo(
+            _json.dumps(
+                {"agent_id": agent_id, "run_id": run_id, "type": agent_type},
+                indent=2,
+            )
+        )
+        return
+    click.echo(f"agent_id: {agent_id}")
+    if agent_type == "scope":
+        click.echo(
+            f"(saved as scope_agent_id in profile '{_profile_name()}')"
+        )
 
 
 @cli.command("schema")
@@ -2148,91 +2531,6 @@ def schema_cmd(as_json: bool):
             typ = col.get("data_type") or col.get("type") or "?"
             nullable = "" if col.get("is_nullable") == "YES" else " NOT NULL"
             click.echo(f"  {name:<28} {typ}{nullable}")
-
-
-@cli.command("attestation")
-@click.option(
-    "--service",
-    default=None,
-    help="Service URL (defaults to active profile, or HIVEMIND_SERVICE).",
-)
-@click.option(
-    "--raw", is_flag=True, help="Emit the full /v1/attestation JSON payload."
-)
-@click.option(
-    "--reproduce",
-    is_flag=True,
-    help=(
-        "Walk the chain of trust from compose_hash → live app_compose "
-        "→ on-chain-registered git_sha → repo YAML, and print which "
-        "links held."
-    ),
-)
-def attestation_cmd(service: str | None, raw: bool, reproduce: bool):
-    """Fetch and print the CVM's attestation bundle (TDX quote + binding).
-
-    No auth — this endpoint is public so out-of-band verifiers can pin
-    the cert + replay the quote against Intel/dstack KMS.
-    """
-    if service:
-        url = service.rstrip("/")
-    else:
-        try:
-            url = _load_config(check_trust=False)["service"]
-        except SystemExit:
-            url = _DEFAULT_SERVICE
-    _warm_pin_from_trust(url)
-    try:
-        r = _hget(f"{url}/v1/attestation", timeout=15)
-    except httpx.RequestError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise SystemExit(2)
-    if r.status_code >= 400:
-        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
-        raise SystemExit(3)
-    bundle = r.json()
-    if raw:
-        click.echo(_json.dumps(bundle, indent=2, default=str))
-        return
-    if reproduce:
-        _run_reproduce(bundle)
-        return
-    if not bundle.get("ready"):
-        click.echo(f"ready:    false")
-        click.echo(f"reason:   {bundle.get('reason', '?')}")
-        click.echo(f"version:  {bundle.get('hivemind_version', '?')}")
-        return
-    att = bundle.get("attestation") or {}
-    click.echo(f"ready:        true")
-    click.echo(f"booted_at:    {bundle.get('booted_at', '?')}")
-    click.echo(f"app_id:       {att.get('app_id', '?')}")
-    click.echo(f"compose_hash: {att.get('compose_hash', '?')}")
-    click.echo(f"version:      {att.get('hivemind_version', '?')}")
-    if app_auth := att.get("app_auth"):
-        click.echo(f"app_auth:")
-        click.echo(f"  contract:   {app_auth.get('contract', '?')}")
-        click.echo(f"  chain_id:   {app_auth.get('chain_id', '?')}")
-    # On-chain source pointer for the running compose_hash. Best-effort:
-    # we hit the registry to fetch (git_commit, compose_uri) so the user
-    # can click through to the YAML that produced this build. RPC down
-    # / contract not configured → silently skip.
-    meta = _release_metadata_for(bundle, att.get("compose_hash") or "")
-    if meta and meta.get("compose_uri"):
-        click.echo(f"source:")
-        click.echo(f"  git_commit: {meta.get('git_commit', '?')}")
-        click.echo(f"  compose:    {meta.get('compose_uri', '?')}")
-    if tls := att.get("tls"):
-        if tls.get("enabled"):
-            click.echo(f"tls:")
-            click.echo(
-                f"  fingerprint: {tls.get('cert_fingerprint_sha256_hex', '?')}"
-            )
-            if pin := tls.get("pinning_url"):
-                click.echo(f"  pin URL:     {pin}")
-    click.echo(
-        "(use --raw for full JSON, --reproduce to verify the chain "
-        "back to source)"
-    )
 
 
 def _run_reproduce(bundle: dict) -> None:
@@ -2404,92 +2702,6 @@ def _run_reproduce(bundle: dict) -> None:
         raise SystemExit(7)
 
 
-@cli.command("index")
-@click.argument("data", required=False)
-@click.option(
-    "--from-file",
-    "from_file",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    default=None,
-    help="Read DATA from a file.",
-)
-@click.option(
-    "--metadata",
-    "metadata_json",
-    default=None,
-    help='JSON object passed through to the index agent (e.g. \'{"source":"x"}\').',
-)
-@click.option(
-    "--agent",
-    "index_agent",
-    default=None,
-    help="Index agent ID (overrides the profile default).",
-)
-@click.option(
-    "--max-tokens",
-    type=int,
-    default=None,
-    help="Per-call token budget for the index agent.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
-def index_cmd(
-    data: str | None,
-    from_file: Path | None,
-    metadata_json: str | None,
-    index_agent: str | None,
-    max_tokens: int | None,
-    as_json: bool,
-):
-    """Run the index agent against DATA and store the resulting summary.
-
-    The index agent receives the input plus tenant tools, writes
-    summaries / extractions back into Postgres, and returns the
-    canonical index_text.
-    """
-    if (data is None) == (from_file is None):
-        click.echo(
-            "Error: provide exactly one of DATA argument or --from-file.",
-            err=True,
-        )
-        raise SystemExit(1)
-    if from_file is not None:
-        data = from_file.read_text()
-    metadata: dict = {}
-    if metadata_json:
-        try:
-            metadata = _json.loads(metadata_json)
-            if not isinstance(metadata, dict):
-                raise ValueError("must be a JSON object")
-        except (ValueError, _json.JSONDecodeError) as e:
-            click.echo(f"Error: --metadata: {e}", err=True)
-            raise SystemExit(1)
-
-    config = _load_config()
-    service = config["service"]
-    headers = {**_headers(config), "Content-Type": "application/json"}
-    payload: dict = {"data": data, "metadata": metadata}
-    if index_agent:
-        payload["index_agent_id"] = index_agent
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-
-    try:
-        r = _hpost(
-            f"{service}/v1/index", headers=headers, json=payload, timeout=300
-        )
-    except httpx.RequestError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise SystemExit(2)
-    if r.status_code >= 400:
-        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
-        raise SystemExit(3)
-    body = r.json()
-    if as_json:
-        click.echo(_json.dumps(body, indent=2, default=str))
-        return
-    click.echo(body.get("index_text", ""))
-
-
 @cli.command("rotate-key")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 @click.confirmation_option(
@@ -2545,150 +2757,18 @@ def rotate_key(as_json: bool):
     )
 
 
-# ── Scope-agent inspection (recipient-side trust check) ──
-#
-# A query-token holder runs ``hivemind scope-inspect`` to confirm:
-#   1) the token authenticates against a CVM whose attestation matches
-#      the trust pin that the CLI is already enforcing;
-#   2) the scope agent the token binds them to is exactly the one whose
-#      source they expect (digest match);
-#   3) the scope agent's source files are listed and (optionally) printed
-#      so they can read the policy code before submitting their own
-#      query agent.
-#
-# Owner-side use: pass ``--scope-agent`` to inspect any of their own
-# agents. Query-token use: no flag needed — the bound scope_agent_id
-# comes from the token itself.
-
-
-@cli.command("scope-inspect")
-@click.option(
-    "--scope-agent",
-    "scope_agent",
-    default=None,
-    help=(
-        "Owner-only: scope agent id to inspect. Query-token holders omit "
-        "this — the token already pins which agent they can see."
-    ),
-)
-@click.option(
-    "--show-file",
-    "show_file",
-    default=None,
-    help="Print the contents of one extracted file in addition to the digest.",
-)
-@click.option(
-    "--list-files", is_flag=True, help="List every extracted file path + size."
-)
-@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
-def scope_inspect_cmd(
-    scope_agent: str | None,
-    show_file: str | None,
-    list_files: bool,
-    as_json: bool,
-):
-    """Show what the scope agent bound to your token actually does.
-
-    Resolves /v1/scope-attest (which returns the bound scope_agent_id,
-    its config, the live attestation bundle, and a stable sha256 over
-    the saved source files), then optionally lists / prints individual
-    files via /v1/agents/{id}/files{,/{name}}.
-    """
-    config = _load_config()
-    service = config["service"]
-    headers = _headers(config)
-    if "Authorization" not in headers:
-        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
-        raise SystemExit(1)
-
-    url = f"{service}/v1/scope-attest"
-    if scope_agent:
-        url = f"{url}?scope_agent_id={scope_agent}"
-    try:
-        r = _hget(url, headers=headers, timeout=30)
-    except httpx.RequestError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise SystemExit(2)
-    if r.status_code >= 400:
-        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
-        raise SystemExit(3)
-    data = r.json()
-    sid = data["scope_agent_id"]
-
-    files_listing: list[dict] | None = None
-    if list_files:
-        try:
-            rl = _hget(
-                f"{service}/v1/agents/{sid}/files", headers=headers, timeout=30,
-            )
-        except httpx.RequestError as e:
-            click.echo(f"Error: {e}", err=True)
-            raise SystemExit(2)
-        if rl.status_code >= 400:
-            click.echo(f"Error {rl.status_code}: {_api_error(rl)}", err=True)
-            raise SystemExit(3)
-        files_listing = rl.json().get("files", [])
-
-    file_body: str | None = None
-    if show_file:
-        try:
-            rf = _hget(
-                f"{service}/v1/agents/{sid}/files/{show_file}",
-                headers=headers,
-                timeout=30,
-            )
-        except httpx.RequestError as e:
-            click.echo(f"Error: {e}", err=True)
-            raise SystemExit(2)
-        if rf.status_code >= 400:
-            click.echo(f"Error {rf.status_code}: {_api_error(rf)}", err=True)
-            raise SystemExit(3)
-        file_body = rf.text
-
-    if as_json:
-        out = dict(data)
-        if files_listing is not None:
-            out["files"] = files_listing
-        if file_body is not None:
-            out["file"] = {"path": show_file, "content": file_body}
-        click.echo(_json.dumps(out, indent=2))
-        return
-
-    agent = data.get("agent") or {}
-    click.echo(f"scope_agent_id:      {sid}")
-    click.echo(f"name:                {agent.get('name', '')}")
-    click.echo(f"image:               {agent.get('image', '')}")
-    click.echo(f"files_count:         {data['files_count']}")
-    click.echo(f"files_digest_sha256: {data['files_digest_sha256']}")
-    att = data.get("attestation") or {}
-    inner = att.get("attestation") or {}
-    if inner:
-        click.echo("attestation:")
-        click.echo(f"  compose_hash: {inner.get('compose_hash', '')}")
-        click.echo(f"  app_id:       {inner.get('app_id', '')}")
-    if files_listing is not None:
-        click.echo("")
-        click.echo("files:")
-        for f in files_listing:
-            click.echo(f"  {f['size_bytes']:>10}  {f['path']}")
-    if file_body is not None:
-        click.echo("")
-        click.echo(f"── {show_file} ──")
-        click.echo(file_body)
-
-
 # ── Agent attestation ──
 #
-# Owner-side helper for publishing a verifiable pin of an uploaded agent.
-# Returns the agent's saved config + a stable sha256 over its extracted
-# source files + the resolved Docker image digest + the live CVM
-# attestation bundle. Anyone outside the owner can re-derive the file
-# digest themselves (re-fetch files via /v1/agents/{id}/files), and
-# verify compose_hash against the on-chain governance contract.
+# Pin + publish a verifiable record of an uploaded agent: saved config,
+# stable sha256 over source files, resolved Docker image digest, live
+# CVM attestation bundle. Owner passes ``AGENT_ID``; ``hmq_`` token
+# holders omit it — the server resolves the bound scope_agent_id from
+# the token (via the /v1/scope-attest alias), so a recipient can audit
+# the policy they're about to query without needing to know its id.
 
 
-@cli.command("agent-attest")
-@click.argument("agent_id")
+@agents_cli.command("attest")
+@click.argument("agent_id", required=False)
 @click.option(
     "--show-file",
     "show_file",
@@ -2696,33 +2776,46 @@ def scope_inspect_cmd(
     help="Print the contents of one extracted file in addition to the digest.",
 )
 @click.option(
-    "--list-files", is_flag=True, help="List every extracted file path + size."
+    "--list-files",
+    is_flag=True,
+    help="List every extracted file path + size.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
-def agent_attest_cmd(
-    agent_id: str,
+def agents_attest(
+    agent_id: str | None,
     show_file: str | None,
     list_files: bool,
     as_json: bool,
 ):
     """Pin and publish an attestation for any registered agent.
 
-    Resolves /v1/agents/<id>/attest, which returns the agent config, a
-    stable digest over its source files, the resolved Docker image
-    digest, and the live attestation bundle (compose_hash, app_id,
-    quote, TLS pubkey). Hand the printed output to anyone who needs to
-    verify "this exact agent ran inside this exact CVM" — they can
-    cross-check compose_hash against the NotarizedAppAuth contract and
-    re-derive the source-files digest by re-fetching the files.
+    Owner usage::
+
+        hivemind agents attest <agent_id>
+
+    Token-holder usage (no id needed — token pins the scope agent)::
+
+        HIVEMIND_PROFILE=recipient hivemind agents attest
+
+    Returns the agent config, a stable digest over its source files,
+    the resolved Docker image digest, and the live attestation bundle
+    (compose_hash, app_id, quote, TLS pubkey). Cross-check compose_hash
+    against the NotarizedAppAuth contract; re-derive the source-files
+    digest by re-fetching the files.
     """
     config = _load_config()
     service = config["service"]
     headers = _headers(config)
     if "Authorization" not in headers:
-        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        click.echo(
+            "Error: no api_key in config. Run 'hivemind init'.", err=True
+        )
         raise SystemExit(1)
 
-    url = f"{service}/v1/agents/{agent_id}/attest"
+    if agent_id:
+        url = f"{service}/v1/agents/{agent_id}/attest"
+    else:
+        url = f"{service}/v1/scope-attest"
     try:
         r = _hget(url, headers=headers, timeout=30)
     except httpx.RequestError as e:
@@ -2732,12 +2825,13 @@ def agent_attest_cmd(
         click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
         raise SystemExit(3)
     data = r.json()
+    resolved_id = data.get("agent_id") or data.get("scope_agent_id") or ""
 
     files_listing: list[dict] | None = None
     if list_files:
         try:
             rl = _hget(
-                f"{service}/v1/agents/{agent_id}/files",
+                f"{service}/v1/agents/{resolved_id}/files",
                 headers=headers,
                 timeout=30,
             )
@@ -2745,7 +2839,9 @@ def agent_attest_cmd(
             click.echo(f"Error: {e}", err=True)
             raise SystemExit(2)
         if rl.status_code >= 400:
-            click.echo(f"Error {rl.status_code}: {_api_error(rl)}", err=True)
+            click.echo(
+                f"Error {rl.status_code}: {_api_error(rl)}", err=True
+            )
             raise SystemExit(3)
         files_listing = rl.json().get("files", [])
 
@@ -2753,7 +2849,7 @@ def agent_attest_cmd(
     if show_file:
         try:
             rf = _hget(
-                f"{service}/v1/agents/{agent_id}/files/{show_file}",
+                f"{service}/v1/agents/{resolved_id}/files/{show_file}",
                 headers=headers,
                 timeout=30,
             )
@@ -2761,7 +2857,9 @@ def agent_attest_cmd(
             click.echo(f"Error: {e}", err=True)
             raise SystemExit(2)
         if rf.status_code >= 400:
-            click.echo(f"Error {rf.status_code}: {_api_error(rf)}", err=True)
+            click.echo(
+                f"Error {rf.status_code}: {_api_error(rf)}", err=True
+            )
             raise SystemExit(3)
         file_body = rf.text
 
@@ -2776,7 +2874,7 @@ def agent_attest_cmd(
 
     agent = data.get("agent") or {}
     img = data.get("image_digest") or {}
-    click.echo(f"agent_id:            {data['agent_id']}")
+    click.echo(f"agent_id:            {resolved_id}")
     click.echo(f"name:                {agent.get('name', '')}")
     click.echo(f"image:               {agent.get('image', '')}")
     if img.get("id"):
@@ -2872,8 +2970,12 @@ def tokens_issue(
     constraints: dict = {}
     if kind == "query":
         if not scope_agent:
+            scope_agent = config.get("scope_agent_id")
+        if not scope_agent:
             click.echo(
-                "Error: --scope-agent is required for query tokens", err=True
+                "Error: --scope-agent is required for query tokens "
+                "(no scope_agent_id in active profile either)",
+                err=True,
             )
             raise SystemExit(2)
         constraints["scope_agent_id"] = scope_agent
@@ -3089,13 +3191,6 @@ def profile_use(name: str):
     click.echo(f"Active profile is now '{name}' (pointer: {_ACTIVE_POINTER}).")
 
 
-@profile_cli.command("path")
-@click.argument("name", required=False)
-def profile_path(name: str | None):
-    """Print the filesystem path of the active profile (or NAME)."""
-    click.echo(str(_config_path(name) if name else _config_path()))
-
-
 # ── Admin: tenant management ──
 
 
@@ -3154,7 +3249,7 @@ def _resolve_admin_service(service: str | None) -> str:
 
 @cli.group("admin")
 def admin_cli():
-    """Multi-tenant admin: provision, list, delete tenants.
+    """Multi-tenant admin: tenants, on-chain hash governance, sweeps.
 
     Requires the server's HIVEMIND_ADMIN_KEY. Pass it with --admin-key
     or set HIVEMIND_ADMIN_KEY in your shell environment.
@@ -3162,7 +3257,19 @@ def admin_cli():
     pass
 
 
-@admin_cli.command("create-tenant")
+@admin_cli.group("tenants")
+def admin_tenants():
+    """Provision, list, delete, rename tenants; migrate to per-tenant roles."""
+    pass
+
+
+@admin_cli.group("hashes")
+def admin_hashes():
+    """On-chain compose-hash governance (approve / revoke / list)."""
+    pass
+
+
+@admin_tenants.command("create")
 @click.argument("name")
 @click.option("--service", default=None, help="Hivemind service URL")
 @click.option(
@@ -3201,69 +3308,7 @@ def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json:
     click.echo(f"  {data['api_key']}")
 
 
-@admin_cli.command("register-existing")
-@click.argument("name")
-@click.argument("db_name")
-@click.option(
-    "--api-key",
-    default=None,
-    help="Reuse this key (defaults to a newly minted one)",
-)
-@click.option(
-    "--tenant-id",
-    default=None,
-    help="Pin the control-plane tenant_id (use when db_name=tenant_<tenant_id>)",
-)
-@click.option("--service", default=None, help="Hivemind service URL")
-@click.option(
-    "--admin-key",
-    envvar="HIVEMIND_ADMIN_KEY",
-    default="",
-    help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
-    "the active profile's api_key when role=admin.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
-def admin_register_existing(
-    name: str,
-    db_name: str,
-    api_key: str | None,
-    tenant_id: str | None,
-    service: str | None,
-    admin_key: str,
-    as_json: bool,
-):
-    """Adopt a pre-populated Postgres database as a tenant."""
-    admin_key = _resolve_admin_key(admin_key)
-    url = _resolve_admin_service(service)
-    body: dict[str, str] = {"name": name, "db_name": db_name}
-    if api_key:
-        body["api_key"] = api_key
-    if tenant_id:
-        body["tenant_id"] = tenant_id
-    try:
-        resp = _hpost(
-            f"{url}/v1/admin/tenants/register",
-            headers=_admin_headers(admin_key),
-            json=body,
-            timeout=30,
-        )
-    except httpx.RequestError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise SystemExit(2)
-    if resp.status_code >= 400:
-        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
-        raise SystemExit(3)
-    data = resp.json()
-    if as_json:
-        click.echo(_json.dumps(data, indent=2))
-        return
-    click.echo(f"Tenant:   {data['tenant_id']}  ({data['name']})")
-    click.echo(f"Database: {data['db_name']}")
-    click.echo("API key:")
-    click.echo(f"  {data['api_key']}")
-
-
-@admin_cli.command("list-tenants")
+@admin_tenants.command("list")
 @click.option("--service", default=None, help="Hivemind service URL")
 @click.option(
     "--admin-key",
@@ -3306,7 +3351,7 @@ def admin_list_tenants(service: str | None, admin_key: str, as_json: bool):
         )
 
 
-@admin_cli.command("delete-tenant")
+@admin_tenants.command("delete")
 @click.argument("tenant_id")
 @click.option("--service", default=None, help="Hivemind service URL")
 @click.option(
@@ -3338,7 +3383,7 @@ def admin_delete_tenant(tenant_id: str, service: str | None, admin_key: str):
     click.echo(f"Deleted tenant {tenant_id}.")
 
 
-@admin_cli.command("rename-database")
+@admin_tenants.command("rename")
 @click.argument("old_name")
 @click.argument("new_name")
 @click.option("--service", default=None, help="Hivemind service URL")
@@ -3360,9 +3405,8 @@ def admin_rename_database(
 ):
     """ALTER DATABASE on the cluster. One-shot migration helper.
 
-    Does NOT update control-plane rows — follow up with
-    'hivemind admin register-existing <name> <new_name> --tenant-id <t_...>'
-    to adopt the renamed DB as a tenant.
+    Does NOT update control-plane rows — the tenant row's db_name still
+    points at <old_name>. Use this only for low-level cluster moves.
     """
     admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
@@ -3382,7 +3426,7 @@ def admin_rename_database(
     click.echo(f"Renamed: {old_name} → {new_name}")
 
 
-@admin_cli.command("migrate-to-roles")
+@admin_tenants.command("migrate-roles")
 @click.option("--service", default=None, help="Hivemind service URL")
 @click.option(
     "--admin-key",
@@ -3444,7 +3488,7 @@ def admin_migrate_to_roles(service: str | None, admin_key: str, as_json: bool):
             click.echo(f"  ERR  {r['db_name']}: {r['error']}", err=True)
 
 
-@admin_cli.command("sweep-broken-agents")
+@admin_cli.command("sweep")
 @click.option("--service", default=None, help="Hivemind service URL")
 @click.option(
     "--admin-key",
@@ -3523,7 +3567,7 @@ def admin_sweep_broken_agents(
 # (`view-release`) go through httpx — no private key required.
 
 
-@admin_cli.command("approve-hash")
+@admin_hashes.command("approve")
 @click.argument("compose_hash")
 @click.option(
     "--contract",
@@ -3612,7 +3656,7 @@ def admin_approve_hash(
     click.echo("Approved.")
 
 
-@admin_cli.command("revoke-hash")
+@admin_hashes.command("revoke")
 @click.argument("compose_hash")
 @click.option(
     "--contract",
@@ -3674,7 +3718,7 @@ def admin_revoke_hash(
     click.echo("Revoked.")
 
 
-@admin_cli.command("list-hashes")
+@admin_hashes.command("list")
 @click.option(
     "--contract",
     envvar="HIVEMIND_APP_AUTH_CONTRACT",
@@ -3825,6 +3869,87 @@ def trust_approve(service: str | None):
     # self-signed cert.
     _verify_tls_pin(bundle, observed_fp, service=service)
     click.echo(f"Approved {compose_hash} for {service}.")
+
+
+@trust_group.command("attest")
+@click.option(
+    "--service",
+    default=None,
+    help="Service URL (defaults to active profile, or HIVEMIND_SERVICE).",
+)
+@click.option(
+    "--raw", is_flag=True, help="Emit the full /v1/attestation JSON payload."
+)
+@click.option(
+    "--reproduce",
+    is_flag=True,
+    help=(
+        "Walk the chain of trust from compose_hash → live app_compose "
+        "→ on-chain-registered git_sha → repo YAML, and print which "
+        "links held."
+    ),
+)
+def trust_attest(service: str | None, raw: bool, reproduce: bool):
+    """Fetch and print the CVM's attestation bundle (TDX quote + binding).
+
+    No auth — this endpoint is public so out-of-band verifiers can pin
+    the cert + replay the quote against Intel/dstack KMS.
+    """
+    if service:
+        url = service.rstrip("/")
+    else:
+        try:
+            url = _load_config(check_trust=False)["service"]
+        except SystemExit:
+            url = _DEFAULT_SERVICE
+    _warm_pin_from_trust(url)
+    try:
+        r = _hget(f"{url}/v1/attestation", timeout=15)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if r.status_code >= 400:
+        click.echo(f"Error {r.status_code}: {_api_error(r)}", err=True)
+        raise SystemExit(3)
+    bundle = r.json()
+    if raw:
+        click.echo(_json.dumps(bundle, indent=2, default=str))
+        return
+    if reproduce:
+        _run_reproduce(bundle)
+        return
+    if not bundle.get("ready"):
+        click.echo("ready:    false")
+        click.echo(f"reason:   {bundle.get('reason', '?')}")
+        click.echo(f"version:  {bundle.get('hivemind_version', '?')}")
+        return
+    att = bundle.get("attestation") or {}
+    click.echo("ready:        true")
+    click.echo(f"booted_at:    {bundle.get('booted_at', '?')}")
+    click.echo(f"app_id:       {att.get('app_id', '?')}")
+    click.echo(f"compose_hash: {att.get('compose_hash', '?')}")
+    click.echo(f"version:      {att.get('hivemind_version', '?')}")
+    if app_auth := att.get("app_auth"):
+        click.echo("app_auth:")
+        click.echo(f"  contract:   {app_auth.get('contract', '?')}")
+        click.echo(f"  chain_id:   {app_auth.get('chain_id', '?')}")
+    meta = _release_metadata_for(bundle, att.get("compose_hash") or "")
+    if meta and meta.get("compose_uri"):
+        click.echo("source:")
+        click.echo(f"  git_commit: {meta.get('git_commit', '?')}")
+        click.echo(f"  compose:    {meta.get('compose_uri', '?')}")
+    if tls := att.get("tls"):
+        if tls.get("enabled"):
+            click.echo("tls:")
+            click.echo(
+                f"  fingerprint: {tls.get('cert_fingerprint_sha256_hex', '?')}"
+            )
+            if pin := tls.get("pinning_url"):
+                click.echo(f"  pin URL:     {pin}")
+    click.echo(
+        "(use --raw for full JSON, --reproduce to verify the chain "
+        "back to source)"
+    )
 
 
 if __name__ == "__main__":

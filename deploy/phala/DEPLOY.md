@@ -200,13 +200,13 @@ curl https://hivemind.teleport.computer/v1/attestation \
 # → 77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd
 
 # Approve it (one-time, requires the contract owner's EOA key)
-PRIVATE_KEY=0x... hivemind admin approve-hash \
+PRIVATE_KEY=0x... hivemind admin hashes approve \
   77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd \
   --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
 
 # Audit / revoke later
-hivemind admin list-hashes  --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
-hivemind admin revoke-hash <hash> --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+hivemind admin hashes list   --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+hivemind admin hashes revoke <hash> --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
 ```
 
 To run *without* on-chain governance, leave `HIVEMIND_APP_AUTH_CONTRACT`
@@ -223,10 +223,9 @@ export CORE_URL=https://hivemind.teleport.computer
 export HIVEMIND_ADMIN_KEY=<admin key from Step 0>
 
 # Via CLI
-hivemind admin create-tenant \
+hivemind admin tenants create "first-tenant" \
   --service "$CORE_URL" \
-  --admin-key "$HIVEMIND_ADMIN_KEY" \
-  --name "first-tenant"
+  --admin-key "$HIVEMIND_ADMIN_KEY"
 
 # Or via raw HTTP
 curl -X POST "$CORE_URL/v1/admin/tenants" \
@@ -240,7 +239,7 @@ curl -X POST "$CORE_URL/v1/admin/tenants" \
 
 ### Rotate-on-first-use (required)
 
-The admin who called `create-tenant` briefly saw the plaintext `hmk_...`
+The admin who called `tenants create` briefly saw the plaintext `hmk_...`
 in the response. If the admin is not the tenant, they could (until rotation)
 impersonate the tenant and read their data. The fix is mandatory immediate
 rotation by the tenant:
@@ -269,8 +268,8 @@ rotation, not even you (the admin) — can read via this API.
 List or delete tenants later:
 
 ```bash
-hivemind admin list-tenants --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
-hivemind admin delete-tenant t_abc123... --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
+hivemind admin tenants list --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
+hivemind admin tenants delete t_abc123... --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
 ```
 
 ## Step 3.5 (optional): Migrate a Legacy Single-Tenant Database

@@ -33,7 +33,7 @@ Use this file as the source of truth for live end-to-end checks.
      - `HIVEMIND_DEFAULT_QUERY_IMAGE=hivemind-default-query:local`
      - `HIVEMIND_DEFAULT_SCOPE_IMAGE=hivemind-default-scope:local`
      - `HIVEMIND_DEFAULT_MEDIATOR_IMAGE=hivemind-default-mediator:local`
-4. Provision a tenant (`hivemind admin create-tenant`) and include `Authorization: Bearer <tenant-api-key>` for all endpoints except `/v1/health` and `/v1/healthz`.
+4. Provision a tenant (`hivemind admin tenants create`) and include `Authorization: Bearer <tenant-api-key>` for all endpoints except `/v1/health` and `/v1/healthz`.
 5. Export environment for command-line helpers:
    - `set -a; source .env; set +a`
 6. Build default local agent images:
@@ -71,7 +71,7 @@ Use these shell variables in commands:
 
 ```bash
 export BASE="http://localhost:8100"
-export API_KEY="${TENANT_API_KEY:?mint via 'hivemind admin create-tenant'}"
+export API_KEY="${TENANT_API_KEY:?mint via 'hivemind admin tenants create'}"
 
 AUTH=(-H "Authorization: Bearer $API_KEY")
 ```

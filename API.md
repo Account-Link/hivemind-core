@@ -30,7 +30,7 @@ Authorization: Bearer <admin-key>
 require auth.
 
 To mint a tenant key: `POST /v1/admin/tenants` (see below) or `hivemind
-admin create-tenant`. To mint capability tokens: `POST /v1/tokens` or
+admin tenants create`. To mint capability tokens: `POST /v1/tokens` or
 `hivemind tokens issue` — see **[Capability Tokens](#capability-tokens)**.
 
 ## Conventions And Gotchas
@@ -410,7 +410,7 @@ with `401`. Idempotent.
 Canonical agent-attestation endpoint. Returns "this agent, plus the
 host's TDX attestation bundle, plus a stable digest over the agent's
 extracted source files, plus the resolved Docker image digest". Used by
-`hivemind agent-attest` and by recipients who want to pin "what code is
+`hivemind agents attest` and by recipients who want to pin "what code is
 running" before sending work.
 
 Auth: owner (`hmk_` — any agent in the tenant) or query (`hmq_` — only
@@ -443,10 +443,10 @@ the scope agent the token is bound to; other ids return `404`).
 
 ### `GET /v1/scope-attest`
 
-**Alias** for `GET /v1/agents/{agent_id}/attest`, kept for backwards
-compatibility with the older `hivemind scope-inspect` flow. The response
-preserves the legacy top-level `scope_agent_id` key in addition to the
-canonical `agent_id`.
+**Alias** for `GET /v1/agents/{agent_id}/attest`, used by the share/ask
+flow when a query-token holder doesn't have a profile or known agent id.
+The response preserves the legacy top-level `scope_agent_id` key in
+addition to the canonical `agent_id`.
 
 - For `hmq_` query tokens: `agent_id` is taken from the token binding
   (`scope_agent_id` claim).

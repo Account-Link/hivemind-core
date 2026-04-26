@@ -55,10 +55,10 @@ delegated tokens, attestation, and operator workflows. Run
 hivemind init --api-key hmk_...
 # Live Phala CVM:
 hivemind init --service https://hivemind.teleport.computer --api-key hmk_...
-# (mint a key via `hivemind admin create-tenant` if you're the operator)
+# (mint a key via `hivemind admin tenants create` if you're the operator)
 
 hivemind rotate-key                # bootstrap → tenant-only key, rewrites profile
-hivemind attestation               # show + verify the live CVM attestation bundle
+hivemind trust attest              # show + verify the live CVM attestation bundle
 hivemind schema                    # dump the user-table schema
 ```
 
@@ -71,10 +71,11 @@ hivemind load users.csv --table users
 hivemind load events.jsonl --table events
 
 # Browse what the service already has
-hivemind agents                 # list registered agents
-hivemind agent-rm <agent_id>    # delete one
-hivemind runs                   # list recent runs
-hivemind runs <run_id>          # stage timings + artifact list
+hivemind agents list                   # list registered agents
+hivemind agents rm <agent_id>          # delete one
+hivemind agents upload ./dir --type scope   # generic upload (scope/query/index/mediator)
+hivemind runs                          # list recent runs
+hivemind runs <run_id>                 # stage timings + artifact list
 ```
 
 ### Register a scope policy and run agents
@@ -116,30 +117,33 @@ hivemind tokens list                # token_id + kind + status + constraints
 hivemind tokens revoke <token_id>   # soft-revoke; future calls 401
 
 # Recipient (holding hmq_…) audits what the gatekeeper actually does
-hivemind scope-inspect --list-files
-hivemind scope-inspect --show-file Dockerfile
+hivemind agents attest --list-files
+hivemind agents attest --show-file Dockerfile
+
+# One-shot link sharing — owner emits, recipient consumes
+hivemind share --mint                          # prints hmq://host/<scope>?token=…&compose=…&files=…
+hivemind ask 'hmq://…' "How many rows last month?"
 ```
 
 See **[Capability Tokens](#capability-tokens-delegated-query--write)** for
 the full delegation model (`hmq_` / `hmw_` prefixes, what each can do, how
-the recipient pins binding via `scope-inspect`).
+the recipient pins binding via `agents attest`).
 
 ### Operator commands (`hivemind admin …`)
 
 Admin-key holders manage tenants and on-chain hash approval:
 
 ```bash
-hivemind admin create-tenant --name alice-corp
-hivemind admin list-tenants
-hivemind admin delete-tenant t_abc...
-hivemind admin register-existing --name adopted --db-name my_existing_db
-hivemind admin migrate-to-roles                  # one-shot: per-tenant Postgres roles
-hivemind admin sweep-broken-agents               # GC orphan agent images
+hivemind admin tenants create --name alice-corp
+hivemind admin tenants list
+hivemind admin tenants delete t_abc...
+hivemind admin tenants migrate-roles             # one-shot: per-tenant Postgres roles
+hivemind admin sweep                             # GC orphan agent images
 
 # On-chain governance (when HIVEMIND_APP_AUTH_CONTRACT is set)
-hivemind admin approve-hash <compose_hash>
-hivemind admin revoke-hash <compose_hash>
-hivemind admin list-hashes
+hivemind admin hashes approve <compose_hash>
+hivemind admin hashes revoke <compose_hash>
+hivemind admin hashes list
 ```
 
 ### Trust pins (`hivemind trust …`)
@@ -178,7 +182,6 @@ hivemind query "..."
 # Manage them
 hivemind profile list             # * marks the active profile
 hivemind profile show alice       # print the YAML
-hivemind profile path             # absolute path of active profile
 hivemind profile delete old-tenant
 ```
 
@@ -223,12 +226,12 @@ admin cannot read tenant data via the API.
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 # Provision a tenant (returns api_key once — store it immediately)
-hivemind admin create-tenant --name "alice-corp"
+hivemind admin tenants create "alice-corp"
 # → {"tenant_id": "t_abc...", "api_key": "hmk_...", "db_name": "tenant_t_abc..."}
 
 # List / delete
-hivemind admin list-tenants
-hivemind admin delete-tenant t_abc...
+hivemind admin tenants list
+hivemind admin tenants delete t_abc...
 ```
 
 Hand the `hmk_...` key to the tenant — they use it as their normal
@@ -284,7 +287,7 @@ The recipient can audit their binding before submitting work:
 
 ```bash
 # Confirm "the scope agent guarding my queries is what I expected".
-hivemind scope-inspect --list-files
+hivemind agents attest --list-files
 # → prints scope_agent_id, files_count, files_digest_sha256, attestation
 #   (compose_hash + app_id), and every extracted source file path.
 ```
@@ -306,7 +309,7 @@ Two extra ceremonies kick in for remote deploys, both documented in
   {show,approve,reset}`.
 - **On-chain approval** — if `HIVEMIND_APP_AUTH_CONTRACT` is set on the
   server (default in the shipped compose), the contract owner must
-  `hivemind admin approve-hash <hash>` once before any client can
+  `hivemind admin hashes approve <hash>` once before any client can
   connect. Run `curl $URL/v1/attestation | jq .attestation.compose_hash`
   to find the hash to approve.
 

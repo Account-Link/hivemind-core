@@ -26,7 +26,7 @@ uv run python -m hivemind.server
 Every public endpoint requires a tenant credential. Three prefixes — pick
 whichever matches your use case:
 
-- `hmk_…` — owner key from `hivemind admin create-tenant` (full access)
+- `hmk_…` — owner key from `hivemind admin tenants create` (full access)
 - `hmq_…` — query capability from `hivemind tokens issue --kind query …`
 - `hmw_…` — write capability from `hivemind tokens issue --kind write …`
 
@@ -400,7 +400,7 @@ one consuming `WRITE_TOKEN` to write rows), publish that agent's
 attestation bundle so downstream consumers can pin it:
 
 ```bash
-hivemind agent-attest $INDEX_AGENT_ID
+hivemind agents attest $INDEX_AGENT_ID
 # agent_id:            ix987…
 # image:               your-org/watch-history-indexer:latest
 # image.id:            sha256:7c2e…
@@ -413,7 +413,7 @@ hivemind agent-attest $INDEX_AGENT_ID
 ```
 
 Anyone — not just the tenant owner — can verify a given agent has not
-been tampered with by re-running `agent-attest` (or hitting
+been tampered with by re-running `agents attest` (or hitting
 `GET /v1/agents/{id}/attest`) and comparing the four pinned values.
 
 ## 11) Delegate Query Access (Capability Tokens)
@@ -442,10 +442,9 @@ overwritten by the server.
 export QUERY_TOKEN="hmq_..."
 
 # What scope agent guards my queries? What's its source?
-# (`agent-attest` is the canonical command; `scope-inspect` is the
-# legacy alias and still works.)
-hivemind --profile collab agent-attest --list-files \
-  $(hivemind --profile collab scope-inspect --json | jq -r .scope_agent_id)
+# Without an agent_id, `agents attest` falls back to /v1/scope-attest,
+# which auto-resolves the scope agent bound to the active hmq_ token.
+hivemind --profile collab agents attest --list-files
 # agent_id:            abc123def456
 # name:                watch-history-scope
 # image:               hivemind-scope:latest
@@ -462,12 +461,12 @@ hivemind --profile collab agent-attest --list-files \
 #       …
 
 # Read one file directly
-hivemind --profile collab agent-attest abc123def456 --show-file agent.py
+hivemind --profile collab agents attest abc123def456 --show-file agent.py
 ```
 
 The recipient pins `files_digest_sha256`, `image_digest.id` (and
 `repo_digests[0]` if present), and `attestation.compose_hash`
-out-of-band (e.g. in a project README). Re-running `agent-attest` later
+out-of-band (e.g. in a project README). Re-running `agents attest` later
 and seeing the same triple proves nothing about the gatekeeper has
 changed — neither the source it was built from, the binary it actually
 runs, nor the host it runs on.
