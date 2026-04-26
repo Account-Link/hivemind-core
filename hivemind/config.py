@@ -55,9 +55,15 @@ class Settings(BaseSettings):
     container_read_only_fs: bool = True
     container_drop_all_caps: bool = True
     container_no_new_privileges: bool = True
-    max_llm_calls: int = 50
-    max_tokens: int = 300_000
-    agent_timeout: int = 300
+    # Global ceilings — apply across all agent runs (scope/query/mediator/
+    # index). Per-call ``QueryRequest.max_tokens`` / ``--max-llm-calls`` /
+    # ``--timeout`` and per-agent ``AgentConfig`` values are clamped to
+    # these ceilings, so set them at the highest your operator wants to
+    # tolerate. Override via HIVEMIND_MAX_LLM_CALLS / HIVEMIND_MAX_TOKENS /
+    # HIVEMIND_AGENT_TIMEOUT.
+    max_llm_calls: int = 100
+    max_tokens: int = 1_000_000
+    agent_timeout: int = 900
 
     # Artifact retention — how long query-agent artifact uploads and run
     # output/error text are kept before the periodic sweeper purges them.

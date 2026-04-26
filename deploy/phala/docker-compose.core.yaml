@@ -121,6 +121,14 @@ services:
       HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS: "false"
       HIVEMIND_CONTAINER_MEMORY_MB: "1024"
 
+      # Global ceilings on per-call budget. Per-call --max-tokens /
+      # --max-llm-calls / --timeout flags are clamped to these. Bump
+      # them when scope agents need more iterations (e.g. complex
+      # GROUP BY policies on large tables).
+      HIVEMIND_MAX_TOKENS: ${HIVEMIND_MAX_TOKENS:-1000000}
+      HIVEMIND_MAX_LLM_CALLS: ${HIVEMIND_MAX_LLM_CALLS:-100}
+      HIVEMIND_AGENT_TIMEOUT: ${HIVEMIND_AGENT_TIMEOUT:-900}
+
       # Default agents — CI only builds base/core/postgres/sql-proxy.
       # The 4 default agents (scope/query/index/mediator) are NOT in GHCR;
       # set AUTOLOAD=false and upload them via `hivemind run` / the
