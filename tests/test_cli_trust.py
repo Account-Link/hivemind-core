@@ -19,16 +19,23 @@ from hivemind import trust as _trust
 
 @pytest.fixture
 def _sandbox(tmp_path, monkeypatch):
-    """Redirect trust store to tmp + pre-create a dummy .hivemind/config.yaml."""
-    monkeypatch.setattr(_trust, "_TRUST_DIR", tmp_path)
-    monkeypatch.setattr(_trust, "_TRUST_PATH", tmp_path / "trust.json")
+    """Isolate _HIVEMIND_HOME + trust store to tmp_path so the operator's
+    real ~/.hivemind/profiles/default.yaml doesn't shadow the test profile."""
+    hivemind_home = tmp_path / ".hivemind"
+    profiles_dir = hivemind_home / "profiles"
+    profiles_dir.mkdir(parents=True)
 
-    cfg_dir = tmp_path / ".hivemind"
-    cfg_dir.mkdir()
-    (cfg_dir / "config.yaml").write_text(
+    monkeypatch.setattr(_cli_mod, "_HIVEMIND_HOME", hivemind_home)
+    monkeypatch.setattr(_cli_mod, "_PROFILES_DIR", profiles_dir)
+    monkeypatch.setattr(_cli_mod, "_ACTIVE_POINTER", hivemind_home / "active")
+    monkeypatch.setattr(_trust, "_TRUST_DIR", hivemind_home)
+    monkeypatch.setattr(_trust, "_TRUST_PATH", hivemind_home / "trust.json")
+
+    (profiles_dir / "default.yaml").write_text(
         "service: https://cvm.example\napi_key: test-key\n"
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HIVEMIND_PROFILE", raising=False)
 
     for var in ("HIVEMIND_TRUST_ALL", "HIVEMIND_TRUST_HASH", "HIVEMIND_NO_TRUST_CHECK"):
         monkeypatch.delenv(var, raising=False)

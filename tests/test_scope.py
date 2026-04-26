@@ -16,20 +16,22 @@ class TestCompileScopeFn:
         assert result["allow"] is True
         assert result["rows"] == rows
 
-    def test_deny_non_aggregate(self):
+    def test_aggregate_replacement(self):
+        """Canonical never-deny pattern: replace per-row results with an aggregate."""
         fn = compile_scope_fn(
             "def scope(sql, params, rows):\n"
             "    if 'GROUP BY' not in sql.upper() and len(rows) > 1:\n"
-            "        return {'allow': False, 'error': 'Only aggregations allowed'}\n"
+            "        return {'allow': True, 'rows': [{'match_count': len(rows)}]}\n"
             "    return {'allow': True, 'rows': rows}"
         )
         rows = [{"id": 1}, {"id": 2}]
         result = fn("SELECT * FROM users", [], rows)
-        assert result["allow"] is False
-        assert "aggregation" in result["error"].lower()
+        assert result["allow"] is True
+        assert result["rows"] == [{"match_count": 2}]
 
         result = fn("SELECT COUNT(*) FROM users GROUP BY dept", [], [{"count": 5}])
         assert result["allow"] is True
+        assert result["rows"] == [{"count": 5}]
 
     def test_k_anonymity_filter(self):
         fn = compile_scope_fn(
@@ -59,31 +61,33 @@ class TestCompileScopeFn:
         assert result["allow"] is True
         assert result["rows"][0]["ssn"] == "***-**-****"
 
-    def test_sql_aware_filtering(self):
+    def test_sql_aware_aggregation(self):
+        """SELECT * gets aggregated to a row count instead of returning rows."""
         fn = compile_scope_fn(
             "def scope(sql, params, rows):\n"
             "    upper = sql.upper()\n"
             "    if 'SELECT *' in upper:\n"
-            "        return {'allow': False, 'error': 'SELECT * not allowed'}\n"
+            "        return {'allow': True, 'rows': [{'count': len(rows)}]}\n"
             "    return {'allow': True, 'rows': rows}"
         )
-        result = fn("SELECT * FROM users", [], [])
-        assert result["allow"] is False
+        result = fn("SELECT * FROM users", [], [{"id": 1}, {"id": 2}])
+        assert result["allow"] is True
+        assert result["rows"] == [{"count": 2}]
 
         result = fn("SELECT id, name FROM users", [], [{"id": 1}])
         assert result["allow"] is True
+        assert result["rows"] == [{"id": 1}]
 
     def test_helper_functions_allowed(self):
         fn = compile_scope_fn(
-            "def is_safe(sql):\n"
-            "    return 'DELETE' not in sql.upper()\n\n"
+            "def safe_rows(rows):\n"
+            "    return [{'id': r.get('id')} for r in rows]\n\n"
             "def scope(sql, params, rows):\n"
-            "    if not is_safe(sql):\n"
-            "        return {'allow': False, 'error': 'unsafe'}\n"
-            "    return {'allow': True, 'rows': rows}"
+            "    return {'allow': True, 'rows': safe_rows(rows)}"
         )
-        result = fn("SELECT 1", [], [])
+        result = fn("SELECT * FROM users", [], [{"id": 1, "ssn": "x"}])
         assert result["allow"] is True
+        assert result["rows"] == [{"id": 1}]
 
     def test_builtins_available(self):
         fn = compile_scope_fn(
@@ -165,6 +169,26 @@ class TestCompileScopeFnRejections:
                 "def scope(sql, params, rows):\n    return rows.__class__.__name__"
             )
 
+    def test_literal_deny_rejected(self):
+        """Static check forbids literal {'allow': False, ...} returns —
+        scope must transform rows, not gate on SQL shape."""
+        with pytest.raises(ValueError, match="transform rows"):
+            compile_scope_fn(
+                "def scope(sql, params, rows):\n"
+                "    return {'allow': False, 'error': 'nope'}"
+            )
+
+    def test_literal_deny_rejected_in_branch(self):
+        """Even a deny inside a conditional branch is caught — the AST walker
+        sees every Dict literal regardless of reachability."""
+        with pytest.raises(ValueError, match="transform rows"):
+            compile_scope_fn(
+                "def scope(sql, params, rows):\n"
+                "    if len(rows) > 100:\n"
+                "        return {'allow': False, 'error': 'too many'}\n"
+                "    return {'allow': True, 'rows': rows}"
+            )
+
 
 class TestApplyScopeFn:
     def test_allow_passthrough(self):
@@ -176,10 +200,13 @@ class TestApplyScopeFn:
         assert result["allow"] is True
         assert result["rows"] == [{"a": 1}]
 
-    def test_deny(self):
+    def test_runtime_deny(self):
+        """Computed (non-literal) allow=False still passes the static check
+        and is honored at runtime by apply_scope_fn."""
         fn = compile_scope_fn(
             "def scope(sql, params, rows):\n"
-            "    return {'allow': False, 'error': 'nope'}"
+            "    blocked = True\n"
+            "    return {'allow': not blocked, 'error': 'nope'}"
         )
         result = apply_scope_fn(fn, "SELECT 1", [], [])
         assert result["allow"] is False
