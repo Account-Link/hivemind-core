@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     llm_model: str = "moonshotai/kimi-k2.6"
     llm_timeout_seconds: int = 45
 
+    # Optional secondary provider. When ``tinfoil_api_key`` is set, callers
+    # can flip the upstream LLM provider per-call by sending
+    # ``provider="tinfoil"`` on a QueryRequest/IndexRequest (or passing
+    # ``--provider tinfoil`` on the CLI). Tinfoil is OpenAI-compatible, so
+    # the same SDK is reused with a different ``base_url`` + ``api_key``.
+    tinfoil_api_key: str = ""
+    tinfoil_base_url: str = "https://inference.tinfoil.sh/v1"
+
     # Per-role model overrides. Empty falls back to ``llm_model``. Set via
     # HIVEMIND_SCOPE_MODEL / HIVEMIND_QUERY_MODEL / HIVEMIND_MEDIATOR_MODEL /
     # HIVEMIND_INDEX_MODEL. Research (autoresearch/study_wrap_up.md) found

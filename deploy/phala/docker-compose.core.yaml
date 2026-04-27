@@ -77,6 +77,14 @@ services:
       HIVEMIND_MEDIATOR_MODEL: ${HIVEMIND_MEDIATOR_MODEL:-}
       HIVEMIND_INDEX_MODEL: ${HIVEMIND_INDEX_MODEL:-}
 
+      # Optional secondary provider. When HIVEMIND_TINFOIL_API_KEY is
+      # configured, callers can flip the upstream LLM provider per-call by
+      # sending ``provider="tinfoil"`` (CLI: ``--provider tinfoil``).
+      # Tinfoil is OpenAI-compatible, so the same SDK is reused with a
+      # different base_url + api_key. Empty disables the option.
+      HIVEMIND_TINFOIL_API_KEY: ${HIVEMIND_TINFOIL_API_KEY:-}
+      HIVEMIND_TINFOIL_BASE_URL: ${HIVEMIND_TINFOIL_BASE_URL:-https://inference.tinfoil.sh/v1}
+
       # On-chain app-auth registry (Tier 1 attestation binding).
       # When set, the CLI auto-accepts an approved compose_hash and
       # hard-aborts on a revoked one without any user prompt. Empty →

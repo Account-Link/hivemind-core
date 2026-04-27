@@ -1182,6 +1182,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Index data (required when index_archive is provided)
         document_data: str | None = Form(None),
         document_metadata: str | None = Form(None),
+        # LLM routing (optional). ``provider="tinfoil"`` requires the
+        # server to have HIVEMIND_TINFOIL_API_KEY configured. Empty
+        # falls back to the global default (openrouter).
+        model: str | None = Form(None),
+        provider: str | None = Form(None),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
         """Upload query agent (required) + optional scope/index agents,
@@ -1284,6 +1289,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 mediator_agent_id=mediator_agent_id,
                 document_data=document_data,
                 document_metadata=document_metadata,
+                model=model,
+                provider=provider,
                 tmpdirs=tmpdirs,
             )
         )
@@ -1325,6 +1332,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mediator_agent_id: str | None,
         document_data: str | None,
         document_metadata: str | None,
+        model: str | None,
+        provider: str | None,
         tmpdirs: list[str],
     ) -> None:
         """Background: build all agent images in parallel, then run pipeline."""
@@ -1403,6 +1412,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         document_data=document_data,
                         document_metadata=document_metadata or "{}",
                         max_tokens=max_tokens,
+                        model=model,
+                        provider=provider,
                     )
                 except Exception as e:
                     logger.warning(
@@ -1422,6 +1433,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
                 max_tokens=max_tokens,
+                model=model,
+                provider=provider,
             )
 
         except Exception as e:
@@ -1449,6 +1462,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
         scope_agent_id: str | None = Form(None),
         mediator_agent_id: str | None = Form(None),
+        # LLM routing (optional). ``provider="tinfoil"`` requires the
+        # server to have HIVEMIND_TINFOIL_API_KEY configured.
+        model: str | None = Form(None),
+        provider: str | None = Form(None),
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Upload query agent source, create a run record, and kick off execution."""
@@ -1494,6 +1511,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 prompt=prompt,
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
+                model=model,
+                provider=provider,
             )
         )
 
@@ -1519,6 +1538,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         prompt: str,
         scope_agent_id: str | None,
         mediator_agent_id: str | None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> None:
         """Background task: build image, register agent, run pipeline."""
         from .sandbox.backend import _create_runner
@@ -1584,6 +1605,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 scope_agent_id=scope_agent_id,
                 mediator_agent_id=mediator_agent_id,
                 max_tokens=max_tokens,
+                model=model,
+                provider=provider,
             )
 
         except Exception as e:

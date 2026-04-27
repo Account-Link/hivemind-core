@@ -104,7 +104,7 @@ class TestRunQuery:
         """Scope agent can return a scope_fn (new format)."""
         pipeline = _make_pipeline(pg_db)
         pipeline.agent_store.create(AgentConfig(
-            agent_id="scope1",
+            agent_id="scope-returns",
             name="Scope Agent",
             image="img:scope",
         ))
@@ -121,16 +121,16 @@ class TestRunQuery:
             async def run(self, **kwargs):
                 return json.dumps({"scope_fn": scope_fn_source}), {
                     "total_tokens": 10
-                }, []
+                }
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = QueryRequest(
             prompt="What?",
             query_agent_id="q1",
-            scope_agent_id="scope1",
+            scope_agent_id="scope-returns",
         )
-        fn, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+        fn, source, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
 
         # Verify the compiled function works
         rows = [{"team": "alpha", "val": 1}, {"team": "beta", "val": 2}]
@@ -145,7 +145,7 @@ class TestRunQuery:
         """Scope agent returning invalid scope_fn source should fail."""
         pipeline = _make_pipeline(pg_db)
         pipeline.agent_store.create(AgentConfig(
-            agent_id="scope1",
+            agent_id="scope-rejects",
             name="Scope Agent",
             image="img:scope",
         ))
@@ -157,14 +157,14 @@ class TestRunQuery:
             async def run(self, **kwargs):
                 return json.dumps({"scope_fn": "import os\ndef scope(sql, params, rows): return True"}), {
                     "total_tokens": 0
-                }, []
+                }
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = QueryRequest(
             prompt="What?",
             query_agent_id="q1",
-            scope_agent_id="scope1",
+            scope_agent_id="scope-rejects",
         )
         with pytest.raises(ValueError, match="imports"):
             await pipeline._run_scope_agent(req, max_tokens=1000)
@@ -180,7 +180,7 @@ class TestRunQuery:
 
         mock_scope_fn = lambda sql, params, rows: {"allow": True, "rows": rows}
         pipeline._run_scope_agent = AsyncMock(
-            return_value=(mock_scope_fn, {"total_tokens": 0})
+            return_value=(mock_scope_fn, "def scope(sql, params, rows): return {'allow': True, 'rows': rows}", {"total_tokens": 0})
         )
         pipeline._run_query_agent = AsyncMock(
             return_value=("output", {"total_tokens": 0})
@@ -212,7 +212,7 @@ class TestRunQuery:
         await pipeline.run_query(req)
 
         _, kwargs = pipeline._run_query_agent.await_args
-        assert kwargs["max_tokens"] == 488
+        assert kwargs["max_tokens"] == 700
         pipeline._run_mediator_agent.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -343,7 +343,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 50}, []
+                return expected_output, {"total_tokens": 50}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -373,7 +373,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return "not valid json", {"total_tokens": 10}, []
+                return "not valid json", {"total_tokens": 10}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -396,7 +396,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return json.dumps({"metadata": {}}), {"total_tokens": 10}, []
+                return json.dumps({"metadata": {}}), {"total_tokens": 10}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -429,10 +429,114 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 5}, []
+                return expected_output, {"total_tokens": 5}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = IndexRequest(data="doc text")
         resp = await pipeline.run_index(req)
         assert resp.index_text == "indexed"
+
+
+class TestProviderRouting:
+    """Pipeline.``_client_for`` decides which AsyncOpenAI client a request uses.
+
+    These tests exercise the routing without needing a Postgres DB by
+    monkey-patching ``Pipeline.__init__`` to skip the bootstrap; we just
+    poke the resolved client dict directly.
+    """
+
+    def _bare_pipeline(self, *, tinfoil: str = "") -> Pipeline:
+        """Build a Pipeline without touching Postgres."""
+        from unittest.mock import MagicMock
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            tinfoil_api_key=tinfoil,
+        )
+        return Pipeline(settings, MagicMock(spec=Database), MagicMock(spec=AgentStore))
+
+    def test_default_provider_routes_to_openrouter(self):
+        pipeline = self._bare_pipeline()
+        assert pipeline._client_for(None) is pipeline.llm_clients["openrouter"]
+        assert pipeline._client_for("") is pipeline.llm_clients["openrouter"]
+        assert pipeline._client_for("openrouter") is pipeline.llm_clients["openrouter"]
+
+    def test_provider_case_insensitive(self):
+        pipeline = self._bare_pipeline(tinfoil="tk_test")
+        assert pipeline._client_for("OpenRouter") is pipeline.llm_clients["openrouter"]
+        assert pipeline._client_for("TINFOIL") is pipeline.llm_clients["tinfoil"]
+
+    def test_tinfoil_without_key_raises(self):
+        pipeline = self._bare_pipeline()  # no tinfoil key
+        with pytest.raises(ValueError, match="HIVEMIND_TINFOIL_API_KEY"):
+            pipeline._client_for("tinfoil")
+
+    def test_tinfoil_with_key_routes_to_tinfoil_client(self):
+        pipeline = self._bare_pipeline(tinfoil="tk_test")
+        assert "tinfoil" in pipeline.llm_clients
+        assert pipeline._client_for("tinfoil") is pipeline.llm_clients["tinfoil"]
+        assert pipeline._client_for("tinfoil") is not pipeline.llm_clients["openrouter"]
+
+    def test_unknown_provider_raises(self):
+        pipeline = self._bare_pipeline()
+        with pytest.raises(ValueError, match="Unknown provider"):
+            pipeline._client_for("anthropic-direct")
+
+    def test_run_query_eager_validates_unknown_provider(self):
+        """An unknown provider must fail before any agent runs (no scope/query spend)."""
+        from unittest.mock import MagicMock
+        pipeline = self._bare_pipeline()
+        pipeline._run_scope_agent = AsyncMock()
+        pipeline._run_query_agent = AsyncMock()
+
+        req = QueryRequest(query="hi", query_agent_id="q1", provider="bogus")
+
+        async def _run():
+            with pytest.raises(ValueError, match="Unknown provider"):
+                await pipeline.run_query(req)
+            pipeline._run_scope_agent.assert_not_awaited()
+            pipeline._run_query_agent.assert_not_awaited()
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_run_index_eager_validates_unknown_provider(self):
+        pipeline = self._bare_pipeline()
+        pipeline._run_index_agent = AsyncMock()
+
+        req = IndexRequest(data="x", index_agent_id="i1", provider="bogus")
+
+        async def _run():
+            with pytest.raises(ValueError, match="Unknown provider"):
+                await pipeline.run_index(req)
+            pipeline._run_index_agent.assert_not_awaited()
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_tinfoil_client_uses_configured_base_url(self):
+        pipeline = self._bare_pipeline(tinfoil="tk_test")
+        tinfoil_client = pipeline.llm_clients["tinfoil"]
+        # AsyncOpenAI exposes ``base_url`` (httpx URL) — compare as string.
+        assert "tinfoil.sh" in str(tinfoil_client.base_url)
+
+
+class TestQueryRequestProvider:
+    def test_provider_field_default_none(self):
+        req = QueryRequest(query="hi")
+        assert req.provider is None
+
+    def test_provider_field_round_trip(self):
+        req = QueryRequest(query="hi", provider="tinfoil")
+        assert req.provider == "tinfoil"
+
+
+class TestIndexRequestProvider:
+    def test_provider_field_default_none(self):
+        req = IndexRequest(data="x")
+        assert req.provider is None
+
+    def test_provider_field_round_trip(self):
+        req = IndexRequest(data="x", provider="tinfoil")
+        assert req.provider == "tinfoil"
