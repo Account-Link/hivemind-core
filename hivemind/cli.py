@@ -1748,6 +1748,16 @@ def _parse_hmq_uri(uri: str) -> dict:
         "back to per-role server config, then to the global default."
     ),
 )
+@click.option(
+    "--provider",
+    type=str,
+    default=None,
+    help=(
+        "LLM provider override for this call. 'openrouter' (default) or "
+        "'tinfoil' (requires HIVEMIND_TINFOIL_API_KEY on the server). Lets "
+        "a recipient flip provider per-question without re-deploying."
+    ),
+)
 def ask(
     uri: str,
     question: str,
@@ -1756,6 +1766,7 @@ def ask(
     max_llm_calls: int | None,
     timeout_seconds: int | None,
     model: str | None,
+    provider: str | None,
 ):
     """Send a query through a hmq:// URI shared by an owner.
 
@@ -1841,6 +1852,8 @@ def ask(
         payload["timeout_seconds"] = timeout_seconds
     if model:
         payload["model"] = model
+    if provider:
+        payload["provider"] = provider
     if force_sync:
         _query_sync(service, headers, payload)
     else:
@@ -1891,6 +1904,15 @@ def ask(
         "back to per-role server config, then to the global default."
     ),
 )
+@click.option(
+    "--provider",
+    type=str,
+    default=None,
+    help=(
+        "LLM provider override for this call. 'openrouter' (default) or "
+        "'tinfoil' (requires HIVEMIND_TINFOIL_API_KEY on the server)."
+    ),
+)
 def query_cmd(
     question: str,
     endpoint: str | None,
@@ -1900,6 +1922,7 @@ def query_cmd(
     max_llm_calls: int | None,
     timeout_seconds: int | None,
     model: str | None,
+    provider: str | None,
 ):
     """Send a natural-language query to the hivemind service."""
     config = _load_config()
@@ -1923,6 +1946,8 @@ def query_cmd(
         payload["timeout_seconds"] = timeout_seconds
     if model:
         payload["model"] = model
+    if provider:
+        payload["provider"] = provider
 
     if use_async:
         _query_async(service, headers, payload)
@@ -2059,6 +2084,21 @@ def _artifact_url(service: str, run_id: str, filename: str) -> str:
     is_flag=True,
     help="Download artifacts into ./hivemind-artifacts/<run_id>/",
 )
+@click.option(
+    "--model",
+    type=str,
+    default=None,
+    help="LLM model override for this run (per-call, no profile change).",
+)
+@click.option(
+    "--provider",
+    type=str,
+    default=None,
+    help=(
+        "LLM provider override for this run. 'openrouter' (default) or "
+        "'tinfoil' (requires HIVEMIND_TINFOIL_API_KEY on the server)."
+    ),
+)
 def run_cmd(
     path: Path,
     prompt: str,
@@ -2071,6 +2111,8 @@ def run_cmd(
     max_tokens: int,
     as_json: bool,
     fetch: bool,
+    model: str | None,
+    provider: str | None,
 ):
     """Upload, run, and collect a query agent in one command.
 
@@ -2116,6 +2158,10 @@ def run_cmd(
         form_data["scope_agent_id"] = scope_id
     if mediator_id:
         form_data["mediator_agent_id"] = mediator_id
+    if model:
+        form_data["model"] = model
+    if provider:
+        form_data["provider"] = provider
 
     if not as_json:
         click.echo(f"Packing {path} → {archive_name} ({len(archive_bytes)} bytes)")

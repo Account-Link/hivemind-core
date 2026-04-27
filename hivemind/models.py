@@ -31,6 +31,10 @@ class QueryRequest(BaseModel):
     # to the global HIVEMIND_LLM_MODEL. Use to A/B different models per
     # query, e.g. "moonshotai/kimi-k2.6" or "anthropic/claude-haiku-4.5".
     model: str | None = None
+    # Per-call LLM provider override. Accepts "openrouter" (default) or
+    # "tinfoil" (requires HIVEMIND_TINFOIL_API_KEY on the server). Lets a
+    # recipient flip provider per-question without re-deploying.
+    provider: str | None = None
     # Optional privacy/utility policy the scope agent should enforce.
     # Example: "Only allow conversations from the last 30 days; block
     # content from before that window." The scope agent reads this as
@@ -83,6 +87,7 @@ class IndexRequest(BaseModel):
     max_llm_calls: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     model: str | None = None
+    provider: str | None = None
 
 
 class IndexResponse(BaseModel):

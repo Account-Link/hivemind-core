@@ -65,17 +65,33 @@ class Pipeline:
         self.settings = settings
         self.db = db
         self.agent_store = agent_store
-        self.llm_client = AsyncOpenAI(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            timeout=httpx.Timeout(
-                connect=5.0,
-                read=float(settings.llm_timeout_seconds),
-                write=float(settings.llm_timeout_seconds),
-                pool=float(settings.llm_timeout_seconds),
-            ),
-            max_retries=0,
+        timeout = httpx.Timeout(
+            connect=5.0,
+            read=float(settings.llm_timeout_seconds),
+            write=float(settings.llm_timeout_seconds),
+            pool=float(settings.llm_timeout_seconds),
         )
+        # OpenRouter is the default provider and is always built. Tinfoil
+        # is built only when its API key is configured; callers asking for
+        # it without a key get a clear error from ``_client_for``.
+        self.llm_clients: dict[str, AsyncOpenAI] = {
+            "openrouter": AsyncOpenAI(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+                timeout=timeout,
+                max_retries=0,
+            ),
+        }
+        if settings.tinfoil_api_key:
+            self.llm_clients["tinfoil"] = AsyncOpenAI(
+                base_url=settings.tinfoil_base_url,
+                api_key=settings.tinfoil_api_key,
+                timeout=timeout,
+                max_retries=0,
+            )
+        # Backwards-compat alias; existing call sites that read
+        # ``self.llm_client`` keep working with the default provider.
+        self.llm_client = self.llm_clients["openrouter"]
         self.llm_model = settings.llm_model
         self._role_models = {
             "scope": (settings.scope_model or settings.llm_model),
@@ -94,6 +110,29 @@ class Pipeline:
         if override:
             return override
         return self._role_models.get(role, self.llm_model)
+
+    def _client_for(self, provider: str | None) -> AsyncOpenAI:
+        """Resolve which AsyncOpenAI client to use for a request.
+
+        ``None`` / empty / ``"openrouter"`` → default client. ``"tinfoil"``
+        → tinfoil client when configured. Any other value, or tinfoil
+        without an API key, raises ``ValueError`` so the failure is loud
+        at request boundaries instead of silently falling back.
+        """
+        key = (provider or "").strip().lower()
+        if not key or key == "openrouter":
+            return self.llm_clients["openrouter"]
+        if key in self.llm_clients:
+            return self.llm_clients[key]
+        if key == "tinfoil":
+            raise ValueError(
+                "provider='tinfoil' requires HIVEMIND_TINFOIL_API_KEY on "
+                "the server. Configure it and redeploy, or omit the field."
+            )
+        raise ValueError(
+            f"Unknown provider '{provider}'. Valid: "
+            f"{sorted(self.llm_clients)}"
+        )
 
     # -- Store pipeline --
 
@@ -149,6 +188,10 @@ class Pipeline:
         req_timeout = req.timeout_seconds
         req_max_calls = req.max_llm_calls
         req_model = req.model
+        req_provider = req.provider
+        # Eagerly resolve so an unknown provider fails the whole request
+        # before we burn scope-stage budget.
+        self._client_for(req_provider)
 
         if _disable_scope:
             pass
@@ -156,7 +199,7 @@ class Pipeline:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
                 max_calls=req_max_calls, timeout_seconds=req_timeout,
-                model=req_model,
+                model=req_model, provider=req_provider,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -165,7 +208,7 @@ class Pipeline:
             scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                 req, max_tokens=scope_budget,
                 max_calls=req_max_calls, timeout_seconds=req_timeout,
-                model=req_model,
+                model=req_model, provider=req_provider,
             )
             used = scope_usage.get("total_tokens", 0)
             total_tokens += used
@@ -192,6 +235,7 @@ class Pipeline:
             timeout_seconds=req_timeout,
             return_usage=True,
             model=req_model,
+            provider=req_provider,
         )
         used = query_usage.get("total_tokens", 0)
         total_tokens += used
@@ -218,6 +262,7 @@ class Pipeline:
                         timeout_seconds=req_timeout,
                         policy=req.policy,
                         model=req_model,
+                        provider=req_provider,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
@@ -258,10 +303,11 @@ class Pipeline:
         return_tape: bool = False,
         extra_volumes: dict[str, dict[str, str]] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ):
         """Run a Docker agent with tools and return its stdout."""
         backend = SandboxBackend(
-            self.llm_client,
+            self._client_for(provider),
             self._model_for(role, model),
             self._sandbox_settings,
             agent_config,
@@ -292,6 +338,7 @@ class Pipeline:
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -404,6 +451,7 @@ class Pipeline:
             return_budget_summary=True,
             extra_volumes=scope_volumes,
             model=model,
+            provider=provider,
         )
 
         try:
@@ -453,6 +501,7 @@ class Pipeline:
         replay_tape: list[dict] | None = None,
         return_tape: bool = False,
         model: str | None = None,
+        provider: str | None = None,
     ):
         """Run query agent with SCOPED access, return output and optionally usage/tape."""
         agent_config = await asyncio.to_thread(
@@ -476,7 +525,7 @@ class Pipeline:
         }
 
         backend = SandboxBackend(
-            self.llm_client,
+            self._client_for(provider),
             self._model_for("query", model),
             self._sandbox_settings,
             agent_config,
@@ -517,6 +566,7 @@ class Pipeline:
         timeout_seconds: int | None = None,
         policy: str | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
         agent_config = await asyncio.to_thread(
@@ -533,7 +583,7 @@ class Pipeline:
 
         # Mediator has NO data access tools
         backend = SandboxBackend(
-            self.llm_client,
+            self._client_for(provider),
             self._model_for("mediator", model),
             self._sandbox_settings,
             agent_config,
@@ -561,6 +611,8 @@ class Pipeline:
         """Run the index pipeline: index agent processes document data."""
         global_max = self._sandbox_settings.global_max_tokens
         effective_max = min(req.max_tokens or global_max, global_max)
+        # Eager validation so an unknown provider fails fast.
+        self._client_for(req.provider)
 
         index_text, metadata, usage = await self._run_index_agent(
             req=req,
@@ -568,6 +620,7 @@ class Pipeline:
             max_calls=req.max_llm_calls,
             timeout_seconds=req.timeout_seconds,
             model=req.model,
+            provider=req.provider,
         )
 
         usage["max_tokens"] = effective_max
@@ -580,6 +633,7 @@ class Pipeline:
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> tuple[str, dict, dict]:
         """Run index agent with FULL_READWRITE access. Returns (index_text, metadata, usage)."""
         index_agent_id = req.index_agent_id or self.settings.default_index_agent
@@ -618,6 +672,7 @@ class Pipeline:
             timeout_seconds=timeout_seconds,
             return_budget_summary=True,
             model=model,
+            provider=provider,
         )
 
         try:
@@ -653,6 +708,7 @@ class Pipeline:
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -669,6 +725,10 @@ class Pipeline:
             await asyncio.to_thread(
                 run_store.update_status, run_id, "running"
             )
+
+            # Eager validation so an unknown provider fails the whole run
+            # before any container starts.
+            self._client_for(provider)
 
             global_max = self._sandbox_settings.global_max_tokens
             effective_max = min(max_tokens or global_max, global_max)
@@ -693,7 +753,7 @@ class Pipeline:
                     scope_fn, scope_fn_source, scope_usage = await self._run_scope_agent(
                         req_for_scope, max_tokens=scope_budget,
                         max_calls=max_calls, timeout_seconds=timeout_seconds,
-                        model=model,
+                        model=model, provider=provider,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -746,7 +806,7 @@ class Pipeline:
             env["SCOPE_FN_SOURCE"] = scope_fn_source or ""
 
             backend = SandboxBackend(
-                self.llm_client,
+                self._client_for(provider),
                 self._model_for("query", model),
                 self._sandbox_settings,
                 agent_config,
@@ -799,6 +859,7 @@ class Pipeline:
                             max_calls=max_calls,
                             timeout_seconds=timeout_seconds,
                             model=model,
+                            provider=provider,
                         )
                     except ValueError as e:
                         if "not found" in str(e).lower():
@@ -845,6 +906,8 @@ class Pipeline:
         max_tokens: int | None = None,
         max_calls: int | None = None,
         timeout_seconds: int | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> None:
         """Run index agent with tracking. Updates run_store through lifecycle."""
         try:
@@ -860,10 +923,15 @@ class Pipeline:
                 max_tokens=max_tokens,
                 max_llm_calls=max_calls,
                 timeout_seconds=timeout_seconds,
+                model=model,
+                provider=provider,
             )
+            # Eager validation so an unknown provider fails before container start.
+            self._client_for(provider)
             index_text, metadata, usage = await self._run_index_agent(
                 req=req, max_tokens=max_tokens,
                 max_calls=max_calls, timeout_seconds=timeout_seconds,
+                model=model, provider=provider,
             )
 
             await asyncio.to_thread(
