@@ -37,6 +37,7 @@ admin tenants create`. To mint capability tokens: `POST /v1/tokens` or
 - Most endpoints use JSON. `POST /v1/agents/upload` uses `multipart/form-data`.
 - `POST /v1/query` canonical field is `query`. `prompt` is still accepted as a deprecated alias.
 - Validation errors return `422` (Pydantic/FastAPI). Runtime errors return `400`/`404`/`503`/`500` with `{"detail": ...}`.
+- `503 sealed`: tenant agent files are encrypted at rest under a per-tenant DEK wrapped by the owner's `hmk_` key. The DEK cache lives only in process memory, so a CVM restart wipes it. Capability-token (`hmq_`) requests that need to read encrypted data return `503` with `detail: "Tenant is sealed: ..."` until the owner makes any authenticated request and re-thaws the cache. See [ARCHITECTURE.md § Tenant Seal](ARCHITECTURE.md#tenant-seal-application-layer-encryption).
 
 ## Public API
 

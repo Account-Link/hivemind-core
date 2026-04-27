@@ -2,7 +2,7 @@
 
 A forkable agent platform with raw Postgres and a scope-function query firewall. Apps define their own schema, access control, and query logic by registering Docker agent images.
 
-Core provides only the irreducible primitives: raw SQL execution, Docker sandboxes, scope function enforcement, and pipeline orchestration. In production, runs inside a dstack Confidential VM where LUKS2 disk encryption and TDX memory encryption protect data-at-rest — no application-level encryption needed.
+Core provides only the irreducible primitives: raw SQL execution, Docker sandboxes, scope function enforcement, and pipeline orchestration. In production, runs inside a dstack Confidential VM where LUKS2 disk encryption and TDX memory encryption protect data-at-rest. On top of that, agent source files are sealed at the application layer with a per-tenant DEK wrapped under the owner's `hmk_` key — capability-token (`hmq_`) requests cannot read encrypted data after a CVM restart until the owner makes any request, surfacing as `503 sealed` in the meantime. See [ARCHITECTURE.md § Tenant Seal](ARCHITECTURE.md#tenant-seal-application-layer-encryption).
 
 ## Install the CLI
 
@@ -191,7 +191,7 @@ Four HTTP endpoint groups, one enforcement primitive:
 - `POST /v1/store` — raw SQL writes against Postgres. The app owns the schema.
 - `POST /v1/query` (and `/v1/query/submit` for async runs) — runs the **scope → query → mediator** agent pipeline and returns the answer.
 - `POST /v1/index` — runs an index agent over documents and stores structured output.
-- `POST /v1/tokens` (and `GET /v1/scope-attest`) — mint / list / revoke delegated capability tokens; recipients verify their binding via scope-attest. See **[Capability tokens](#capability-tokens-delegated-query--write)** below.
+- `POST /v1/tokens` (and `GET /v1/scope-attest`) — mint / list / revoke delegated capability tokens; recipients verify their binding via scope-attest. See **[Capability tokens](#capability-tokens-delegated-query)** below.
 
 ```
 client ──► server ──► pipeline ──► { scope agent } ──► scope_fn

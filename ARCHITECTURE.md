@@ -6,7 +6,10 @@ Only agent-mediated, scope-constrained, mediator-audited answers leave.
 
 Runs inside a dstack Confidential VM. Postgres is plaintext inside the CVM.
 Disk encryption (LUKS2) and memory encryption (TDX) are handled by hardware.
-No application-level encryption. No record abstraction. Just Postgres.
+Application-level encryption is narrow: only agent source files are sealed
+under a per-tenant DEK wrapped by the owner's `hmk_` key, so capability
+tokens alone cannot decrypt them after a restart. App-defined tables stay
+plaintext under LUKS2. No record abstraction. Just Postgres.
 
 ---
 
@@ -409,6 +412,60 @@ before reaching the pipeline. Recipients audit their binding via
 bundle, and a stable `sha256("<path>\0<content>\0…")` over its files —
 pin the digest out-of-band, re-derive after re-fetching).
 
+## Tenant Seal (application-layer encryption)
+
+LUKS2 + TDX cover the operator threat model: the host can't read the
+disk or RAM. The seal covers a different one — *the holder of an
+`hmq_` capability token, alone, must not be able to read tenant data
+across a CVM restart.* The keys-to-the-kingdom credential is `hmk_`,
+and only its presence should bring sealed data back online.
+
+```
+  hmk_<tenant key>  ──scrypt(N=2^15, salt)──► KEK
+                                               │
+                                               ▼
+  random 32-byte DEK  ──ChaCha20-Poly1305──► wrapped_dek
+                                               │
+                                               ▼
+                              _hivemind_tenant_kek (singleton row)
+
+  agent file content  ──ChaCha20-Poly1305(DEK, AAD)──► ciphertext column
+                                                       AAD = "file|<tenant>|<agent>|<path>"
+```
+
+- `hivemind/seal.py` — pure crypto: `derive_kek`, `wrap_dek`/`unwrap_dek`,
+  `encrypt_file`/`decrypt_file`, `TenantSealer` cache, `TenantSealed`.
+- `hivemind/tenant_seal.py` — `ensure_unsealed(sealer, db, tenant_id, token, can_initialize)`
+  loads the wrapped record, derives the KEK from the bearer, unwraps,
+  and caches the DEK for this process.
+- `hivemind/sandbox/agents.py::AgentStore` — writes ciphertext when the
+  sealer is warm; reads decrypt transparently or raise `TenantSealed`.
+- `hivemind/server.py` — exception handler maps `TenantSealed` → `503`
+  with `{"detail": "Tenant is sealed: ..."}`.
+- The DEK cache is **process-memory only**. A CVM restart wipes it; the
+  next `hmk_` request re-derives the KEK and unwraps. `hmq_` requests
+  resolve to a `Caller(sealed=True)` until that happens.
+
+Threat coverage:
+
+|                              | LUKS2 + TDX | Tenant Seal |
+|------------------------------|-------------|-------------|
+| Disk image stolen offline    | ✓           | ✓ (extra)   |
+| Memory snapshot off-CVM      | ✓ (TDX)     | ✓ (extra)   |
+| Stolen `hmq_` after restart  | ✗           | ✓           |
+| Stolen `hmk_`                | ✗           | ✗ (by design) |
+
+Caveats:
+
+- Only `_hivemind_agent_files.ciphertext` is sealed today. App-defined
+  tables remain plaintext under LUKS2 — adding them follows the same
+  pattern (per-row AAD scoping the column to a primary key).
+- The seal does not protect against an attacker who can induce the
+  owner to make an HTTP request after they've compromised the CVM
+  process — process memory is the trust boundary above LUKS2/TDX.
+- Owner-key rotation requires re-wrapping the DEK; the rotate flow
+  re-runs `ensure_unsealed` with the new key.
+
 ## Privacy Layers
 
 ```
@@ -430,6 +487,8 @@ pin the digest out-of-band, re-derive after re-fetching).
           LAYER 0: ENCRYPTED STORAGE
           LUKS2 disk encryption (AES-XTS-256).
           TDX memory encryption.
+          Tenant seal: agent files sealed under owner-bound DEK
+          (capability tokens alone can't unseal across a CVM restart).
           Operator cannot read disk or RAM.
 ```
 
@@ -444,8 +503,9 @@ pin the digest out-of-band, re-derive after re-fetching).
   │  Host/       │  NO        │  LUKS disk = noise. TDX RAM = noise. │
   │  Operator    │            │  Can destroy data but not read it.   │
   ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Postgres    │  YES       │  Plaintext inside CVM. Full SQL.     │
-  │  (in CVM)    │  (all)     │  Only reachable from CVM.            │
+  │  Postgres    │  YES       │  Plaintext inside CVM for app data.  │
+  │  (in CVM)    │  (all)     │  _hivemind_agent_files holds AEAD    │
+  │              │            │  ciphertext sealed under tenant DEK. │
   ├──────────────┼────────────┼──────────────────────────────────────┤
   │  Python      │  YES       │  Can query Postgres directly.        │
   │  (in CVM)    │  (all)     │  Orchestrates agents. Routes tools.  │
