@@ -104,7 +104,7 @@ class TestRunQuery:
         """Scope agent can return a scope_fn (new format)."""
         pipeline = _make_pipeline(pg_db)
         pipeline.agent_store.create(AgentConfig(
-            agent_id="scope1",
+            agent_id="scope-returns",
             name="Scope Agent",
             image="img:scope",
         ))
@@ -121,16 +121,16 @@ class TestRunQuery:
             async def run(self, **kwargs):
                 return json.dumps({"scope_fn": scope_fn_source}), {
                     "total_tokens": 10
-                }, []
+                }
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = QueryRequest(
             prompt="What?",
             query_agent_id="q1",
-            scope_agent_id="scope1",
+            scope_agent_id="scope-returns",
         )
-        fn, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+        fn, source, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
 
         # Verify the compiled function works
         rows = [{"team": "alpha", "val": 1}, {"team": "beta", "val": 2}]
@@ -145,7 +145,7 @@ class TestRunQuery:
         """Scope agent returning invalid scope_fn source should fail."""
         pipeline = _make_pipeline(pg_db)
         pipeline.agent_store.create(AgentConfig(
-            agent_id="scope1",
+            agent_id="scope-rejects",
             name="Scope Agent",
             image="img:scope",
         ))
@@ -157,14 +157,14 @@ class TestRunQuery:
             async def run(self, **kwargs):
                 return json.dumps({"scope_fn": "import os\ndef scope(sql, params, rows): return True"}), {
                     "total_tokens": 0
-                }, []
+                }
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
         req = QueryRequest(
             prompt="What?",
             query_agent_id="q1",
-            scope_agent_id="scope1",
+            scope_agent_id="scope-rejects",
         )
         with pytest.raises(ValueError, match="imports"):
             await pipeline._run_scope_agent(req, max_tokens=1000)
@@ -180,7 +180,7 @@ class TestRunQuery:
 
         mock_scope_fn = lambda sql, params, rows: {"allow": True, "rows": rows}
         pipeline._run_scope_agent = AsyncMock(
-            return_value=(mock_scope_fn, {"total_tokens": 0})
+            return_value=(mock_scope_fn, "def scope(sql, params, rows): return {'allow': True, 'rows': rows}", {"total_tokens": 0})
         )
         pipeline._run_query_agent = AsyncMock(
             return_value=("output", {"total_tokens": 0})
@@ -212,7 +212,7 @@ class TestRunQuery:
         await pipeline.run_query(req)
 
         _, kwargs = pipeline._run_query_agent.await_args
-        assert kwargs["max_tokens"] == 488
+        assert kwargs["max_tokens"] == 700
         pipeline._run_mediator_agent.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -343,7 +343,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 50}, []
+                return expected_output, {"total_tokens": 50}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -373,7 +373,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return "not valid json", {"total_tokens": 10}, []
+                return "not valid json", {"total_tokens": 10}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -396,7 +396,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return json.dumps({"metadata": {}}), {"total_tokens": 10}, []
+                return json.dumps({"metadata": {}}), {"total_tokens": 10}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
@@ -429,7 +429,7 @@ class TestRunIndex:
                 pass
 
             async def run(self, **kwargs):
-                return expected_output, {"total_tokens": 5}, []
+                return expected_output, {"total_tokens": 5}
 
         monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
 
