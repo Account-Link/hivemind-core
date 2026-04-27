@@ -60,7 +60,7 @@ _ACTIVE_POINTER = _HIVEMIND_HOME / "active"
 from ._http import _hdelete, _hget, _hpost  # noqa: F401  (test contract)
 
 # ── Subcommand modules ──
-from . import admin, agents, owner, profile, recipient, tokens, trust_cmds
+from . import admin, agents, compose, owner, profile, recipient, tokens, trust_cmds
 from ._root import cli
 from ._shared import _parse_hmq_uri  # noqa: F401  (test contract)
 
@@ -100,6 +100,7 @@ cli.add_command(tokens.tokens_cli, "tokens")
 cli.add_command(profile.profile_cli, "profile")
 cli.add_command(admin.admin_cli, "admin")
 cli.add_command(trust_cmds.trust_group, "trust")
+cli.add_command(compose.compose_cli, "compose")
 
 
 if __name__ == "__main__":

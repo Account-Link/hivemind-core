@@ -114,7 +114,142 @@ def ask(
     scope_id = parsed["scope_agent_id"]
     headers = {"Authorization": f"Bearer {parsed['token']}"}
 
-    if parsed["compose_hash"]:
+    pin_signer = parsed.get("signer_pubkey", "") or ""
+    if pin_signer:
+        # Pin-rotation URI: fetch the signed envelope, verify against
+        # the pubkey baked into the URI, then enforce live compose ∈
+        # allowed_composes and live attested-files digest equality.
+        # The pubkey is the trust anchor — as long as the owner hasn't
+        # rotated their hmk_ (which rotates the keypair), this URI keeps
+        # working across any redeploy the owner has blessed.
+        from base64 import b64decode as _b64d
+        from urllib.parse import unquote as _unquote
+
+        try:
+            expected_pub = _b64d(_unquote(pin_signer).encode("ascii"))
+        except Exception:
+            click.echo(
+                "Error: URI signer= is not valid base64.", err=True
+            )
+            raise SystemExit(1)
+        try:
+            r = _hget(
+                f"{service}/v1/tenants/compose-pin",
+                headers=headers,
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            click.echo(f"Error fetching compose pin: {e}", err=True)
+            raise SystemExit(2)
+        if r.status_code == 404:
+            click.echo(
+                "Error: service has no compose pin published. Owner "
+                "must run 'hivemind compose bless'.",
+                err=True,
+            )
+            raise SystemExit(3)
+        if r.status_code >= 400:
+            click.echo(
+                f"Error {r.status_code} fetching compose pin: "
+                f"{_api_error(r)}",
+                err=True,
+            )
+            raise SystemExit(3)
+        envelope_dict = (r.json().get("envelope") or {})
+        from hivemind.compose_pin import ComposePin
+
+        try:
+            pin = ComposePin.model_validate(envelope_dict)
+        except Exception as e:
+            click.echo(f"Error: pin envelope malformed: {e}", err=True)
+            raise SystemExit(3)
+        if not pin.verify(expected_pubkey=expected_pub):
+            click.echo(
+                "Error: compose-pin signature does not verify against "
+                "URI signer pubkey.\n"
+                "Either the URI was tampered with, the operator served "
+                "a forged pin, or the owner rotated their hmk_ (in "
+                "which case ask for a fresh URI).",
+                err=True,
+            )
+            raise SystemExit(4)
+        if pin.is_expired():
+            click.echo(
+                f"Error: compose pin expired at exp={pin.exp}. Ask "
+                f"the owner to re-bless.",
+                err=True,
+            )
+            raise SystemExit(4)
+        if pin.scope_agent_id != scope_id:
+            click.echo(
+                "Error: compose pin is for a different scope agent.\n"
+                f"  URI scope:  {scope_id}\n"
+                f"  Pin scope:  {pin.scope_agent_id}",
+                err=True,
+            )
+            raise SystemExit(4)
+
+        # Live compose must be one of the blessed values.
+        try:
+            ar = _hget(f"{service}/v1/attestation", timeout=15)
+        except httpx.RequestError as e:
+            click.echo(f"Error fetching attestation: {e}", err=True)
+            raise SystemExit(2)
+        if ar.status_code >= 400:
+            click.echo(
+                f"Error {ar.status_code} fetching attestation: "
+                f"{_api_error(ar)}",
+                err=True,
+            )
+            raise SystemExit(3)
+        live_compose = (
+            (ar.json().get("attestation") or {}).get("compose_hash") or ""
+        ).lower()
+        allowed = {c.lower() for c in (pin.allowed_composes or [])}
+        if live_compose not in allowed:
+            click.echo(
+                "Error: live compose_hash is not in the pin's "
+                "allowed_composes.\n"
+                f"  Live:     {live_compose}\n"
+                f"  Allowed:  {sorted(allowed)}\n"
+                "The owner has not blessed this redeploy. Ask them "
+                "to update the pin.",
+                err=True,
+            )
+            raise SystemExit(4)
+
+        # Live attested-files digest must match the pin.
+        try:
+            fr = _hget(
+                f"{service}/v1/agents/{scope_id}/attest",
+                headers=headers,
+                timeout=30,
+            )
+        except httpx.RequestError as e:
+            click.echo(f"Error fetching scope pins: {e}", err=True)
+            raise SystemExit(2)
+        if fr.status_code >= 400:
+            click.echo(
+                f"Error {fr.status_code} fetching scope pins: "
+                f"{_api_error(fr)}",
+                err=True,
+            )
+            raise SystemExit(3)
+        body = fr.json()
+        live_files = (
+            body.get("attested_files_digest_sha256")
+            or body.get("files_digest_sha256")
+            or ""
+        ).lower()
+        if live_files != pin.attested_files_digest.lower():
+            click.echo(
+                "Error: attested_files_digest mismatch (pin vs live).\n"
+                f"  Pin:   {pin.attested_files_digest}\n"
+                f"  Live:  {live_files}",
+                err=True,
+            )
+            raise SystemExit(4)
+    elif parsed["compose_hash"]:
         try:
             r = _hget(f"{service}/v1/attestation", timeout=15)
         except httpx.RequestError as e:
@@ -141,7 +276,7 @@ def ask(
             )
             raise SystemExit(4)
 
-    if parsed["files_digest"]:
+    if parsed["files_digest"] and not pin_signer:
         try:
             r = _hget(
                 f"{service}/v1/agents/{scope_id}/attest",

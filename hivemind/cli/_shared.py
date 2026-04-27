@@ -252,6 +252,11 @@ def _parse_hmq_uri(uri: str) -> dict:
         "compose_hash": params.get("compose", "").lower(),
         "files_digest": params.get("files", "").lower(),
         "query_agent_id": params.get("qa", ""),
+        # Phase 3 pin-rotation: when present, the URI authorises any
+        # compose blessed by the holder of this Ed25519 pubkey, with
+        # the live attested-files digest taken from the signed pin.
+        # Empty string = legacy single-compose URI.
+        "signer_pubkey": params.get("signer", ""),
     }
 
 

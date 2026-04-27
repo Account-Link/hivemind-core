@@ -762,6 +762,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"pin '{pin_id}' not found")
         return {"status": "ok", "pin_id": pin_id}
 
+    # ── Identity reflection (any authenticated caller) ──
+    #
+    # Lets the CLI resolve its own ``tenant_id`` without grovelling
+    # through ``/v1/agents`` or ``/v1/tokens``. Returns the role + the
+    # token's constraint snapshot (e.g. ``scope_agent_id`` for ``hmq_``)
+    # so a recipient can confirm what the URI actually grants without
+    # decoding the bearer themselves.
+    @app.get("/v1/whoami")
+    async def whoami(
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        return {
+            "tenant_id": caller.tenant_id,
+            "role": caller.role,
+            "constraints": caller.constraints,
+            "token_id": caller.token_id,
+            "sealed": caller.sealed,
+        }
+
     # ── Liveness (unauthed, no tenant scope) ──
 
     @app.get("/v1/healthz")

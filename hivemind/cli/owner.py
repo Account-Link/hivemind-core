@@ -459,7 +459,22 @@ def load_cmd(
     default=None,
     help="Use this hmq_ token instead of minting one.",
 )
-def share(mint: bool, label: str, explicit_token: str | None):
+@click.option(
+    "--pin-rotation",
+    is_flag=True,
+    help=(
+        "Reference the latest signed compose pin instead of baking a "
+        "single compose_hash. URIs survive any redeploy whose compose "
+        "appears in the pin's allowed_composes. Run 'hivemind compose "
+        "bless' first to publish a pin."
+    ),
+)
+def share(
+    mint: bool,
+    label: str,
+    explicit_token: str | None,
+    pin_rotation: bool,
+):
     """Print a hmq:// URI bundling token + trust pins for a recipient.
 
     The URI looks like::
@@ -556,9 +571,58 @@ def share(mint: bool, label: str, explicit_token: str | None):
     parsed = _urlparse(service)
     host = parsed.netloc
     qs: list[str] = [f"token={token}"]
-    if compose_hash:
+    if pin_rotation:
+        # Pin-rotation mode: bake the signer pubkey instead of the
+        # compose hash. Recipient pulls the latest pin, verifies the
+        # signature against this pubkey, then enforces "live compose ∈
+        # allowed_composes" + matching attested files digest.
+        try:
+            pr = _hget(
+                f"{service}/v1/tenants/compose-pin",
+                headers=headers,
+                timeout=15,
+            )
+        except httpx.RequestError as e:
+            click.echo(
+                f"Error fetching compose pin: {e}\n"
+                f"  Run 'hivemind compose bless' first.",
+                err=True,
+            )
+            raise SystemExit(2)
+        if pr.status_code == 404:
+            click.echo(
+                "Error: no compose pin published yet. Run "
+                "'hivemind compose bless' to publish one.",
+                err=True,
+            )
+            raise SystemExit(3)
+        if pr.status_code >= 400:
+            click.echo(
+                f"Error {pr.status_code} fetching compose pin: "
+                f"{_api_error(pr)}",
+                err=True,
+            )
+            raise SystemExit(3)
+        pin_env = (pr.json().get("envelope") or {})
+        signer = (pin_env.get("signer_pubkey") or "").strip()
+        if not signer:
+            click.echo(
+                "Error: compose pin envelope missing signer_pubkey.",
+                err=True,
+            )
+            raise SystemExit(3)
+        # ``signer`` is base64; URL-safe wrt the hmq:// query parser
+        # except for ``+`` and ``/``. Recipient round-trips through
+        # base64 decode anyway, so we percent-encode here.
+        from urllib.parse import quote as _q
+
+        qs.append(f"signer={_q(signer, safe='')}")
+    elif compose_hash:
         qs.append(f"compose={compose_hash}")
-    if files_digest:
+    if files_digest and not pin_rotation:
+        # In pin-rotation mode the files digest is carried (signed)
+        # inside the envelope — don't bake a stale snapshot into the
+        # URI that would have to be reissued on every agent edit.
         qs.append(f"files={files_digest}")
     if parsed.scheme and parsed.scheme != "https":
         qs.append(f"scheme={parsed.scheme}")
