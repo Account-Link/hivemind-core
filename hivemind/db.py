@@ -206,6 +206,17 @@ class Database:
                     )
                 except Exception:
                     pass
+                # Phase 6: per-agent inspection contract. Default 'full'
+                # = legacy behaviour (A can read B's source). 'sealed'
+                # = source encrypted under enclave-only KMS key.
+                try:
+                    cur.execute(
+                        "ALTER TABLE _hivemind_agents "
+                        "ADD COLUMN IF NOT EXISTS inspection_mode "
+                        "TEXT NOT NULL DEFAULT 'full'"
+                    )
+                except Exception:
+                    pass
             self._conn.commit()
 
     def execute(self, sql: str, params: list | tuple | None = None) -> list[dict]:
@@ -382,6 +393,15 @@ class HttpDatabase:
             self.execute_commit(
                 "ALTER TABLE _hivemind_agents "
                 "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'query'"
+            )
+        except Exception:
+            pass
+        # Phase 6: per-agent inspection_mode (mirrors local Database).
+        try:
+            self.execute_commit(
+                "ALTER TABLE _hivemind_agents "
+                "ADD COLUMN IF NOT EXISTS inspection_mode "
+                "TEXT NOT NULL DEFAULT 'full'"
             )
         except Exception:
             pass

@@ -32,6 +32,100 @@ def _hpost(*a, **kw):
     return _f(*a, **kw)
 
 
+def _resolve_inspection_mode(
+    *,
+    service: str,
+    user_choice: str,
+    as_json: bool,
+) -> str:
+    """Pick an ``inspection_mode`` for an uploaded query agent.
+
+    The room owner publishes ``accepted_inspection_modes`` in
+    ``/v1/attestation`` (a list — typically ``["full"]`` for
+    legacy rooms or ``["full","sealed"]`` for rooms that allow B
+    to encrypt their source under an enclave-only KMS key).
+
+    Resolution order:
+      • ``--inspection-mode full|sealed`` → validate, abort if
+        not in the accepted list.
+      • ``--inspection-mode ask`` (default) → interactive prompt
+        when on a TTY; otherwise pick the first accepted mode.
+
+    When the user picks a mode the room doesn't accept, this raises
+    SystemExit(4) with a "walk away" message — A's policy is final;
+    B's only recourse is to abort.
+    """
+    try:
+        r = _hget(f"{service}/v1/attestation", timeout=15)
+        body = r.json() if r.status_code < 400 else {}
+    except (httpx.RequestError, ValueError):
+        body = {}
+    att = (body.get("attestation") or {}) if isinstance(body, dict) else {}
+    accepted = att.get("accepted_inspection_modes") or ["full"]
+    if not isinstance(accepted, list) or not accepted:
+        accepted = ["full"]
+    accepted = [
+        m for m in accepted
+        if isinstance(m, str) and m in {"full", "sealed"}
+    ] or ["full"]
+
+    if user_choice in {"full", "sealed"}:
+        if user_choice not in accepted:
+            click.echo(
+                "Error: this room does not accept "
+                f"inspection_mode={user_choice!r}.\n"
+                f"  Room policy: {accepted}\n"
+                "Either pass --inspection-mode with one of the accepted "
+                "modes, or walk away (A's policy is final; B cannot "
+                "force a mode A hasn't blessed).",
+                err=True,
+            )
+            raise SystemExit(4)
+        return user_choice
+
+    # Non-interactive: default to the first accepted mode, preferring
+    # 'full' when it's available (matches legacy behavior).
+    if as_json or not click.get_text_stream("stdin").isatty():
+        return "full" if "full" in accepted else accepted[0]
+
+    click.echo(
+        "\nThe room owner accepts these inspection modes for your "
+        "uploaded agent:"
+    )
+    for i, m in enumerate(accepted, start=1):
+        if m == "full":
+            blurb = (
+                "owner CAN read your agent's source files via the "
+                "/v1/agents/{id}/files endpoint. Image digest + attested "
+                "file list bind the workload, but plaintext is owner-readable."
+            )
+        else:
+            blurb = (
+                "owner CANNOT read source files. Bytes are encrypted "
+                "under an enclave-only KMS key bound to this CVM's "
+                "compose_hash; only the running enclave can decrypt. "
+                "Image digest + attested file list still bind the workload."
+            )
+        click.echo(f"  {i}) {m} — {blurb}")
+    click.echo("  q) abort (don't upload)")
+    while True:
+        choice = click.prompt(
+            "Choose inspection mode",
+            default=str(len(accepted)) if "sealed" in accepted else "1",
+        ).strip().lower()
+        if choice in {"q", "quit", "abort", "exit"}:
+            click.echo(
+                "Aborted: not uploading. (A's policy was unacceptable to you.)",
+                err=True,
+            )
+            raise SystemExit(0)
+        if choice.isdigit() and 1 <= int(choice) <= len(accepted):
+            return accepted[int(choice) - 1]
+        if choice in accepted:
+            return choice
+        click.echo(f"  invalid; pick 1..{len(accepted)} or q to abort.")
+
+
 def _upload_query_agent_and_poll(
     *,
     service: str,
@@ -54,6 +148,7 @@ def _upload_query_agent_and_poll(
     expected_pubkey_b64: str | None = None,
     expected_compose_hash: str | None = None,
     strict_attestation: bool = True,
+    inspection_mode: str = "full",
 ) -> None:
     """Upload an archive to /v1/query-agents/submit and poll until done.
 
@@ -78,6 +173,8 @@ def _upload_query_agent_and_poll(
         form_data["model"] = model
     if provider:
         form_data["provider"] = provider
+    if inspection_mode:
+        form_data["inspection_mode"] = inspection_mode
 
     if not as_json:
         click.echo(f"Uploading {archive_name} ({len(archive_bytes)} bytes) → {service}")
@@ -265,6 +362,23 @@ def _archive_for_path(path: Path, name: str | None) -> tuple[bytes, str, str]:
         "Only useful for debugging against pre-Phase-5 servers."
     ),
 )
+@click.option(
+    "--inspection-mode",
+    type=click.Choice(["full", "sealed", "ask"]),
+    default="ask",
+    show_default=True,
+    help=(
+        "Privacy mode for the uploaded query agent's source: "
+        "'full' (room owner can fetch source via API), "
+        "'sealed' (source encrypted under enclave-only KMS key — even "
+        "the room owner can't read it; only image_digest + attested "
+        "files digest are inspectable), or "
+        "'ask' (interactively choose against the room's accepted modes; "
+        "in --json or non-TTY mode defaults to the first accepted mode "
+        "with 'full' preferred when available). Only used with "
+        "--query-agent."
+    ),
+)
 def ask(
     uri: str,
     question: str,
@@ -278,6 +392,7 @@ def ask(
     as_json: bool,
     fetch: bool,
     no_strict_attestation: bool,
+    inspection_mode: str,
 ):
     """Send a query through a hmq:// URI shared by an owner.
 
@@ -506,6 +621,11 @@ def ask(
         archive_bytes, archive_name, agent_name = _archive_for_path(
             query_agent_path, None
         )
+        chosen_mode = _resolve_inspection_mode(
+            service=service,
+            user_choice=inspection_mode,
+            as_json=as_json,
+        )
         # Phase 5: pull the live run-signer pubkey + compose_hash from
         # /v1/attestation so we can verify the signed run record against
         # the same enclave the URI authorised. Strict-by-default; the
@@ -545,6 +665,7 @@ def ask(
             expected_pubkey_b64=expected_pubkey,
             expected_compose_hash=live_compose_hash,
             strict_attestation=not no_strict_attestation,
+            inspection_mode=chosen_mode,
         )
         return
 

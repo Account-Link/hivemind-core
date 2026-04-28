@@ -335,3 +335,80 @@ async def test_scope_attest_owner_missing_query_param_400(app_and_registry):
             headers={"Authorization": f"Bearer {t['api_key']}"},
         )
         assert r.status_code == 400
+
+
+# ── sealed inspection_mode (Phase 6) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sealed_agent_files_endpoint_returns_403(app_and_registry):
+    """A sealed-mode agent's plaintext source must NOT be readable via
+    /v1/agents/{id}/files/{path} — even by the room owner. Image digest,
+    file path list, and attested digest stay inspectable."""
+    from hivemind import agent_seal
+
+    agent_seal.reset_for_tests()
+    with agent_seal._state["lock"]:
+        agent_seal._state["key"] = b"\xab" * 32
+        agent_seal._state["key_path"] = "test-key"
+    try:
+        app, registry, created = app_and_registry
+        t = registry.provision("sealed_a")
+        created.append(t["db_name"])
+
+        hive = registry.for_tenant(t["tenant_id"])
+        hive.agent_store.create(
+            AgentConfig(
+                agent_id="agent_sealed",
+                name="sealed-demo",
+                description="",
+                agent_type="query",
+                image="hivemind/sealed-demo:latest",
+                entrypoint=None,
+                memory_mb=64,
+                max_llm_calls=1,
+                max_tokens=1,
+                timeout_seconds=10,
+                inspection_mode="sealed",
+            )
+        )
+        hive.agent_store.save_files(
+            "agent_sealed",
+            {"main.py": "print('SECRET_TOKEN_42')\n"},
+            inspection_mode="sealed",
+        )
+
+        async with _client(app) as c:
+            # Path-list still works (paths/sizes are not secret).
+            rl = await c.get(
+                "/v1/agents/agent_sealed/files",
+                headers={"Authorization": f"Bearer {t['api_key']}"},
+            )
+            assert rl.status_code == 200
+            assert any(
+                f["path"] == "main.py" for f in rl.json()["files"]
+            )
+
+            # Plaintext fetch: 403 under sealed mode.
+            rf = await c.get(
+                "/v1/agents/agent_sealed/files/main.py",
+                headers={"Authorization": f"Bearer {t['api_key']}"},
+            )
+            assert rf.status_code == 403, rf.text
+            assert "sealed" in rf.text.lower()
+            # And the secret never leaks even through the error body.
+            assert "SECRET_TOKEN_42" not in rf.text
+
+            # Attestation surface still works.
+            ra = await c.get(
+                "/v1/agents/agent_sealed/attest",
+                headers={"Authorization": f"Bearer {t['api_key']}"},
+            )
+            assert ra.status_code == 200
+            body = ra.json()
+            assert body["inspection_mode"] == "sealed"
+            assert body["files_count"] == 1
+            assert body["files_digest_sha256"]
+            assert body["agent"]["inspection_mode"] == "sealed"
+    finally:
+        agent_seal.reset_for_tests()

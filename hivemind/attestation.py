@@ -35,11 +35,14 @@ quote: ``0x01 || sha256(app_compose) || 0x00*15``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import time
 from typing import Any
 
 from .version import APP_VERSION
+
+logger = logging.getLogger(__name__)
 
 _REPORT_DATA_VERSION_TAG = b"hivemind-core-v1"
 _REPORT_DATA_V2_TAG = b"hivemind-core-v2"
@@ -163,6 +166,30 @@ def _app_auth_metadata() -> dict[str, Any]:
     }
 
 
+def _accepted_inspection_modes() -> list[str]:
+    """Parse HIVEMIND_ACCEPTED_INSPECTION_MODES into a deduplicated list.
+
+    Unknown values are dropped; an empty result falls back to ['full'].
+    The result is what B's CLI sees in /v1/attestation as the room's
+    inspection menu — bound to compose_hash because the env var is
+    part of the compose definition.
+    """
+    from .config import Settings
+
+    valid = {"full", "sealed"}
+    try:
+        cfg = Settings()
+    except Exception:
+        return ["full"]
+    raw = (cfg.accepted_inspection_modes or "").strip()
+    items = [m.strip().lower() for m in raw.split(",") if m.strip()]
+    out: list[str] = []
+    for m in items:
+        if m in valid and m not in out:
+            out.append(m)
+    return out or ["full"]
+
+
 def bootstrap() -> None:
     """Fetch the quote + measurement registers once at startup.
 
@@ -207,6 +234,17 @@ def bootstrap() -> None:
             report_data = _build_report_data_v2(tls_bundle["fingerprint"])
         else:
             report_data = _build_report_data_v1()
+
+        # ── Sealed-agent enclave key (Phase 6) ──
+        # Best-effort: missing key → sealed-mode uploads fail at the
+        # upload boundary, but ``full`` mode and the rest of the app
+        # keep working in local dev.
+        try:
+            from . import agent_seal as _aseal
+
+            _aseal.bootstrap(dstack)
+        except Exception as ase_e:
+            logger.warning("agent_seal bootstrap failed: %r", ase_e)
 
         # ── Run signer (Phase 5) ──
         # Derive the Ed25519 keypair the pipeline will use to sign run
@@ -287,6 +325,12 @@ def bootstrap() -> None:
             "run_signer_key_path": (
                 "hivemind-runs-v1" if run_signer_pub_b64 else ""
             ),
+            # Phase 6: room-level inspection policy. Recipient (B) reads
+            # this BEFORE uploading an agent: it tells them what modes
+            # the room accepts ('full' = A reads source, 'sealed' = no
+            # one can read source after upload). Bound by compose_hash
+            # via HIVEMIND_ACCEPTED_INSPECTION_MODES env var.
+            "accepted_inspection_modes": _accepted_inspection_modes(),
         }
         # Stash cert/key for the server to consume — server.py reads
         # these and passes them to uvicorn.

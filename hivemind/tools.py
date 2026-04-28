@@ -239,7 +239,17 @@ def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
         return json.dumps({"files": files})
 
     def read_query_agent_file(file_path: str) -> str:
-        content = agent_store.read_file(query_agent_id, file_path)
+        from .sandbox.agents import AgentSealedReadError
+
+        try:
+            content = agent_store.read_file(query_agent_id, file_path)
+        except AgentSealedReadError:
+            return (
+                "This query agent is sealed (inspection_mode=sealed). "
+                "Source files are encrypted under the enclave-only key and "
+                "cannot be inspected. Reason about the agent from its image "
+                "digest, attested file list, and runtime SQL only."
+            )
         if content is None:
             return "File not found. Use list_query_agent_files to see available files."
         return content

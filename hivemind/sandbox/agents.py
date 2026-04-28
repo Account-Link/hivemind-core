@@ -14,6 +14,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class AgentSealedReadError(Exception):
+    """Raised when a plaintext read is attempted on a sealed-mode agent.
+
+    Sealed agents have ``inspection_mode='sealed'`` — their source
+    bytes are encrypted under an enclave-only KMS key, and no token
+    (incl. the owner's ``hmk_``) can release them. Server endpoints
+    catch this and translate to HTTP 403.
+    """
+
+    def __init__(self, agent_id: str):
+        super().__init__(
+            f"agent {agent_id!r} is sealed (inspection_mode=sealed); "
+            "source bytes are not readable through this endpoint"
+        )
+        self.agent_id = agent_id
+
+
 class AgentStore:
     """CRUD for registered agent configurations and extracted source files.
 
@@ -78,8 +95,9 @@ class AgentStore:
         self.db.execute_commit(
             "INSERT INTO _hivemind_agents "
             "(agent_id, name, description, agent_type, image, entrypoint, "
-            "memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
+            "inspection_mode, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 config.agent_id,
                 config.name,
@@ -91,6 +109,7 @@ class AgentStore:
                 config.max_llm_calls,
                 config.max_tokens,
                 config.timeout_seconds,
+                getattr(config, "inspection_mode", "full") or "full",
                 time.time(),
             ],
         )
@@ -102,8 +121,9 @@ class AgentStore:
             """
             INSERT INTO _hivemind_agents
             (agent_id, name, description, agent_type, image, entrypoint,
-             memory_mb, max_llm_calls, max_tokens, timeout_seconds, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             memory_mb, max_llm_calls, max_tokens, timeout_seconds,
+             inspection_mode, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(agent_id) DO UPDATE SET
                 name=EXCLUDED.name,
                 description=EXCLUDED.description,
@@ -113,7 +133,8 @@ class AgentStore:
                 memory_mb=EXCLUDED.memory_mb,
                 max_llm_calls=EXCLUDED.max_llm_calls,
                 max_tokens=EXCLUDED.max_tokens,
-                timeout_seconds=EXCLUDED.timeout_seconds
+                timeout_seconds=EXCLUDED.timeout_seconds,
+                inspection_mode=EXCLUDED.inspection_mode
             """,
             [
                 config.agent_id,
@@ -126,6 +147,7 @@ class AgentStore:
                 config.max_llm_calls,
                 config.max_tokens,
                 config.timeout_seconds,
+                getattr(config, "inspection_mode", "full") or "full",
                 time.time(),
             ],
         )
@@ -143,13 +165,15 @@ class AgentStore:
             max_llm_calls=r["max_llm_calls"],
             max_tokens=r["max_tokens"],
             timeout_seconds=r["timeout_seconds"],
+            inspection_mode=r.get("inspection_mode") or "full",
         )
 
     def get(self, agent_id: str) -> AgentConfig | None:
         """Look up an agent by ID."""
         rows = self.db.execute(
             "SELECT agent_id, name, description, agent_type, image, entrypoint, "
-            "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+            "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
+            "inspection_mode "
             "FROM _hivemind_agents WHERE agent_id = %s",
             [agent_id],
         )
@@ -162,28 +186,55 @@ class AgentStore:
         if agent_type:
             rows = self.db.execute(
                 "SELECT agent_id, name, description, agent_type, image, entrypoint, "
-                "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+                "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
+                "inspection_mode "
                 "FROM _hivemind_agents WHERE agent_type = %s ORDER BY created_at DESC",
                 [agent_type],
             )
         else:
             rows = self.db.execute(
                 "SELECT agent_id, name, description, agent_type, image, entrypoint, "
-                "memory_mb, max_llm_calls, max_tokens, timeout_seconds "
+                "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
+                "inspection_mode "
                 "FROM _hivemind_agents ORDER BY created_at DESC"
             )
         return [self._row_to_config(r) for r in rows]
+
+    def _agent_inspection_mode(self, agent_id: str) -> str:
+        """Look up a single agent's inspection_mode. Returns 'full' if
+        the agent isn't registered yet (e.g. files saved before the
+        record exists)."""
+        rows = self.db.execute(
+            "SELECT inspection_mode FROM _hivemind_agents "
+            "WHERE agent_id = %s",
+            [agent_id],
+        )
+        if not rows:
+            return "full"
+        return (rows[0].get("inspection_mode") or "full").strip() or "full"
 
     def save_files(
         self,
         agent_id: str,
         files: dict[str, str],
         private_paths: list[str] | None = None,
+        inspection_mode: str | None = None,
     ) -> int:
         """Store extracted source files for an agent. Returns file count.
 
-        Encrypts content under the tenant DEK when a sealer is bound;
-        otherwise stores plaintext (legacy / test path).
+        Encryption routing:
+          • ``inspection_mode='sealed'``  → ChaCha20 under the
+            enclave-only KMS key (``agent_seal.encrypt_b64``). Bytes are
+            unreadable to A's tenant role and to A's ``hmk_`` token —
+            only the running CVM can decrypt. The files HTTP endpoint
+            refuses to serve them.
+          • ``inspection_mode='full'`` (default) → encrypt under the
+            tenant DEK if a sealer is bound, else store plaintext.
+            Owner endpoint can decrypt, matching legacy behaviour.
+
+        ``inspection_mode=None`` falls back to the agent record's stored
+        mode (so the upload-endpoint → save_files chain doesn't have
+        to re-thread it on rebuilds).
 
         ``private_paths`` marks specific files non-attestable: their
         contents are excluded from ``attested_files_digest`` (the digest
@@ -191,7 +242,33 @@ class AgentStore:
         by ``image_digest`` because the Docker image was built with them.
         Defaults to all files attestable (backwards-compatible).
         """
+        mode = (inspection_mode or self._agent_inspection_mode(agent_id)
+                or "full").strip() or "full"
         private = set(private_paths or [])
+        if mode == "sealed":
+            from .. import agent_seal as _aseal
+
+            if not _aseal.is_available():
+                raise RuntimeError(
+                    "sealed-mode agent requested but agent_seal key is "
+                    "not available — run inside a TEE with KMS access"
+                )
+            for path, content in files.items():
+                size = len(content.encode())
+                attestable = path not in private
+                ct = _aseal.encrypt_b64(agent_id, path, content)
+                self.db.execute_commit(
+                    "INSERT INTO _hivemind_agent_files "
+                    "(agent_id, file_path, content, ciphertext, "
+                    "size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, %s) "
+                    "ON CONFLICT (agent_id, file_path) DO UPDATE SET "
+                    "content=NULL, ciphertext=EXCLUDED.ciphertext, "
+                    "size_bytes=EXCLUDED.size_bytes, "
+                    "attestable=EXCLUDED.attestable",
+                    [agent_id, path, ct, size, attestable],
+                )
+            return len(files)
         encrypt = self._seal_active()
         for path, content in files.items():
             size = len(content.encode())
@@ -228,13 +305,36 @@ class AgentStore:
         agent_id: str,
         files: dict[str, str],
         private_paths: list[str] | None = None,
+        inspection_mode: str | None = None,
     ) -> int:
         """Replace all extracted files for an agent."""
+        mode = (inspection_mode or self._agent_inspection_mode(agent_id)
+                or "full").strip() or "full"
         private = set(private_paths or [])
         self.db.execute_commit(
             "DELETE FROM _hivemind_agent_files WHERE agent_id = %s",
             [agent_id],
         )
+        if mode == "sealed":
+            from .. import agent_seal as _aseal
+
+            if not _aseal.is_available():
+                raise RuntimeError(
+                    "sealed-mode agent requested but agent_seal key is "
+                    "not available — run inside a TEE with KMS access"
+                )
+            for path, content in files.items():
+                size = len(content.encode())
+                attestable = path not in private
+                ct = _aseal.encrypt_b64(agent_id, path, content)
+                self.db.execute_commit(
+                    "INSERT INTO _hivemind_agent_files "
+                    "(agent_id, file_path, content, ciphertext, "
+                    "size_bytes, attestable) "
+                    "VALUES (%s, %s, NULL, %s, %s, %s)",
+                    [agent_id, path, ct, size, attestable],
+                )
+            return len(files)
         encrypt = self._seal_active()
         for path, content in files.items():
             size = len(content.encode())
@@ -292,7 +392,10 @@ class AgentStore:
         """
         import hashlib as _h
 
-        files = self.get_files(agent_id)
+        # Internal: digests run inside the enclave; sealed agents are
+        # legitimately decrypted here so B can verify
+        # ``attested_files_digest`` matches what they uploaded.
+        files = self.get_files(agent_id, allow_sealed=True)
         attestable_set = {
             r["file_path"]
             for r in self.db.execute(
@@ -320,10 +423,35 @@ class AgentStore:
             "attested_files_count": att_count,
         }
 
-    def read_file(self, agent_id: str, file_path: str) -> str | None:
+    def _decrypt_row(self, agent_id: str, file_path: str, ct_b64: str) -> str:
+        """Decrypt a ciphertext row regardless of which key wraps it.
+
+        Sealed agents use ``agent_seal`` (enclave-only KMS key); legacy
+        rows use the tenant DEK. Try sealed first when the agent is
+        registered as sealed; fall back to tenant DEK otherwise.
+        """
+        mode = self._agent_inspection_mode(agent_id)
+        if mode == "sealed":
+            from .. import agent_seal as _aseal
+            return _aseal.decrypt_b64(agent_id, file_path, ct_b64)
+        return self._decode_ct(ct_b64, agent_id, file_path)
+
+    def read_file(
+        self,
+        agent_id: str,
+        file_path: str,
+        *,
+        allow_sealed: bool = False,
+    ) -> str | None:
         """Read a single extracted file's content. Returns None if not found.
 
-        Decrypts ciphertext rows on the fly using the tenant DEK.
+        ``allow_sealed=False`` (default) → if the agent is sealed-mode,
+        raise :class:`AgentSealedReadError`. The HTTP files endpoint
+        leaves the default to refuse plaintext returns to anyone, even
+        the room owner.
+
+        ``allow_sealed=True`` is for internal rebuild/digest paths
+        running inside the enclave that legitimately need plaintext.
         """
         rows = self.db.execute(
             "SELECT content, ciphertext FROM _hivemind_agent_files "
@@ -332,26 +460,36 @@ class AgentStore:
         )
         if not rows:
             return None
+        if not allow_sealed and self._agent_inspection_mode(agent_id) == "sealed":
+            raise AgentSealedReadError(agent_id)
         r = rows[0]
         if r.get("ciphertext"):
-            return self._decode_ct(r["ciphertext"], agent_id, file_path)
+            return self._decrypt_row(agent_id, file_path, r["ciphertext"])
         return r["content"]
 
-    def get_files(self, agent_id: str) -> dict[str, str]:
+    def get_files(
+        self, agent_id: str, *, allow_sealed: bool = False,
+    ) -> dict[str, str]:
         """Get all extracted files for an agent as {path: content}.
 
-        Decrypts ciphertext rows on the fly using the tenant DEK.
+        ``allow_sealed`` mirrors :meth:`read_file`: callers outside the
+        enclave's internal rebuild path get a sealed-error rather than
+        decrypted bytes.
         """
         rows = self.db.execute(
             "SELECT file_path, content, ciphertext FROM _hivemind_agent_files "
             "WHERE agent_id = %s ORDER BY file_path",
             [agent_id],
         )
+        if not rows:
+            return {}
+        if not allow_sealed and self._agent_inspection_mode(agent_id) == "sealed":
+            raise AgentSealedReadError(agent_id)
         out: dict[str, str] = {}
         for r in rows:
             if r.get("ciphertext"):
-                out[r["file_path"]] = self._decode_ct(
-                    r["ciphertext"], agent_id, r["file_path"],
+                out[r["file_path"]] = self._decrypt_row(
+                    agent_id, r["file_path"], r["ciphertext"],
                 )
             else:
                 out[r["file_path"]] = r["content"] or ""

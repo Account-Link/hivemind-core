@@ -184,6 +184,50 @@ def _safe_extract_tar(
             os.chmod(target, file_mode or 0o644)
 
 
+def _validate_inspection_mode(mode: str) -> str:
+    """Coerce/validate an upload-side ``inspection_mode`` form field.
+
+    Returns the normalized mode (``"full"`` or ``"sealed"``). Raises
+    HTTPException(400) when unsupported, or HTTPException(400) when the
+    requested mode isn't in the room's ``accepted_inspection_modes``
+    policy. Sealed mode additionally requires the enclave-only KMS key
+    to be available; missing key → HTTPException(503).
+    """
+    from . import agent_seal as _aseal
+    from . import attestation as _att
+
+    m = (mode or "full").strip().lower() or "full"
+    if m not in {"full", "sealed"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"inspection_mode must be one of 'full', 'sealed' "
+                f"(got {mode!r})"
+            ),
+        )
+    accepted = _att._accepted_inspection_modes()
+    if m not in accepted:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"inspection_mode={m!r} is not accepted by this room "
+                f"(accepted: {sorted(accepted)}). The room owner sets "
+                f"this policy via HIVEMIND_ACCEPTED_INSPECTION_MODES."
+            ),
+        )
+    if m == "sealed" and not _aseal.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "sealed inspection_mode requires a live dstack-KMS "
+                "connection; the agent_seal key is not currently "
+                "available. Retry once attestation is healthy or fall "
+                "back to 'full'."
+            ),
+        )
+    return m
+
+
 def _read_extracted_files(tmpdir: str) -> dict[str, str]:
     """Read all extracted source files from a directory as {path: content}."""
     files: dict[str, str] = {}
@@ -1096,11 +1140,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         file_path: str,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
+        from .sandbox.agents import AgentSealedReadError
+
         if not _query_token_visible_agent(caller, agent_id):
             raise HTTPException(404, "Agent not found")
-        content = await asyncio.to_thread(
-            caller.hive.agent_store.read_file, agent_id, file_path
-        )
+        try:
+            content = await asyncio.to_thread(
+                caller.hive.agent_store.read_file, agent_id, file_path
+            )
+        except AgentSealedReadError:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "agent is sealed (inspection_mode=sealed); source "
+                    "files are encrypted under the enclave-only KMS key "
+                    "and cannot be read through this endpoint by anyone, "
+                    "including the room owner. Image digest, attested "
+                    "files digest, and file path list remain inspectable."
+                ),
+            )
         if content is None:
             raise HTTPException(404, "File not found")
         return Response(content=content, media_type="text/plain; charset=utf-8")
@@ -1144,6 +1202,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "agent_id": agent_id,
             "agent": agent.model_dump(),
+            "inspection_mode": getattr(agent, "inspection_mode", "full"),
             "files_count": digests["files_count"],
             "files_digest_sha256": digests["files_digest"],
             "attested_files_count": digests["attested_files_count"],
@@ -1206,6 +1265,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # secret prompts, .env). Excluded from attested_files_digest;
         # still bound by image_digest. Defaults to []  (all attestable).
         private_paths: str = Form("[]"),
+        # 'full' (legacy) or 'sealed'. Must be in this room's
+        # accepted_inspection_modes; sealed needs KMS available.
+        inspection_mode: str = Form("full"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
         try:
@@ -1219,6 +1281,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=400,
                 detail=f"private_paths: {e}",
             )
+        validated_mode = _validate_inspection_mode(inspection_mode)
         try:
             content = await _read_upload_bytes_limited(
                 archive,
@@ -1273,6 +1336,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     timeout_seconds,
                     hm,
                     private_paths=parsed_private,
+                    inspection_mode=validated_mode,
                 )
 
                 await asyncio.to_thread(
@@ -1310,6 +1374,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout_seconds: int,
         hm: Hivemind,
         private_paths: list[str] | None = None,
+        inspection_mode: str = "full",
     ) -> str:
         """Build Docker image, register agent, save files. Returns image tag."""
         image_tag = _tenant_image_tag(hm.tenant_id, agent_id)
@@ -1326,6 +1391,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_llm_calls=max_llm_calls,
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
+            inspection_mode=inspection_mode,
         )
         await asyncio.to_thread(hm.agent_store.create, config)
 
@@ -1341,6 +1407,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 agent_id,
                 files,
                 private_paths or [],
+                inspection_mode,
             )
         except Exception as e:
             logger.warning("Failed to save agent files for %s: %s", agent_id, e)
@@ -1378,11 +1445,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # falls back to the global default (openrouter).
         model: str | None = Form(None),
         provider: str | None = Form(None),
+        # Inspection-mode policy applies only to the query agent. The
+        # scope/index agents in this endpoint are A's own agents: their
+        # source is owner-readable by design (default 'full').
+        query_inspection_mode: str = Form("full"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
         """Upload query agent (required) + optional scope/index agents,
         build all, then run the full pipeline with tracking."""
         from .sandbox.backend import _create_runner
+
+        validated_query_mode = _validate_inspection_mode(query_inspection_mode)
 
         # Read archives
         try:
@@ -1483,6 +1556,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 model=model,
                 provider=provider,
                 tmpdirs=tmpdirs,
+                query_inspection_mode=validated_query_mode,
             )
         )
 
@@ -1492,6 +1566,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "scope_agent_id": scope_agent_id,
             "index_agent_id": index_agent_id,
             "status": "pending",
+            "query_inspection_mode": validated_query_mode,
         }
 
     async def _build_and_run_all(
@@ -1526,6 +1601,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model: str | None,
         provider: str | None,
         tmpdirs: list[str],
+        query_inspection_mode: str = "full",
     ) -> None:
         """Background: build all agent images in parallel, then run pipeline."""
         import time as _time
@@ -1550,6 +1626,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     runner, query_tmpdir, query_agent_id, "query",
                     query_name, query_description, query_entrypoint,
                     capped_mb, max_llm_calls, max_tokens, timeout_seconds, hm,
+                    inspection_mode=query_inspection_mode,
                 )
             )
             # Scope agent (optional)
@@ -1657,9 +1734,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # server to have HIVEMIND_TINFOIL_API_KEY configured.
         model: str | None = Form(None),
         provider: str | None = Form(None),
+        # Recipient-chosen inspection_mode for THIS uploaded query agent.
+        # Must be in the room's accepted_inspection_modes (visible via
+        # /v1/attestation). 'sealed' encrypts files under the
+        # enclave-only KMS key so even the room owner can't read source.
+        inspection_mode: str = Form("full"),
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Upload query agent source, create a run record, and kick off execution."""
+        validated_mode = _validate_inspection_mode(inspection_mode)
         # Query-token callers cannot pick their own scope agent — pin it
         # to the one the owner bound the token to.
         if caller.role == "query":
@@ -1718,6 +1801,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 mediator_agent_id=mediator_agent_id,
                 model=model,
                 provider=provider,
+                inspection_mode=validated_mode,
             )
         )
 
@@ -1725,6 +1809,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "run_id": run_id,
             "agent_id": agent_id,
             "status": "pending",
+            "inspection_mode": validated_mode,
         }
 
     async def _build_and_run(
@@ -1745,6 +1830,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mediator_agent_id: str | None,
         model: str | None = None,
         provider: str | None = None,
+        inspection_mode: str = "full",
     ) -> None:
         """Background task: build image, register agent, run pipeline."""
         from .sandbox.backend import _create_runner
@@ -1801,13 +1887,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_llm_calls=max_llm_calls,
                 max_tokens=max_tokens,
                 timeout_seconds=timeout_seconds,
+                inspection_mode=inspection_mode,
             )
             await asyncio.to_thread(hm.agent_store.create, config)
 
             if captured_files:
                 try:
                     await asyncio.to_thread(
-                        hm.agent_store.save_files, agent_id, captured_files,
+                        hm.agent_store.save_files,
+                        agent_id,
+                        captured_files,
+                        None,
+                        inspection_mode,
                     )
                 except Exception as e:
                     logger.warning(
