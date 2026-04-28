@@ -283,8 +283,9 @@ def agents_upload(
 # stable sha256 over source files, resolved Docker image digest, live
 # CVM attestation bundle. Owner passes ``AGENT_ID``; ``hmq_`` token
 # holders omit it — the server resolves the bound scope_agent_id from
-# the token (via the /v1/scope-attest alias), so a recipient can audit
-# the policy they're about to query without needing to know its id.
+# the token (via /v1/scope-attest, which wraps the agent-attest helper),
+# so a recipient can audit the policy they're about to query without
+# needing to know its id.
 
 
 @agents_cli.command("attest")

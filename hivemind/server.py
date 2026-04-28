@@ -942,9 +942,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         """Submit a query for tracked async processing.
 
-        Identical contract to the legacy ``/v1/query/submit`` (returns a
-        ``run_id``) but routes through ``run_query_agent_tracked`` so the
-        completed run row carries a signed attestation envelope.
+        Returns a ``run_id``; the run executes via
+        ``run_query_agent_tracked`` so the completed row carries a
+        signed attestation envelope.
         """
         req = _force_scope_for_query_token(req, caller)
         hm = caller.hive
@@ -1211,11 +1211,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Agent not found")
         return await _build_agent_attestation(caller, agent_id)
 
-    # /v1/scope-attest — backwards-compatible alias designed for the
-    # query-token recipient flow. Resolves the agent_id from the token
-    # binding (query) or the ?scope_agent_id= query param (owner) and
-    # delegates to the canonical helper. Adds ``scope_agent_id`` at the
-    # top of the response for clients that key off that field.
+    # /v1/scope-attest — thin wrapper around the agent-attest helper for
+    # the query-token recipient flow. Resolves the agent_id from the
+    # token binding (query) or the ?scope_agent_id= query param (owner)
+    # and delegates to the canonical helper. Adds ``scope_agent_id`` at
+    # the top of the response for clients that key off that field.
     @app.get("/v1/scope-attest")
     async def scope_attest(
         scope_agent_id: str | None = None,

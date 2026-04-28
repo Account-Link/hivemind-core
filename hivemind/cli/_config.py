@@ -19,10 +19,6 @@ from ._http import _warm_pin_from_trust
 
 _DEFAULT_PROFILE = "default"
 
-# Legacy CWD-scoped config we auto-migrate from (one-shot).
-_LEGACY_CONFIG_DIR = ".hivemind"
-_LEGACY_CONFIG_FILE = "config.yaml"
-
 
 def _profile_name() -> str:
     """Active profile name. Resolution order:
@@ -30,7 +26,7 @@ def _profile_name() -> str:
     1. ``HIVEMIND_PROFILE`` env var (set by ``--profile NAME``)
     2. The persistent pointer file at ``~/.hivemind/active``
        (written by ``hivemind profile use NAME``)
-    3. ``"default"`` — the legacy fallback
+    3. ``"default"``
     """
     from . import _ACTIVE_POINTER  # parent-owned for test patching
 
@@ -75,33 +71,11 @@ def _config_path(profile: str | None = None) -> Path:
     return _PROFILES_DIR / f"{name}.yaml"
 
 
-def _legacy_config_path() -> Path:
-    return Path(_LEGACY_CONFIG_DIR) / _LEGACY_CONFIG_FILE
-
-
-def _maybe_migrate_legacy(target: Path) -> bool:
-    """One-shot migration from `./.hivemind/config.yaml` → global default profile."""
-    legacy = _legacy_config_path()
-    if not legacy.exists() or target.exists():
-        return False
-    if _profile_name() != _DEFAULT_PROFILE:
-        return False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(legacy.read_bytes())
-    click.echo(
-        f"Migrated legacy {legacy} → {target} (default profile). "
-        f"You can delete {_LEGACY_CONFIG_DIR}/ when ready.",
-        err=True,
-    )
-    return True
-
-
 def _load_config(*, check_trust: bool = True) -> dict:
     """Load the active profile's config or exit with error."""
     from . import _PROFILES_DIR
 
     p = _config_path()
-    _maybe_migrate_legacy(p)
     if not p.exists():
         profile = _profile_name()
         existing = (

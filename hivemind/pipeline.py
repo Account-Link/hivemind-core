@@ -91,9 +91,6 @@ class Pipeline:
                 timeout=timeout,
                 max_retries=0,
             )
-        # Backwards-compat alias; existing call sites that read
-        # ``self.llm_client`` keep working with the default provider.
-        self.llm_client = self.llm_clients["openrouter"]
         self.llm_model = settings.llm_model
         self._role_models = {
             "scope": (settings.scope_model or settings.llm_model),

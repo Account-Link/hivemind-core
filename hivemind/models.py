@@ -19,7 +19,6 @@ class StoreResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
-    prompt: str | None = None  # deprecated alias for query
     query_agent_id: str | None = None
     scope_agent_id: str | None = None
     mediator_agent_id: str | None = None
@@ -42,31 +41,10 @@ class QueryRequest(BaseModel):
     # generic row-transformation defaults.
     policy: str | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_query(cls, data):
-        if not isinstance(data, dict):
-            return data
-
-        query = data.get("query")
-        prompt = data.get("prompt")
-        query_text = query.strip() if isinstance(query, str) else ""
-        prompt_text = prompt.strip() if isinstance(prompt, str) else ""
-
-        if query_text:
-            return data
-        if prompt_text:
-            payload = dict(data)
-            payload["query"] = prompt_text
-            return payload
-        if query is None:
-            raise ValueError("'query' (or 'prompt') is required")
-        return data
-
     @model_validator(mode="after")
     def _validate_query(self):
         if not self.query.strip():
-            raise ValueError("'query' (or 'prompt') is required")
+            raise ValueError("'query' is required")
         return self
 
 

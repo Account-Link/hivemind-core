@@ -77,14 +77,14 @@ class TestRunQuery:
     @pytest.mark.asyncio
     async def test_query_requires_agent(self, pg_db):
         pipeline = _make_pipeline(pg_db)
-        req = QueryRequest(prompt="What happened?")
+        req = QueryRequest(query="What happened?")
         with pytest.raises(ValueError, match="No query agent"):
             await pipeline.run_query(req)
 
     @pytest.mark.asyncio
     async def test_query_agent_not_found(self, pg_db):
         pipeline = _make_pipeline(pg_db)
-        req = QueryRequest(prompt="What?", query_agent_id="nonexistent")
+        req = QueryRequest(query="What?", query_agent_id="nonexistent")
         with pytest.raises(ValueError, match="not found"):
             await pipeline.run_query(req)
 
@@ -186,7 +186,7 @@ class TestRunQuery:
             return_value=("output", {"total_tokens": 0})
         )
 
-        req = QueryRequest(prompt="What?", query_agent_id="q1")
+        req = QueryRequest(query="What?", query_agent_id="q1")
         await pipeline.run_query(req)
 
         pipeline._run_scope_agent.assert_awaited_once()
@@ -279,16 +279,8 @@ class TestQueryRequestModel:
         req = QueryRequest(query="What happened?")
         assert req.query == "What happened?"
 
-    def test_prompt_backward_compat(self):
-        req = QueryRequest(prompt="What happened?")
-        assert req.query == "What happened?"
-
-    def test_query_wins_over_prompt(self):
-        req = QueryRequest(query="canonical", prompt="deprecated")
-        assert req.query == "canonical"
-
-    def test_neither_query_nor_prompt_raises(self):
-        with pytest.raises(ValueError, match="'query'.*required"):
+    def test_missing_query_raises(self):
+        with pytest.raises(ValueError, match="query"):
             QueryRequest()
 
     def test_max_tokens(self):
@@ -304,7 +296,7 @@ class TestQueryRequestModel:
             QueryRequest(query="test", max_tokens=0)
 
     def test_mediator_agent_id(self):
-        req = QueryRequest(prompt="test", mediator_agent_id="med1")
+        req = QueryRequest(query="test", mediator_agent_id="med1")
         assert req.mediator_agent_id == "med1"
 
 

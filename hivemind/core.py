@@ -211,10 +211,11 @@ class Hivemind:
         await self.stop_retention_sweeper()
         try:
             if self.pipeline is not None:
-                llm_close = getattr(self.pipeline.llm_client, "close", None)
-                if callable(llm_close):
-                    result = llm_close()
-                    if isawaitable(result):
-                        await result
+                for client in self.pipeline.llm_clients.values():
+                    llm_close = getattr(client, "close", None)
+                    if callable(llm_close):
+                        result = llm_close()
+                        if isawaitable(result):
+                            await result
         finally:
             self.db.close()

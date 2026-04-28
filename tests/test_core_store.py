@@ -168,12 +168,13 @@ async def test_hivemind_close_closes_llm_client_and_db():
 
     original_db_close = hm.db.close
     hm.db.close = MagicMock()
-    hm.pipeline.llm_client = AsyncMock()
+    mock_client = AsyncMock()
+    hm.pipeline.llm_clients = {"openrouter": mock_client}
 
     try:
         await hm.close()
     finally:
         original_db_close()
 
-    hm.pipeline.llm_client.close.assert_awaited_once()
+    mock_client.close.assert_awaited_once()
     hm.db.close.assert_called_once()

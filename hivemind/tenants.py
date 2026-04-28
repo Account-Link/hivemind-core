@@ -242,19 +242,6 @@ class TenantRegistry:
             )
             """
         )
-        # Drop the legacy CHECK constraint that allowed kind='write'.
-        # Best-effort: if it's already gone (pre-migration DBs) skip.
-        for legacy_check in (
-            "_capability_tokens_kind_check",
-            "_capability_tokens_kind_check1",
-        ):
-            try:
-                self._control_db.execute_commit(
-                    f"ALTER TABLE _capability_tokens "
-                    f"DROP CONSTRAINT IF EXISTS {legacy_check}"
-                )
-            except Exception:
-                pass
         self._control_db.execute_commit(
             "CREATE INDEX IF NOT EXISTS _capability_tokens_tenant_idx "
             "ON _capability_tokens (tenant_id)"

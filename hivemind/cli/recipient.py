@@ -521,34 +521,49 @@ def ask(
             )
             raise SystemExit(4)
 
+    # Surface the bound scope agent's inspection_mode before any prompt
+    # leaves the box, regardless of whether B is uploading their own
+    # query agent or using the owner's qa= template. ``sealed`` means
+    # scope/qa source is encrypted under an enclave-only KMS key (owner
+    # can't read it back); ``full`` means owner can fetch the source via
+    # /v1/agents/{id}/files. Either way image_digest + attested files
+    # still bind the workload.
+    if not as_json:
+        room_mode = _fetch_scope_inspection_mode(
+            service=service, headers=headers,
+        )
+        uploading = query_agent_path is not None
+        if room_mode == "sealed":
+            extra = (
+                " Your uploaded agent's source will be sealed too."
+                if uploading else ""
+            )
+            click.echo(
+                "Room mode: sealed — bound agents' source is encrypted "
+                "under an enclave-only KMS key. Even the room owner "
+                "cannot read it; only the running CVM can decrypt." + extra
+            )
+        else:
+            extra = (
+                " Your uploaded agent's source will be owner-readable too."
+                if uploading else ""
+            )
+            click.echo(
+                "Room mode: full — the room owner CAN fetch the bound "
+                "agents' source via /v1/agents/{id}/files." + extra +
+                " If that's not OK, abort (Ctrl-C) and ask A to "
+                "re-upload the scope agent in sealed mode."
+            )
+
     if query_agent_path is not None:
-        # Phase 4: B-uploadable query agent. All trust pins above
-        # (compose / files / pin envelope) have already been verified
-        # against the URI; routing here just swaps the prompts-only
+        # B-uploadable query agent. All trust pins above (compose /
+        # files / pin envelope) have already been verified against the
+        # URI; routing here just swaps the prompts-only
         # /v1/query/run/submit path for an upload+run cycle. The server
         # gates this on the token's can_upload_query_agent constraint.
         archive_bytes, archive_name, agent_name = _archive_for_path(
             query_agent_path, None
         )
-        room_mode = _fetch_scope_inspection_mode(
-            service=service, headers=headers,
-        )
-        if not as_json:
-            if room_mode == "sealed":
-                click.echo(
-                    "Room mode: sealed — your uploaded agent's source "
-                    "will be encrypted under an enclave-only KMS key. "
-                    "Even the room owner cannot read it; only the "
-                    "running CVM can decrypt. Image digest + attested "
-                    "file list still bind the workload."
-                )
-            else:
-                click.echo(
-                    "Room mode: full — the room owner CAN fetch your "
-                    "uploaded agent's source via /v1/agents/{id}/files. "
-                    "If that's not OK, abort (Ctrl-C) and ask A to "
-                    "re-upload the scope agent in sealed mode."
-                )
         # Phase 5: pull the live run-signer pubkey + compose_hash from
         # /v1/attestation so we can verify the signed run record against
         # the same enclave the URI authorised. Strict-by-default; the

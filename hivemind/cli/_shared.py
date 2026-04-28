@@ -132,14 +132,13 @@ def _query_tracked(
 ) -> None:
     """Submit a query, poll the run row, verify the Phase 5 envelope.
 
-    POSTs to ``/v1/query/run/submit`` (the only async query path — the
-    legacy in-memory ``/v1/query/submit`` was removed because it never
-    produced a signed envelope and so silently bypassed strict-default
-    attestation). Polls ``/v1/agent-runs/{run_id}`` until the row
-    reaches ``completed`` or ``failed``, then hands off to
-    ``_emit_run_result`` which Ed25519-verifies the signed body and
-    pubkey-matches it against ``expected_pubkey_b64`` (sourced from
-    ``/v1/attestation`` on the recipient side).
+    POSTs to ``/v1/query/run/submit`` (the only async query path — every
+    query produces a signed envelope so strict-default attestation
+    holds). Polls ``/v1/agent-runs/{run_id}`` until the row reaches
+    ``completed`` or ``failed``, then hands off to ``_emit_run_result``
+    which Ed25519-verifies the signed body and pubkey-matches it
+    against ``expected_pubkey_b64`` (sourced from ``/v1/attestation``
+    on the recipient side).
     """
     try:
         resp = _hpost(
