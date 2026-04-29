@@ -137,9 +137,23 @@ def build_sql_tools(
     is executed via ``apply_scope_fn`` in a child process with the
     ``SCOPE_FN_TIMEOUT`` hard kill. Without the source, we fall back to an
     in-process invocation — used by tests that pass plain Python functions.
+
+    Defense-in-depth: ``access == SCOPED`` with ``scope_fn=None`` is rejected
+    here. Earlier this was tolerated and the per-query gate silently became
+    a passthrough (rows returned unfiltered). The pipeline now fails-closed
+    upstream when the scope agent doesn't produce a usable scope_fn (see
+    ``Pipeline.run_query_agent_tracked``), but we still refuse here so that
+    no future caller can wire SCOPED tools without a scope_fn and get
+    surprising unscoped behavior.
     """
     if access == AccessLevel.NONE:
         return []
+    if access == AccessLevel.SCOPED and scope_fn is None:
+        raise ValueError(
+            "build_sql_tools(SCOPED, scope_fn=None) is unsafe: SCOPED tools "
+            "require a scope_fn so every query's rows pass through a filter. "
+            "Pass a scope_fn or use AccessLevel.FULL_READ."
+        )
 
     def _serialize_rows(rows: list[dict]) -> str:
         out = json.dumps(rows, default=str)
@@ -194,8 +208,9 @@ def build_sql_tools(
         # source we route through apply_scope_fn for subprocess isolation +
         # hard timeout — otherwise an LLM-supplied infinite loop or memory
         # bomb would hang the bridge thread. Without a source (test path)
-        # we call directly; the caller's fn is trusted Python.
-        if access == AccessLevel.SCOPED and scope_fn is not None:
+        # we call directly; the caller's fn is trusted Python. ``scope_fn``
+        # is non-None here: build_sql_tools enforces that for SCOPED.
+        if access == AccessLevel.SCOPED:
             from .scope import apply_scope_fn
 
             try:

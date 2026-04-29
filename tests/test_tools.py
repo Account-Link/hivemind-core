@@ -115,6 +115,40 @@ class TestIsSelectOnly:
         assert _is_select_only("INSERT INTO t (x) VALUES (%s)") is False
 
 
+class TestScopedRequiresScopeFn:
+    """M2 contract: SCOPED tools must refuse construction without a scope_fn.
+    The earlier behavior (silent passthrough when scope_fn is None) was a
+    privacy footgun; pipeline.py also fails-closed at the orchestration layer
+    (see C1) but the tool builder is the second line of defense."""
+
+    def test_scoped_with_no_scope_fn_raises(self):
+        # FakeDB sufficient — error must surface before any DB interaction.
+        class FakeDB:
+            def execute(self, sql, params=None): return []
+            def execute_commit(self, sql, params=None): return 0
+
+        with pytest.raises(ValueError, match="SCOPED"):
+            build_sql_tools(FakeDB(), AccessLevel.SCOPED, scope_fn=None)
+
+    def test_scoped_with_scope_fn_constructs(self):
+        class FakeDB:
+            def execute(self, sql, params=None): return []
+            def execute_commit(self, sql, params=None): return 0
+
+        fn = lambda sql, params, rows: {"allow": True, "rows": rows}
+        tools = build_sql_tools(FakeDB(), AccessLevel.SCOPED, scope_fn=fn)
+        assert {t.name for t in tools} == {"execute_sql", "get_schema"}
+
+    def test_full_read_with_no_scope_fn_constructs(self):
+        # FULL_READ never invokes scope_fn; missing one is fine.
+        class FakeDB:
+            def execute(self, sql, params=None): return []
+            def execute_commit(self, sql, params=None): return 0
+
+        tools = build_sql_tools(FakeDB(), AccessLevel.FULL_READ, scope_fn=None)
+        assert len(tools) == 2
+
+
 # ── _references_internal_tables ──
 
 

@@ -873,16 +873,23 @@ class Pipeline:
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
-                except ValueError as e:
-                    logger.warning(
-                        "Scope agent '%s' failed for tracked run %s; "
-                        "continuing without scope: %s",
-                        resolved_scope_id, run_id, e,
-                    )
                 finally:
                     await asyncio.to_thread(
                         run_store.update_stage, run_id, "scope",
                         ended_at=time.time(),
+                    )
+                # Fail-closed: if the operator configured a scope agent for
+                # this run, refuse to fall through to SCOPED tools with
+                # scope_fn=None — that path passes rows back unfiltered
+                # (build_sql_tools.execute_sql gates filtering on
+                # ``scope_fn is not None``). A flaky scope LLM, exhausted
+                # budget, or malformed scope_fn output must surface as a
+                # failed run rather than a silent privacy regression.
+                if scope_fn is None:
+                    raise ValueError(
+                        f"Scope agent '{resolved_scope_id}' did not produce "
+                        f"a usable scope_fn; refusing to run query agent "
+                        f"with unscoped tool access (fail-closed)."
                     )
 
             # -- Stage 1: Query agent --

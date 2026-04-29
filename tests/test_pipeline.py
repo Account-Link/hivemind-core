@@ -512,6 +512,102 @@ class TestProviderRouting:
         assert "tinfoil.sh" in str(tinfoil_client.base_url)
 
 
+class TestTrackedRunFailsClosedOnScopeError:
+    """C1 regression: when a scope agent is configured for a tracked run,
+    a scope failure must mark the run failed — not silently fall through to
+    SCOPED tools with scope_fn=None (which passes rows through unfiltered).
+    """
+
+    @pytest.mark.asyncio
+    async def test_scope_agent_failure_fails_the_run(self, monkeypatch):
+        """Scope agent raising ValueError must surface as run status=failed,
+        and the query agent must never be invoked (no LLM spend, no SQL)."""
+        from hivemind.sandbox.agents import AgentStore
+        from hivemind.config import Settings
+
+        settings = Settings(database_url="unused", llm_api_key="test")
+        # Stand up a Pipeline without touching Postgres.
+        pipeline = Pipeline(settings, MagicMock(spec=Database), MagicMock(spec=AgentStore))
+
+        pipeline._run_scope_agent = AsyncMock(
+            side_effect=ValueError("scope agent produced unparseable output"),
+        )
+        # If C1 regresses, this gets awaited — assert below that it never is.
+        pipeline._run_query_agent = AsyncMock(
+            return_value=("output", {"total_tokens": 0}),
+        )
+        pipeline._build_run_attestation = MagicMock(return_value=None)
+
+        captured: dict = {}
+
+        class FakeRunStore:
+            def update_status(self, run_id, status, **kwargs):
+                captured.setdefault("statuses", []).append(status)
+                captured["last_kwargs"] = kwargs
+
+            def update_stage(self, *args, **kwargs):
+                pass
+
+        await pipeline.run_query_agent_tracked(
+            agent_id="q1",
+            run_id="run-c1",
+            run_store=FakeRunStore(),
+            prompt="anything",
+            scope_agent_id="scope-broken",
+        )
+
+        # Run must end in failed (not completed). The query agent must never
+        # have been called — the whole point of fail-closed is that the
+        # downstream stage doesn't run with unscoped tools.
+        assert captured["statuses"][-1] == "failed"
+        pipeline._run_query_agent.assert_not_awaited()
+        # Error message must mention scope so operators can diagnose.
+        assert "scope" in (captured["last_kwargs"].get("error") or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_default_scope_agent_failure_fails_the_run(self, monkeypatch):
+        """Same fail-closed semantics when scope is the configured default,
+        not an explicit per-run override."""
+        from hivemind.sandbox.agents import AgentStore
+        from hivemind.config import Settings
+
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            default_scope_agent="scope-default",
+        )
+        pipeline = Pipeline(settings, MagicMock(spec=Database), MagicMock(spec=AgentStore))
+
+        pipeline._run_scope_agent = AsyncMock(
+            side_effect=ValueError("budget exhausted"),
+        )
+        pipeline._run_query_agent = AsyncMock(
+            return_value=("output", {"total_tokens": 0}),
+        )
+        pipeline._build_run_attestation = MagicMock(return_value=None)
+
+        captured: dict = {}
+
+        class FakeRunStore:
+            def update_status(self, run_id, status, **kwargs):
+                captured.setdefault("statuses", []).append(status)
+                captured["last_kwargs"] = kwargs
+
+            def update_stage(self, *args, **kwargs):
+                pass
+
+        await pipeline.run_query_agent_tracked(
+            agent_id="q1",
+            run_id="run-c1-default",
+            run_store=FakeRunStore(),
+            prompt="anything",
+            # No scope_agent_id — relies on default_scope_agent.
+        )
+
+        assert captured["statuses"][-1] == "failed"
+        pipeline._run_query_agent.assert_not_awaited()
+
+
 class TestQueryRequestProvider:
     def test_provider_field_default_none(self):
         req = QueryRequest(query="hi")
