@@ -1,21 +1,95 @@
 # hivemind-core
 
-Hivemind-core is a data-room primitive for mutually distrusting tenants and
-their agents.
+hivemind-core runs **attested recall agreements** between mutually
+distrusting parties. An owner defines the room rules and contributes private
+data plus a scope agent; a participant verifies those rules and the running
+enclave before asking through a fixed query agent or bringing their own. Only
+the room-approved output leaves the enclave.
 
-A room owner uploads private data and a scope agent. A participant inspects the
-signed room rules before entering, optionally uploads their own query agent, and
-gets only the room-approved output. The room manifest binds the scope agent,
-query-agent mode, code visibility, output visibility, LLM egress allowlist, and
-deployment trust policy.
+```text
+owner data + scope agent         participant question or query agent
+          \                     /
+           \                   /
+            signed room manifest
+                    |
+             dstack CVM attestation
+                    |
+        scope agent builds the data boundary
+                    |
+          query agent receives scoped tools
+                    |
+          signed, room-approved output
+```
 
-The service is designed for a dstack Confidential VM. Tenants verify the live
-CVM attestation before presenting data or agent code. Room data is encrypted
-under a per-room key wrapped to the owner key and invite token. Room-uploaded
-sealed query agents use that same room key, so after a restart or backend update
-private room material stays unreadable until a participant interacts again.
+A signed room is the runtime agreement. Its manifest binds:
+
+- the scope agent and whether its source is inspectable or sealed;
+- the query mode: fixed query agent or participant-uploaded query agent;
+- query-agent visibility: `inspectable` or `sealed`;
+- output visibility;
+- allowed LLM providers and artifact egress;
+- deployment trust policy.
+
+The service is designed for a dstack Confidential VM. Both parties verify the
+live CVM attestation before presenting data, invite tokens, or agent code.
+
+Important restart property: room data and room-uploaded sealed query agents
+are encrypted under a per-room key wrapped to the owner key and invite token.
+After a restart or backend update, private room material stays unreadable until
+an owner or participant presents a valid room credential again.
+
+## Threat Model
+
+- Protects against: the counterparty reading raw data or agent source beyond
+  the signed room policy; backend updates changing execution without observable
+  attestation; a restarted backend reading sealed room material before a valid
+  room credential is presented.
+- Does not protect against: a party's own agent or allowed output revealing
+  what that party is authorized to learn; bad room rules that the participant
+  accepts; bugs in the trusted computing base, TEE, cryptography, or agent
+  sandbox.
+- You trust: dstack/TDX attestation, the measured CVM image accepted by the
+  room trust policy, the owner signing key in the invite link, and the local
+  client verification path.
+
+## Why This Exists
+
+Clean rooms are usually data-first and administrator-driven. Agent frameworks
+usually assume one trust domain. hivemind-core is for the gap between them:
+two parties want an agent-mediated answer, neither party wants to reveal raw
+material to the other, and both need to verify the computation before any
+private input is read.
+
+The design follows the conditional-recall framing from
+[NDAI: Non-Disclosure Agreements for AI](https://arxiv.org/abs/2502.07924):
+let an AI system use private context for a bounded purpose, then constrain what
+can be recalled outside that purpose. See the
+[mental model](docs/conditional-recall.md) for the room data flow and the
+scope/query agent relationship.
+
+## What An Agent Is
+
+An agent upload is a local directory or `.tar.gz` archive with a `Dockerfile`
+and source files. The simplest shape is:
+
+```text
+agent-dir/
+|-- Dockerfile
+`-- agent.py
+```
+
+A scope agent defines the room's data boundary. A query agent performs the
+participant's task through scoped tools. Examples live in:
+
+- `agents/default-scope/`
+- `agents/default-query/`
+- `agents/examples/simple-query/`
+- `agents/examples/tiktok-analytics/`
 
 ## Install
+
+Requires Python 3.11+, `uv`, Docker for agent builds/runs, and Postgres for
+local development.
 
 ```bash
 uv tool install --editable .
@@ -38,75 +112,76 @@ hivemind init --service http://localhost:8100 --api-key hmk_...
 
 ## Owner Flow
 
-Create a room from a local scope-agent directory:
+Canonical flow: create a signed room, add private data, and share the invite.
 
 ```bash
 hivemind room create ./scope-agent \
   --rules-file rules.md \
   --scope-visibility inspectable
-```
 
-Create a fixed-query room:
-
-```bash
-hivemind room create ./scope-agent \
-  --query-agent ./query-agent \
-  --query-visibility sealed \
-  --rules-file rules.md
-```
-
-Create an uploadable room where the participant can bring their own sealed
-query agent:
-
-```bash
-hivemind room create ./scope-agent \
-  --query-visibility sealed \
-  --rules-file rules.md
-```
-
-Add private room data:
-
-```bash
 hivemind room add-data <room_id> --file dataset.md --meta source=dataset
 hivemind room data <room_id>
 ```
 
-The create command prints one `hmroom://...` invite link. That link contains the
-room id, invite token, service URL, and owner signing public key.
+The create command prints one `hmroom://...` invite link. That link contains
+the room id, invite token, service URL, and owner signing public key.
+
+Common room variants:
+
+```bash
+# Owner pre-loads the query logic; participant only supplies the question.
+hivemind room create ./scope-agent \
+  --query-agent ./query-agent \
+  --query-visibility sealed \
+  --rules-file rules.md
+
+# Participant can upload their own query agent for this room.
+hivemind room create ./scope-agent \
+  --query-visibility sealed \
+  --rules-file rules.md
+
+# No external LLM calls are allowed from room agents.
+hivemind room create ./scope-agent \
+  --rules-file rules.md \
+  --no-llm
+```
+
+Visibility modes:
+
+- `inspectable`: participants can read extracted source files and pin digests.
+- `sealed`: participants see metadata and digests, but source bytes are
+  encrypted and are not served through the files API.
 
 ## Participant Flow
 
-Inspect the room before entering:
+Canonical flow: inspect the agreement, ask the question, and verify the
+attested output.
 
 ```bash
 hivemind room inspect 'hmroom://...'
-```
-
-Ask with a fixed query agent:
-
-```bash
 hivemind room ask 'hmroom://...' "What changed this month?"
 ```
 
-Ask with a participant-uploaded query agent:
+Bring a query agent to an uploadable room:
 
 ```bash
-hivemind room ask 'hmroom://...' "What changed this month?" --agent ./my-query-agent
+hivemind room ask 'hmroom://...' "What changed this month?" \
+  --agent ./my-query-agent
 ```
 
-Every answer is checked against the accepted room manifest hash and the live CVM
-run signer. The default behavior is fail-closed when the run attestation is
+Every answer is checked against the accepted room manifest hash and the live
+CVM run signer. The default behavior is fail-closed when the run attestation is
 missing or does not match the room.
 
 ## Trust Policy
 
 Rooms have one deployment trust policy:
 
-- `operator_updates`: accept CVM deployments approved by the operator governance
-  path.
-- `pinned`: accept only the compose hashes listed in the room manifest.
-- `owner_approved`: accept the owner-maintained compose hash allowlist for this
-  room.
+- `operator_updates`: trust the operator's governance process to approve
+  enclave upgrades.
+- `pinned`: trust only the exact compose hashes accepted at room creation.
+- `owner_approved`: trust the room owner to maintain this room's compose-hash
+  allowlist.
 
 Update a room trust allowlist without changing the invite link:
 
@@ -115,23 +190,31 @@ hivemind room trust <room_id> --mode owner_approved --approve-live
 ```
 
 The global `--dangerously-skip-attestations` flag exists only for local
-development without a TEE. Production clients should inspect and verify the room.
+development without a TEE. Production clients should inspect and verify the
+room.
 
 ## Public API
 
 The public API is room-first:
 
 ```text
-POST /v1/rooms
-GET  /v1/rooms
-GET  /v1/rooms/{room_id}
-GET  /v1/rooms/{room_id}/attest
-POST /v1/rooms/{room_id}/open
+Room lifecycle
+POST   /v1/rooms
+GET    /v1/rooms
+GET    /v1/rooms/{room_id}
+GET    /v1/rooms/{room_id}/attest
+GET    /v1/rooms/{room_id}/key
+POST   /v1/rooms/{room_id}/open
+POST   /v1/rooms/{room_id}/trust
+DELETE /v1/rooms/{room_id}
+
+Room contents and execution
 POST /v1/rooms/{room_id}/data
 GET  /v1/rooms/{room_id}/data
 POST /v1/rooms/{room_id}/runs
 POST /v1/rooms/{room_id}/query-agents
 
+Agent inspection
 POST /v1/room-agents
 GET  /v1/room-agents
 GET  /v1/room-agents/{agent_id}
@@ -139,11 +222,12 @@ GET  /v1/room-agents/{agent_id}/attest
 GET  /v1/room-agents/{agent_id}/files
 GET  /v1/room-agents/{agent_id}/files/{path}
 
-GET  /v1/runs
-GET  /v1/runs/{run_id}
-GET  /v1/runs/{run_id}/artifacts/{filename}
-GET  /v1/attestation
+Observation
+GET /v1/runs
+GET /v1/runs/{run_id}
+GET /v1/runs/{run_id}/artifacts/{filename}
+GET /v1/attestation
 ```
 
-Lower-level SQL, token, and generic agent endpoints are internal implementation
-details. New clients should use the room API only.
+Lower-level SQL, token, and generic agent endpoints are internal
+implementation details. New clients should use the room API only.

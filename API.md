@@ -1,6 +1,7 @@
 # API
 
-The public API exposes one primitive: signed data rooms.
+The public API is centered on signed rooms: attested recall agreements between
+an owner and a participant.
 
 Use an owner key (`hmk_...`) to create rooms, upload room agents, add room data,
 and update room trust. Use an invite token from an `hmroom://` link to inspect,

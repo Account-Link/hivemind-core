@@ -1,4 +1,4 @@
-"""First-class data-room manifests and storage.
+"""First-class signed room manifests and storage.
 
 A room is the small, signed contract that binds the pieces a recipient
 needs to reason about before entering:

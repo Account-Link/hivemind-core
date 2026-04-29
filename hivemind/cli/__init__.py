@@ -9,7 +9,7 @@ subcommand group lives in its own sub-module under ``~1000`` lines:
 * ``_trust.py`` — remote attestation, DCAP, on-chain governance gate.
 * ``_shared.py`` — room run polling and attestation helpers.
 * ``owner.py`` — ``init`` and ``rotate-key``.
-* ``rooms.py`` — data-room creation, data loading, inspection, and asking.
+* ``rooms.py`` — signed-room creation, data loading, inspection, and asking.
 * ``profile.py`` — ``profile`` subcommand group.
 * ``admin.py`` — ``admin`` subcommand group.
 * ``trust_cmds.py`` — ``trust`` subcommand group.

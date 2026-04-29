@@ -270,7 +270,7 @@ def _upload_room_query_agent_and_poll(
 
 @click.group("room")
 def rooms_cli():
-    """Create and use signed data rooms."""
+    """Create and use signed rooms."""
 
 
 @rooms_cli.command("create")

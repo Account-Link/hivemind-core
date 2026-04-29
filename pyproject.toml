@@ -1,8 +1,12 @@
 [project]
 name = "hivemind-core"
 version = "0.3.0"
-description = "Signed data-room primitive for private data and mutually distrusting agents"
+description = "Attested recall agreements for mutually distrusting parties and their agents"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
 dependencies = [
     "openai>=1.0",
     "fastapi>=0.100",

@@ -438,7 +438,7 @@ def build_room_vault_tools(
         Tool(
             name="get_room_vault_items",
             description=(
-                "Read encrypted data-room items for this room. "
+                "Read encrypted room items for this room. "
                 "Scope agents see all rows. Query agents receive only rows "
                 "allowed by the room scope function. Returns JSON rows with "
                 "item_id, text, metadata, created_at, and size_bytes."

@@ -1,9 +1,9 @@
 # Architecture
 
-Hivemind-core is a multi-tenant data-room service designed to run inside a
-confidential VM (CVM). Its main job is to let a room owner expose private data
-to a participant-controlled query workflow without handing that participant raw
-database or room-vault access.
+Hivemind-core is a signed-room service for attested recall agreements inside a
+confidential VM (CVM). Its main job is to let an owner and participant run an
+agreed agent workflow over private inputs without handing either side more
+visibility than the signed room policy permits.
 
 The product abstraction is the signed room. The implementation is a FastAPI
 control plane, per-tenant Postgres data planes, encrypted room storage, and
