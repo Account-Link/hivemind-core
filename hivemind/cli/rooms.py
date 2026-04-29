@@ -281,7 +281,7 @@ def rooms_cli():
     "--rules-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     default=None,
-    help="Read room rules from a file.",
+    help="Read human room rules from a Markdown/plain-text file.",
 )
 @click.option(
     "--policy-file",
@@ -294,7 +294,10 @@ def rooms_cli():
     type=click.Choice(["sealed", "inspectable"]),
     default="inspectable",
     show_default=True,
-    help="Visibility contract when SCOPE is a local agent path.",
+    help=(
+        "Scope source visibility when SCOPE is a local path. Existing "
+        "agent ids use their registered inspection mode."
+    ),
 )
 @click.option(
     "--scope-private",
@@ -318,13 +321,20 @@ def rooms_cli():
     type=click.Choice(["sealed", "inspectable"]),
     default="sealed",
     show_default=True,
-    help="Visibility for recipient-uploaded query agents.",
+    help=(
+        "Query source and prompt-history visibility. Existing fixed "
+        "agent ids use their registered inspection mode."
+    ),
 )
 @click.option(
     "--output-visibility",
     type=click.Choice(["querier_only", "owner_and_querier"]),
     default="querier_only",
     show_default=True,
+    help=(
+        "Who can read final output/artifacts. querier_only hides "
+        "participant-initiated results from the owner."
+    ),
 )
 @click.option(
     "--llm-provider",
@@ -340,7 +350,10 @@ def rooms_cli():
     type=click.Choice(["operator_updates", "pinned", "owner_approved"]),
     default="operator_updates",
     show_default=True,
-    help="Room-level compose trust policy.",
+    help=(
+        "CVM update trust: operator governance, exact pinned hashes, "
+        "or owner-managed room allowlist."
+    ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 def create_room(

@@ -65,7 +65,8 @@ The design follows the conditional-recall framing from
 let an AI system use private context for a bounded purpose, then constrain what
 can be recalled outside that purpose. See the
 [mental model](docs/conditional-recall.md) for the room data flow and the
-scope/query agent relationship.
+scope/query agent relationship. For copy-paste room setups, see the
+[room cookbook](docs/room-cookbook.md).
 
 ## What An Agent Is
 
@@ -116,8 +117,7 @@ Canonical flow: create a signed room, add private data, and share the invite.
 
 ```bash
 hivemind room create ./scope-agent \
-  --rules-file rules.md \
-  --scope-visibility inspectable
+  --rules-file rules.md
 
 hivemind room add-data <room_id> --file dataset.md --meta source=dataset
 hivemind room data <room_id>
@@ -132,7 +132,6 @@ Common room variants:
 # Owner pre-loads the query logic; participant only supplies the question.
 hivemind room create ./scope-agent \
   --query-agent ./query-agent \
-  --query-visibility sealed \
   --rules-file rules.md
 
 # Participant can upload their own query agent for this room.

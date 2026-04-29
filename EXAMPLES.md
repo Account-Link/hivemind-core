@@ -7,7 +7,6 @@ hivemind init --service http://localhost:8100 --api-key hmk_owner
 
 hivemind room create ./agents/my-scope \
   --rules-file rules.md \
-  --scope-visibility inspectable \
   --query-visibility sealed
 ```
 
@@ -51,6 +50,23 @@ hivemind room create ./agents/my-scope \
 ```
 
 Participants can ask questions but cannot upload replacement query code.
+
+If the scope and query agents are already registered, the command is shorter:
+
+```bash
+hivemind room create scope_agent_id \
+  --query-agent query_agent_id \
+  --rules-file rules.md
+```
+
+For the current live watch-history tenant:
+
+```bash
+hivemind --profile watch-history room create fae0070e6f1f \
+  --query-agent 730f2d35c608 \
+  --rules-file rules.md \
+  --trust-mode owner_approved
+```
 
 ## No External LLM Egress
 
