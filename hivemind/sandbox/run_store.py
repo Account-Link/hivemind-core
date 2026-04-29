@@ -20,7 +20,7 @@ _COLUMNS = (
     "mediator_started_at, mediator_ended_at, "
     "index_started_at, index_ended_at, index_output, "
     "room_id, room_manifest_hash, scope_agent_id, index_agent_id, "
-    "output, attestation, issuer_token_id, "
+    "prompt, output, attestation, issuer_token_id, "
     "output_visibility, artifacts_enabled"
 )
 
@@ -41,6 +41,7 @@ class RunStore:
         issuer_token_id: str | None = None,
         room_id: str | None = None,
         room_manifest_hash: str | None = None,
+        prompt: str | None = None,
         output_visibility: str = "owner_and_querier",
         artifacts_enabled: bool = True,
     ) -> dict:
@@ -56,9 +57,9 @@ class RunStore:
             "INSERT INTO _hivemind_query_runs "
             "(run_id, agent_id, room_id, room_manifest_hash, "
             "scope_agent_id, index_agent_id, issuer_token_id, "
-            "output_visibility, artifacts_enabled, status, "
+            "prompt, output_visibility, artifacts_enabled, status, "
             "created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 run_id,
                 agent_id,
@@ -67,6 +68,7 @@ class RunStore:
                 scope_agent_id,
                 index_agent_id,
                 issuer_token_id,
+                prompt,
                 output_visibility,
                 bool(artifacts_enabled),
                 "pending",
@@ -82,6 +84,7 @@ class RunStore:
             "scope_agent_id": scope_agent_id,
             "index_agent_id": index_agent_id,
             "issuer_token_id": issuer_token_id,
+            "prompt": prompt,
             "output_visibility": output_visibility,
             "artifacts_enabled": bool(artifacts_enabled),
             "status": "pending",

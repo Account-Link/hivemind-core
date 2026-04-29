@@ -76,7 +76,9 @@ Owner-only. Lists owner-visible room data after opening the room key.
 ### `POST /v1/rooms/{room_id}/runs`
 
 Run the room's fixed query agent or a previously uploaded query agent allowed by
-the manifest.
+the manifest. If the room query visibility is `inspectable`, the plaintext
+prompt is stored with the run history. If query visibility is `sealed`, only
+the signed run attestation's prompt hash is retained.
 
 ```json
 {

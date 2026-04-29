@@ -516,6 +516,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         query = manifest.get("query") or {}
         return inspection_mode_from_visibility(query.get("visibility"))
 
+    def _room_prompt_for_run(room: dict | None, prompt: str) -> str | None:
+        if not room:
+            return None
+        manifest = room.get("manifest") or {}
+        query = manifest.get("query") or {}
+        if query.get("visibility") != "inspectable":
+            return None
+        return prompt
+
     def _room_wrap_id(caller: Caller) -> str:
         if caller.role == "owner":
             return "owner"
@@ -1493,6 +1502,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             issuer_token_id=(caller.token_id or None),
             room_id=(room or {}).get("room_id"),
             room_manifest_hash=(room or {}).get("manifest_hash"),
+            prompt=_room_prompt_for_run(room, req.query),
             output_visibility=(room or {}).get(
                 "output_visibility", "owner_and_querier"
             ),
@@ -2397,6 +2407,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             issuer_token_id=(caller.token_id or None),
             room_id=(room or {}).get("room_id"),
             room_manifest_hash=(room or {}).get("manifest_hash"),
+            prompt=_room_prompt_for_run(room, prompt),
             output_visibility=(room or {}).get(
                 "output_visibility", "owner_and_querier"
             ),

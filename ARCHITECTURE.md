@@ -192,6 +192,12 @@ Sealed source can still be decrypted by internal CVM paths that need to rebuild
 images or compute digests. For room-sealed source, those internal paths work
 only after the room DEK has been opened by a valid room participant.
 
+Room prompt retention follows the same visibility bit as query-agent source.
+When `query.visibility=inspectable`, the run row stores the plaintext prompt so
+participants can inspect past questions. When `query.visibility=sealed`, the
+run row stores no prompt plaintext; the signed run attestation still commits to
+`prompt_hash`.
+
 ## Client Inspection And CVM Trust Flow
 
 The intended participant flow is:

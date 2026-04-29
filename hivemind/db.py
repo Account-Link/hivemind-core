@@ -132,6 +132,7 @@ _INTERNAL_DDL: tuple[str, ...] = (
         mediator_ended_at DOUBLE PRECISION,
         index_started_at DOUBLE PRECISION,
         index_ended_at DOUBLE PRECISION,
+        prompt TEXT,
         output TEXT,
         index_output TEXT,
         attestation JSONB,
@@ -200,6 +201,8 @@ _INTERNAL_MIGRATIONS: tuple[str, ...] = (
     "ADD COLUMN IF NOT EXISTS room_id TEXT",
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS room_manifest_hash TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS prompt TEXT",
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS output_visibility TEXT "
     "NOT NULL DEFAULT 'owner_and_querier'",

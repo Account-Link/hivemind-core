@@ -327,7 +327,7 @@ def test_room_sealed_agent_files_use_room_key(room_env):
 
 
 def test_room_query_agent_upload_sealed_mode_uses_room_endpoint(room_env):
-    client, tenant, _hive = room_env
+    client, tenant, hive = room_env
     out = _create_fixed_room(
         client,
         tenant["api_key"],
@@ -343,6 +343,34 @@ def test_room_query_agent_upload_sealed_mode_uses_room_endpoint(room_env):
     assert resp.status_code == 200, resp.text
     assert resp.json()["inspection_mode"] == "sealed"
     assert resp.json()["room_id"] == out["room_id"]
+    run = hive.run_store.get(resp.json()["run_id"])
+    assert run is not None
+    assert run["prompt"] is None
+
+
+def test_inspectable_query_visibility_persists_room_prompt(room_env):
+    client, tenant, hive = room_env
+    out = _create_fixed_room(client, tenant["api_key"])
+    prompt = "Show me top hashtags."
+
+    resp = client.post(
+        f"/v1/rooms/{out['room_id']}/runs",
+        headers=_headers(out["token"]),
+        json={"query": prompt},
+    )
+    assert resp.status_code == 200, resp.text
+    run_id = resp.json()["run_id"]
+
+    run = hive.run_store.get(run_id)
+    assert run is not None
+    assert run["prompt"] == prompt
+
+    owner_view = client.get(
+        f"/v1/runs/{run_id}",
+        headers=_headers(tenant["api_key"]),
+    )
+    assert owner_view.status_code == 200
+    assert owner_view.json()["prompt"] == prompt
 
 
 def test_room_vault_tool_applies_scope_function():

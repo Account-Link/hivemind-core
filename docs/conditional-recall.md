@@ -50,6 +50,10 @@ The manifest is the contract both parties verify. It commits to:
 The invite token authorizes access, but the signed manifest is the thing a
 client verifies before presenting private material.
 
+Query-agent visibility also controls prompt visibility. In `inspectable` rooms,
+past run prompts are stored in run history. In `sealed` rooms, prompt plaintext
+is not stored; the signed run attestation keeps only a prompt hash.
+
 ## Scope Agent And Query Agent
 
 The scope agent still has the room's superpowers. Those powers are deliberately

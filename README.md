@@ -148,9 +148,11 @@ hivemind room create ./scope-agent \
 
 Visibility modes:
 
-- `inspectable`: participants can read extracted source files and pin digests.
+- `inspectable`: participants can read extracted source files, pin digests,
+  and see stored prompts for room runs.
 - `sealed`: participants see metadata and digests, but source bytes are
-  encrypted and are not served through the files API.
+  encrypted and are not served through the files API. Run prompts are not
+  stored as plaintext; signed run attestations still include the prompt hash.
 
 ## Participant Flow
 

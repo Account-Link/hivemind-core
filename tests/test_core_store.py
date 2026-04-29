@@ -124,6 +124,7 @@ class TestDatabaseInit:
                 }
                 assert "room_id" in columns
                 assert "room_manifest_hash" in columns
+                assert "prompt" in columns
                 assert "output_visibility" in columns
                 assert "artifacts_enabled" in columns
 
