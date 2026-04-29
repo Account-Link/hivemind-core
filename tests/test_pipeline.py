@@ -664,6 +664,73 @@ class TestTrackedRunFailsClosedOnScopeError:
         assert req_for_scope.policy == "Only use rows from the last 30 days."
         pipeline._run_query_agent.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_tracked_query_stage_passes_agent_store_for_image_rebuild(
+        self, monkeypatch
+    ):
+        """Room runs must let SandboxBackend rebuild uploaded images after redeploy."""
+        from hivemind.config import Settings
+
+        settings = Settings(
+            database_url="unused",
+            llm_api_key="test",
+            default_mediator_agent="",
+        )
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="query-agent",
+            name="query",
+            description="",
+            agent_type="query",
+            image="hivemind-agent-tenant-query:latest",
+        )
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+        pipeline._run_scope_agent = AsyncMock(
+            return_value=(
+                lambda sql, params, rows: {"allow": True, "rows": rows},
+                "def scope(sql, params, rows): return {'allow': True, 'rows': rows}",
+                {"total_tokens": 0},
+            )
+        )
+        pipeline._build_run_attestation = MagicMock(return_value={"signed": True})
+
+        captured: dict = {}
+
+        class FakeBackend:
+            def __init__(
+                self,
+                llm_client,
+                llm_model,
+                settings,
+                agent,
+                agent_store=None,
+            ):
+                captured["agent_store"] = agent_store
+
+            async def run(self, **kwargs):
+                return "ok", {"total_tokens": 0}
+
+        class FakeRunStore:
+            def update_status(self, *args, **kwargs):
+                captured.setdefault("statuses", []).append(args[1])
+
+            def update_stage(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        await pipeline.run_query_agent_tracked(
+            agent_id="query-agent",
+            run_id="run-rebuild",
+            run_store=FakeRunStore(),
+            prompt="top hashtags",
+            scope_agent_id="scope-agent",
+            allowed_llm_providers=[],
+        )
+
+        assert captured["agent_store"] is agent_store
+        assert captured["statuses"][-1] == "completed"
+
 
 class TestQueryRequestProvider:
     def test_provider_field_default_none(self):

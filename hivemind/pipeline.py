@@ -1037,6 +1037,7 @@ class Pipeline:
                 self._model_for("query", model),
                 self._sandbox_settings,
                 agent_config,
+                agent_store=self.agent_store,
             )
 
             query_output, query_usage = await backend.run(
