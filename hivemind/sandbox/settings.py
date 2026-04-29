@@ -11,6 +11,8 @@ def build_sandbox_settings(settings: Settings) -> SandboxSettings:
         docker_host=settings.docker_host,
         docker_network_name=settings.docker_network,
         docker_network_internal=settings.docker_network_internal,
+        docker_build_network=settings.docker_build_network,
+        docker_build_timeout_seconds=settings.docker_build_timeout_seconds,
         enforce_bridge_only_egress=settings.enforce_bridge_only_egress,
         enforce_bridge_only_egress_fail_closed=settings.enforce_bridge_only_egress_fail_closed,
         container_memory_mb=settings.container_memory_mb,

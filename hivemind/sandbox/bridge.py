@@ -30,6 +30,7 @@ from .models import (
     SimulateResponse,
     VerifyScopeRequest,
     VerifyScopeResponse,
+    MAX_ARTIFACT_BYTES,
 )
 from .tape import Tape, hash_request
 
@@ -823,9 +824,17 @@ class BridgeServer:
                 import base64
 
                 try:
-                    data = base64.b64decode(req.content_base64)
+                    data = base64.b64decode(req.content_base64, validate=True)
                 except Exception:
                     raise HTTPException(400, "Invalid base64 content")
+                if len(data) > MAX_ARTIFACT_BYTES:
+                    raise HTTPException(
+                        413,
+                        (
+                            f"Artifact too large ({len(data)} bytes). "
+                            f"Max: {MAX_ARTIFACT_BYTES} bytes."
+                        ),
+                    )
 
                 # Write directly to the Postgres-backed ArtifactStore.
                 # No S3, no bucket credentials, no presigned URLs.

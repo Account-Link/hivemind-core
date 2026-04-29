@@ -40,7 +40,7 @@ import re
 import secrets
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psycopg
 from psycopg import conninfo as pg_conninfo
@@ -153,6 +153,7 @@ def _tenant_role_seed() -> bytes | None:
 
 _pool_lock = threading.RLock()
 _pool: dict[str, psycopg.Connection] = {}
+_db_locks: dict[str, threading.RLock] = {}
 _admin_conn: psycopg.Connection | None = None
 _default_db_name: str | None = None
 
@@ -202,6 +203,17 @@ def _get_conn(db_name: str | None) -> psycopg.Connection:
         return conn
 
 
+def _lock_for_db(db_name: str | None) -> threading.RLock:
+    """Return the lock protecting one pooled connection."""
+    key = _dsn_for_db(db_name)
+    with _pool_lock:
+        lock = _db_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _db_locks[key] = lock
+        return lock
+
+
 def _get_admin_conn() -> psycopg.Connection:
     """Admin connection for CREATE/DROP DATABASE (autocommit)."""
     global _admin_conn
@@ -220,6 +232,7 @@ def _drop_pool_entry(db_name: str) -> None:
     dsn = _dsn_for_db(db_name)
     with _pool_lock:
         conn = _pool.pop(dsn, None)
+        _db_locks.pop(dsn, None)
     if conn is not None:
         try:
             conn.close()
@@ -228,7 +241,7 @@ def _drop_pool_entry(db_name: str) -> None:
 
 
 def db_execute(sql: str, params: list | None, db_name: str | None) -> list[dict]:
-    with _pool_lock:
+    with _lock_for_db(db_name):
         conn = _get_conn(db_name)
         try:
             with conn.cursor() as cur:
@@ -245,7 +258,7 @@ def db_execute(sql: str, params: list | None, db_name: str | None) -> list[dict]
 
 
 def db_execute_commit(sql: str, params: list | None, db_name: str | None) -> int:
-    with _pool_lock:
+    with _lock_for_db(db_name):
         conn = _get_conn(db_name)
         try:
             with conn.cursor() as cur:
@@ -260,7 +273,7 @@ def db_execute_commit(sql: str, params: list | None, db_name: str | None) -> int
 
 def db_import_sql(sql_dump: str, db_name: str | None) -> dict:
     """Execute a multi-statement SQL dump in a single transaction."""
-    with _pool_lock:
+    with _lock_for_db(db_name):
         conn = _get_conn(db_name)
         total = 0
         try:
@@ -291,7 +304,7 @@ def db_import_csv(
     if len(delimiter) != 1:
         raise ValueError("Delimiter must be a single character")
 
-    with _pool_lock:
+    with _lock_for_db(db_name):
         conn = _get_conn(db_name)
         try:
             with conn.cursor() as cur:
@@ -1087,12 +1100,7 @@ def main():
                 logger.error("Could not connect to postgres after 60s")
                 sys.exit(1)
 
-    class _ThreadingServer(HTTPServer):
-        # Override to handle concurrent requests — the GIL + per-DB lock
-        # still serialize DB work, but this frees up connection pool reuse.
-        pass
-
-    server = HTTPServer(("0.0.0.0", PROXY_PORT), ProxyHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", PROXY_PORT), ProxyHandler)
     logger.info("SQL proxy listening on port %d", PROXY_PORT)
     try:
         server.serve_forever()

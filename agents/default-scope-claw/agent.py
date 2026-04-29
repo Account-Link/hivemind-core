@@ -65,7 +65,6 @@ def _load_system_prompt() -> str:
         )
     text = prompt_path.read_text("utf-8")
     # Pull the SYSTEM_PROMPT = """...""" block.
-    marker = 'SYSTEM_PROMPT = """\\\n'
     # More tolerant search: find the triple-quoted SYSTEM_PROMPT.
     start_idx = text.find('SYSTEM_PROMPT = """')
     if start_idx < 0:

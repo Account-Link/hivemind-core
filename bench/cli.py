@@ -76,7 +76,7 @@ async def cmd_load(args: argparse.Namespace) -> None:
 async def cmd_run(args: argparse.Namespace) -> None:
     """Run the GAN adversarial benchmark."""
     from bench.scenarios import ALL_SCENARIOS, get_scenario
-    from bench.gan import run_gan, run_all_scenarios
+    from bench.gan import run_all_scenarios
     from bench.report import print_scenario_report, print_summary, export_json
     from bench.runner import health_check
 

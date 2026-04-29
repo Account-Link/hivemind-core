@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     docker_host: str = ""
     docker_network: str = "hivemind-sandbox"
     docker_network_internal: bool = True
+    # Docker build-time isolation for uploaded agent images. Runtime
+    # containers are separately hardened below; builds run on the host Docker
+    # daemon, so default to no build network and a hard wall-clock cap.
+    docker_build_network: str = "none"
+    docker_build_timeout_seconds: int = 600
     enforce_bridge_only_egress: bool = True
     enforce_bridge_only_egress_fail_closed: bool = True
     container_memory_mb: int = 256

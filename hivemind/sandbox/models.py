@@ -1,7 +1,12 @@
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 
 VALID_AGENT_TYPES = {"index", "scope", "query", "mediator"}
+MAX_ARTIFACT_FILENAME_LENGTH = 128
+MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
+_ARTIFACT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 # Bounds on /sandbox/simulate replay tapes. Tapes come from a scope agent
 # (untrusted) and get fully deserialized into memory before replay starts,
@@ -35,6 +40,30 @@ def _validate_replay_tape(tape: list[dict] | None) -> list[dict] | None:
     return tape
 
 
+def validate_artifact_filename(filename: str) -> str:
+    """Return a safe artifact filename or raise ValueError.
+
+    Artifact names are used in API paths, response headers, and local CLI
+    fetch paths. Keep them basename-only so an untrusted query agent cannot
+    write outside the fetch directory or inject headers.
+    """
+    name = str(filename or "").strip()
+    if not name:
+        raise ValueError("filename is required")
+    if len(name) > MAX_ARTIFACT_FILENAME_LENGTH:
+        raise ValueError(
+            f"filename too long ({len(name)} > {MAX_ARTIFACT_FILENAME_LENGTH})"
+        )
+    if "/" in name or "\\" in name or ".." in name:
+        raise ValueError("filename must be a basename without path traversal")
+    if not _ARTIFACT_FILENAME_RE.fullmatch(name):
+        raise ValueError(
+            "filename may contain only letters, digits, '.', '_' and '-' "
+            "and must start with a letter or digit"
+        )
+    return name
+
+
 class AgentConfig(BaseModel):
     """Registered agent definition — Docker image only."""
 
@@ -64,6 +93,8 @@ class SandboxSettings(BaseModel):
     docker_host: str = ""  # optional explicit Docker daemon socket/URL
     docker_network_name: str = "hivemind-sandbox"
     docker_network_internal: bool = True
+    docker_build_network: str = "none"
+    docker_build_timeout_seconds: int = Field(default=600, ge=1)
     enforce_bridge_only_egress: bool = True
     enforce_bridge_only_egress_fail_closed: bool = True
     container_memory_mb: int = Field(default=256, ge=16)
@@ -255,6 +286,21 @@ class BridgeArtifactUploadRequest(BaseModel):
     filename: str
     content_base64: str  # Base64-encoded file content
     content_type: str = "application/octet-stream"
+
+    @field_validator("filename")
+    @classmethod
+    def _safe_filename(cls, v: str) -> str:
+        return validate_artifact_filename(v)
+
+    @field_validator("content_type")
+    @classmethod
+    def _safe_content_type(cls, v: str) -> str:
+        value = (v or "application/octet-stream").strip()
+        if not value:
+            return "application/octet-stream"
+        if len(value) > 100 or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("content_type contains invalid characters")
+        return value
 
 
 class BridgeArtifactUploadResponse(BaseModel):

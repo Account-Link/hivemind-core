@@ -238,7 +238,7 @@ class TestRunQuery:
         pipeline._run_mediator_agent.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_mediator_failure_does_not_fail_query(self, pg_db):
+    async def test_mediator_failure_fails_closed(self, pg_db):
         pipeline = _make_pipeline(pg_db)
         _mock_default_scope(pipeline)
         pipeline._run_query_agent = AsyncMock(
@@ -253,10 +253,9 @@ class TestRunQuery:
             query_agent_id="q1",
             mediator_agent_id="med1",
         )
-        resp = await pipeline.run_query(req)
 
-        assert resp.output == "raw output"
-        assert resp.mediated is False
+        with pytest.raises(ValueError, match="refusing to return unmediated output"):
+            await pipeline.run_query(req)
 
     @pytest.mark.asyncio
     async def test_mediator_agent_not_found_still_raises(self, pg_db):
@@ -290,13 +289,10 @@ class TestRunQuery:
             mediator_agent_id="med1",
             max_tokens=50,
         )
-        resp = await pipeline.run_query(req)
 
+        with pytest.raises(ValueError, match="insufficient remaining budget"):
+            await pipeline.run_query(req)
         pipeline._run_mediator_agent.assert_not_called()
-        assert resp.output == "raw output"
-        assert resp.mediated is False
-        assert resp.usage["total_tokens"] == 49
-        assert resp.usage["max_tokens"] == 50
 
 
 class TestQueryRequestModel:
@@ -630,6 +626,42 @@ class TestTrackedRunFailsClosedOnScopeError:
         )
 
         assert captured["statuses"][-1] == "failed"
+        pipeline._run_query_agent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tracked_run_passes_policy_to_scope_agent(self):
+        """Tracked async runs must preserve the per-request policy context."""
+        from hivemind.sandbox.agents import AgentStore
+        from hivemind.config import Settings
+
+        settings = Settings(database_url="unused", llm_api_key="test")
+        pipeline = Pipeline(settings, MagicMock(spec=Database), MagicMock(spec=AgentStore))
+        pipeline._run_scope_agent = AsyncMock(
+            side_effect=ValueError("stop after scope request capture"),
+        )
+        pipeline._run_query_agent = AsyncMock(
+            return_value=("output", {"total_tokens": 0}),
+        )
+        pipeline._build_run_attestation = MagicMock(return_value=None)
+
+        class FakeRunStore:
+            def update_status(self, *args, **kwargs):
+                pass
+
+            def update_stage(self, *args, **kwargs):
+                pass
+
+        await pipeline.run_query_agent_tracked(
+            agent_id="q1",
+            run_id="run-policy",
+            run_store=FakeRunStore(),
+            prompt="anything",
+            scope_agent_id="scope-policy",
+            policy="Only use rows from the last 30 days.",
+        )
+
+        req_for_scope = pipeline._run_scope_agent.await_args.args[0]
+        assert req_for_scope.policy == "Only use rows from the last 30 days."
         pipeline._run_query_agent.assert_not_awaited()
 
 

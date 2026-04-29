@@ -996,10 +996,16 @@ def runs_cmd(
             click.echo("")
             click.echo("── Artifacts ──")
             for a in artifacts:
+                try:
+                    url = _artifact_url(service, run_id, a["filename"])
+                except (KeyError, TypeError, ValueError) as e:
+                    click.echo(
+                        f"  warn: skipping unsafe artifact name: {e}",
+                        err=True,
+                    )
+                    continue
                 size = f" {a.get('size')}B" if a.get("size") else ""
-                click.echo(
-                    f"  {a['filename']}{size}  →  {_artifact_url(service, run_id, a['filename'])}"
-                )
+                click.echo(f"  {a['filename']}{size}  →  {url}")
 
         err = data.get("error")
         if err:

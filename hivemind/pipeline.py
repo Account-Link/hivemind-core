@@ -239,37 +239,34 @@ class Pipeline:
         mediated = False
         if mediator_agent_id:
             if remaining < MEDIATOR_MIN_TOKENS:
-                logger.info(
-                    "Skipping mediator '%s': insufficient remaining budget (%d < %d)",
-                    mediator_agent_id,
-                    remaining,
-                    MEDIATOR_MIN_TOKENS,
+                raise ValueError(
+                    f"Mediator '{mediator_agent_id}' could not run: "
+                    f"insufficient remaining budget ({remaining} < "
+                    f"{MEDIATOR_MIN_TOKENS}). Refusing to return "
+                    "unmediated output."
                 )
-            else:
-                try:
-                    output, mediator_usage = await self._run_mediator_agent(
-                        mediator_agent_id=mediator_agent_id,
-                        raw_output=output,
-                        prompt=req.query,
-                        max_tokens=remaining,
-                        max_calls=req_max_calls,
-                        timeout_seconds=req_timeout,
-                        policy=req.policy,
-                        model=req_model,
-                        provider=req_provider,
-                    )
-                except ValueError as e:
-                    if "not found" in str(e).lower():
-                        raise
-                    logger.warning(
-                        "Mediator '%s' failed; returning unmediated output: %s",
-                        mediator_agent_id,
-                        e,
-                    )
-                else:
-                    used = mediator_usage.get("total_tokens", 0)
-                    total_tokens += used
-                    mediated = True
+            try:
+                output, mediator_usage = await self._run_mediator_agent(
+                    mediator_agent_id=mediator_agent_id,
+                    raw_output=output,
+                    prompt=req.query,
+                    max_tokens=remaining,
+                    max_calls=req_max_calls,
+                    timeout_seconds=req_timeout,
+                    policy=req.policy,
+                    model=req_model,
+                    provider=req_provider,
+                )
+            except ValueError as e:
+                if "not found" in str(e).lower():
+                    raise
+                raise ValueError(
+                    f"Mediator '{mediator_agent_id}' failed; refusing to "
+                    "return unmediated output"
+                ) from e
+            used = mediator_usage.get("total_tokens", 0)
+            total_tokens += used
+            mediated = True
 
         return QueryResponse(
             output=output,
@@ -820,6 +817,7 @@ class Pipeline:
         timeout_seconds: int | None = None,
         model: str | None = None,
         provider: str | None = None,
+        policy: str | None = None,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -863,6 +861,7 @@ class Pipeline:
                     query=prompt or "analyse data",
                     query_agent_id=agent_id,
                     scope_agent_id=resolved_scope_id,
+                    policy=policy,
                 )
                 try:
                     scope_budget = max(1, int(remaining * SCOPE_BUDGET_FRACTION))
@@ -962,42 +961,41 @@ class Pipeline:
             # -- Stage 2: Mediator --
             if resolved_mediator_id and query_output:
                 if remaining < MEDIATOR_MIN_TOKENS:
-                    logger.info(
-                        "Skipping mediator '%s' for run %s: "
-                        "insufficient budget (%d < %d)",
-                        resolved_mediator_id, run_id,
-                        remaining, MEDIATOR_MIN_TOKENS,
+                    raise ValueError(
+                        f"Mediator '{resolved_mediator_id}' could not run "
+                        f"for run {run_id}: insufficient remaining budget "
+                        f"({remaining} < {MEDIATOR_MIN_TOKENS}). Refusing "
+                        "to return unmediated output."
                     )
-                else:
-                    mediator_t0 = time.time()
+                mediator_t0 = time.time()
+                await asyncio.to_thread(
+                    run_store.update_stage, run_id, "mediator",
+                    started_at=mediator_t0,
+                )
+                try:
+                    query_output, _ = await self._run_mediator_agent(
+                        mediator_agent_id=resolved_mediator_id,
+                        raw_output=query_output,
+                        prompt=prompt,
+                        max_tokens=remaining,
+                        max_calls=max_calls,
+                        timeout_seconds=timeout_seconds,
+                        policy=policy,
+                        model=model,
+                        provider=provider,
+                    )
+                except ValueError as e:
+                    if "not found" in str(e).lower():
+                        raise
+                    raise ValueError(
+                        f"Mediator '{resolved_mediator_id}' failed for run "
+                        f"{run_id}; refusing to return unmediated output"
+                    ) from e
+                finally:
                     await asyncio.to_thread(
                         run_store.update_stage, run_id, "mediator",
-                        started_at=mediator_t0,
+                        ended_at=time.time(),
                     )
-                    try:
-                        query_output, _ = await self._run_mediator_agent(
-                            mediator_agent_id=resolved_mediator_id,
-                            raw_output=query_output,
-                            prompt=prompt,
-                            max_tokens=remaining,
-                            max_calls=max_calls,
-                            timeout_seconds=timeout_seconds,
-                            model=model,
-                            provider=provider,
-                        )
-                    except ValueError as e:
-                        if "not found" in str(e).lower():
-                            raise
-                        logger.warning(
-                            "Mediator '%s' failed for run %s; "
-                            "returning unmediated output: %s",
-                            resolved_mediator_id, run_id, e,
-                        )
-                    finally:
-                        await asyncio.to_thread(
-                            run_store.update_stage, run_id, "mediator",
-                            ended_at=time.time(),
-                        )
 
             # Artifacts (if any) were written straight to Postgres during
             # the query-agent turn via /sandbox/artifact-upload. No post-

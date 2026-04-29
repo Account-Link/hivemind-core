@@ -18,6 +18,7 @@ import httpx
 from hivemind.sandbox.artifact_store import ArtifactStore
 from hivemind.sandbox.bridge import BridgeServer
 from hivemind.sandbox.budget import Budget
+from hivemind.sandbox.models import validate_artifact_filename
 from hivemind.tools import Tool
 
 
@@ -176,6 +177,55 @@ class TestBridgeArtifactUpload:
             await server.stop()
 
     @pytest.mark.asyncio
+    async def test_invalid_filename_is_rejected_before_store_write(self):
+        records: dict = {}
+        store = _fake_artifact_store(records)
+        server = _bridge_with_artifacts(store=store)
+        port = await server.start()
+        client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+
+        try:
+            resp = await client.post(
+                "/sandbox/artifact-upload",
+                headers={"Authorization": "Bearer test-token"},
+                json={
+                    "filename": "../report.json",
+                    "content_base64": base64.b64encode(b"data").decode(),
+                },
+            )
+            assert resp.status_code == 422
+            store.put.assert_not_called()
+            assert records == {}
+        finally:
+            await client.aclose()
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_oversized_artifact_is_rejected_before_store_write(self, monkeypatch):
+        monkeypatch.setattr("hivemind.sandbox.bridge.MAX_ARTIFACT_BYTES", 4)
+        records: dict = {}
+        store = _fake_artifact_store(records)
+        server = _bridge_with_artifacts(store=store)
+        port = await server.start()
+        client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+
+        try:
+            resp = await client.post(
+                "/sandbox/artifact-upload",
+                headers={"Authorization": "Bearer test-token"},
+                json={
+                    "filename": "too-large.bin",
+                    "content_base64": base64.b64encode(b"12345").decode(),
+                },
+            )
+            assert resp.status_code == 413
+            store.put.assert_not_called()
+            assert records == {}
+        finally:
+            await client.aclose()
+            await server.stop()
+
+    @pytest.mark.asyncio
     async def test_endpoint_not_registered_without_store(self):
         """Bridge without artifact_store should NOT expose the endpoint."""
         server = BridgeServer(
@@ -292,6 +342,12 @@ class _FakeDB:
 
 
 class TestArtifactStore:
+
+    def test_artifact_filename_validator_rejects_paths_and_headers(self):
+        assert validate_artifact_filename("report-1.json") == "report-1.json"
+        for unsafe in ("../report.json", "dir/report.json", "bad\r\nx", ".hidden"):
+            with pytest.raises(ValueError):
+                validate_artifact_filename(unsafe)
 
     def test_put_and_get_round_trips(self):
         db = _FakeDB()

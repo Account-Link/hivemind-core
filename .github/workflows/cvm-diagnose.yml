@@ -55,11 +55,14 @@ jobs:
           ACTION: ${{ github.event.inputs.action }}
         run: |
           set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "CVM_ID='${CVM_ID}' TAIL_LINES='${TAIL_LINES}' ACTION='${ACTION}' bash -s" <<'REMOTE'
+            "CVM_ID=$(q "$CVM_ID") TAIL_LINES=$(q "$TAIL_LINES") ACTION=$(q "$ACTION") bash -s" <<'REMOTE'
           set -euo pipefail
 
           echo "── phala status ─────────────────────────────────"

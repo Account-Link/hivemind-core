@@ -348,7 +348,6 @@ def copy_table(
     columns = [c["column_name"] for c in cols_meta]
 
     if dry_run:
-        ddl = build_create_table(table, cols_meta)
         print(f"      [dry-run] would CREATE TABLE {table} ({len(columns)} cols)")
         return 0, 0
 
@@ -527,7 +526,7 @@ def migrate_db(src: Proxy, dst: Proxy, db: str, batch_size: int, dry_run: bool, 
 
     tables = list_user_tables(src, db)
     if not tables:
-        print(f"  (no public tables — skipping)")
+        print("  (no public tables — skipping)")
         return
 
     for table in tables:

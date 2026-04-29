@@ -166,6 +166,28 @@ def test_emit_strict_aborts_when_envelope_missing(capsys):
     assert "attestation failed" in captured.err
 
 
+def test_emit_strict_does_not_fetch_when_envelope_missing(monkeypatch):
+    data = {
+        "output": "hi",
+        "artifacts": [{"filename": "report.txt", "size": 2}],
+    }
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("artifact fetch should not run before attestation")
+
+    monkeypatch.setattr("hivemind.cli._shared._hget", fail_fetch)
+    with pytest.raises(SystemExit) as excinfo:
+        _emit_run_result(
+            "http://x",
+            data,
+            "r-1",
+            as_json=False,
+            fetch=True,
+            strict_attestation=True,
+        )
+    assert excinfo.value.code == 6
+
+
 def test_emit_strict_prints_with_valid_envelope(capsys):
     data, pub_b64 = _signed_run_record(output="payload")
     _emit_run_result(

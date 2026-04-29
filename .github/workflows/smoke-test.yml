@@ -52,11 +52,14 @@ jobs:
           BASE_URL: ${{ github.event.inputs.base_url }}
         run: |
           set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "BASE_URL='${BASE_URL}' bash -s" <<'REMOTE'
+            "BASE_URL=$(q "$BASE_URL") bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 

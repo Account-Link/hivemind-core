@@ -48,13 +48,10 @@ jobs:
         run: uv python install 3.12
 
       - name: Sync dependencies
-        run: uv sync --frozen
-
-      - name: Install dev dependencies
-        run: uv pip install pytest pytest-asyncio pytest-cov httpx ruff
+        run: uv sync --frozen --all-extras
 
       - name: Lint (ruff)
-        run: uv run ruff check hivemind tests
+        run: uv run ruff check .
 
       - name: Run unit tests
         # Docker-tier tests (test_docker_runner.py, test_integration_docker.py)

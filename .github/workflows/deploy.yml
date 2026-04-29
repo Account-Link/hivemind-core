@@ -175,6 +175,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
 
           # All work happens inside this SSH session. We use a heredoc
           # with quoted 'REMOTE' so no local variables get interpolated
@@ -192,7 +195,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "TARGET='${TARGET}' DEPLOY_REF='${DEPLOY_REF}' IMAGE_SHA='${IMAGE_SHA}' NODE_ID='${NODE_ID}' CORE_NAME='${CORE_NAME}' PG_NAME='${PG_NAME}' PHALA_CLOUD_API_KEY='${PHALA_CLOUD_API_KEY}' CLOUDFLARE_API_TOKEN_OVERRIDE='${CLOUDFLARE_API_TOKEN}' DB_URL_OVERRIDE='${DB_URL_OVERRIDE}' bash -s" <<'REMOTE'
+            "TARGET=$(q "$TARGET") DEPLOY_REF=$(q "$DEPLOY_REF") IMAGE_SHA=$(q "$IMAGE_SHA") NODE_ID=$(q "$NODE_ID") CORE_NAME=$(q "$CORE_NAME") PG_NAME=$(q "$PG_NAME") PHALA_CLOUD_API_KEY=$(q "$PHALA_CLOUD_API_KEY") CLOUDFLARE_API_TOKEN_OVERRIDE=$(q "$CLOUDFLARE_API_TOKEN") DB_URL_OVERRIDE=$(q "$DB_URL_OVERRIDE") bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 

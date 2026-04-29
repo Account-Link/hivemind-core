@@ -4,11 +4,13 @@ import hashlib as _hashlib
 import json as _json
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import click
 import httpx
 
 from .. import reproduce as _reproduce
+from ..sandbox.models import validate_artifact_filename
 from ._config import _DEFAULT_PROFILE  # noqa: F401  (re-export hook)
 from ._config import (
     _headers,
@@ -221,7 +223,11 @@ def _query_tracked(
 
 
 def _artifact_url(service: str, run_id: str, filename: str) -> str:
-    return f"{service}/v1/query/runs/{run_id}/artifacts/{filename}"
+    safe_filename = validate_artifact_filename(filename)
+    return (
+        f"{service}/v1/query/runs/{run_id}/artifacts/"
+        f"{quote(safe_filename, safe='')}"
+    )
 
 
 def _emit_run_result(
@@ -256,42 +262,8 @@ def _emit_run_result(
         expected_output=output,
     )
 
-    artifact_urls = [
-        {
-            "filename": a["filename"],
-            "size": a.get("size"),
-            "content_type": a.get("content_type"),
-            "url": _artifact_url(service, run_id, a["filename"]),
-        }
-        for a in artifacts
-    ]
-
-    fetched: list[dict] = []
-    if fetch and artifacts:
-        out_dir = Path("hivemind-artifacts") / run_id
-        out_dir.mkdir(parents=True, exist_ok=True)
-        config = _load_config()
-        headers = _headers(config)
-        for a in artifacts:
-            fname = a["filename"]
-            try:
-                r = _hget(
-                    _artifact_url(service, run_id, fname),
-                    headers=headers,
-                    timeout=60,
-                )
-                r.raise_for_status()
-                dest = out_dir / fname
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(r.content)
-                fetched.append({"filename": fname, "path": str(dest)})
-            except httpx.HTTPError as e:
-                if not as_json:
-                    click.echo(
-                        f"  warn: failed to fetch {fname}: {e}", err=True
-                    )
-
-    # In strict mode, refuse to print a tampered or unsigned run.
+    # In strict mode, refuse to trust any run-controlled fields, including
+    # artifact metadata used for follow-up fetches.
     if strict_attestation and not att_ok:
         if as_json:
             click.echo(
@@ -313,6 +285,53 @@ def _emit_run_result(
                 err=True,
             )
         raise SystemExit(6)
+
+    artifact_urls = []
+    for a in artifacts:
+        try:
+            safe_name = validate_artifact_filename(a["filename"])
+        except (KeyError, TypeError, ValueError) as e:
+            if not as_json:
+                click.echo(f"  warn: skipping unsafe artifact name: {e}", err=True)
+            continue
+        artifact_urls.append(
+            {
+                "filename": safe_name,
+                "size": a.get("size"),
+                "content_type": a.get("content_type"),
+                "url": _artifact_url(service, run_id, safe_name),
+            }
+        )
+
+    fetched: list[dict] = []
+    if fetch and artifacts:
+        out_dir = Path("hivemind-artifacts") / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        config = _load_config()
+        headers = _headers(config)
+        for a in artifacts:
+            try:
+                fname = validate_artifact_filename(a["filename"])
+            except (KeyError, TypeError, ValueError) as e:
+                if not as_json:
+                    click.echo(f"  warn: skipping unsafe artifact name: {e}", err=True)
+                continue
+            try:
+                r = _hget(
+                    _artifact_url(service, run_id, fname),
+                    headers=headers,
+                    timeout=60,
+                )
+                r.raise_for_status()
+                dest = out_dir / fname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(r.content)
+                fetched.append({"filename": fname, "path": str(dest)})
+            except httpx.HTTPError as e:
+                if not as_json:
+                    click.echo(
+                        f"  warn: failed to fetch {fname}: {e}", err=True
+                    )
 
     if as_json:
         click.echo(

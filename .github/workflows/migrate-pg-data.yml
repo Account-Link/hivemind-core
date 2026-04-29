@@ -107,6 +107,9 @@ jobs:
           TRUNCATE_DST: ${{ github.event.inputs.truncate_dst }}
         run: |
           set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
 
           # Long-running ssh: keep the connection alive aggressively so
           # gateway-side stalls during big-table batches don't get
@@ -115,7 +118,7 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "SRC_URL='${SRC_URL}' DST_URL='${DST_URL}' DBS='${DBS}' BATCH_SIZE='${BATCH_SIZE}' DRY_RUN='${DRY_RUN}' TRUNCATE_DST='${TRUNCATE_DST}' bash -s" <<'REMOTE'
+            "SRC_URL=$(q "$SRC_URL") DST_URL=$(q "$DST_URL") DBS=$(q "$DBS") BATCH_SIZE=$(q "$BATCH_SIZE") DRY_RUN=$(q "$DRY_RUN") TRUNCATE_DST=$(q "$TRUNCATE_DST") bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 

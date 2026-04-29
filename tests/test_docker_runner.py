@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hivemind.sandbox.docker_runner import ContainerResult, DockerRunner
+from hivemind.sandbox.docker_runner import CONTAINER_LABEL, CONTAINER_LABEL_VALUE
 from hivemind.sandbox.models import AgentConfig, SandboxSettings
 
 
@@ -902,7 +903,13 @@ def test_build_image_returns_tag(tmp_path):
 
     assert tag == "hivemind-agent-abc123:latest"
     mock_client.images.build.assert_called_once_with(
-        path=str(tmp_path), tag="hivemind-agent-abc123:latest", rm=True
+        path=str(tmp_path),
+        tag="hivemind-agent-abc123:latest",
+        rm=True,
+        forcerm=True,
+        pull=False,
+        labels={CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
+        network_mode="none",
     )
 
 
@@ -1009,6 +1016,10 @@ async def test_ensure_image_async_rebuilds_when_missing():
     build_kwargs = mock_client.images.build.call_args.kwargs
     assert build_kwargs["tag"] == "hivemind-agent-x:latest"
     assert build_kwargs["rm"] is True
+    assert build_kwargs["forcerm"] is True
+    assert build_kwargs["pull"] is False
+    assert build_kwargs["labels"] == {CONTAINER_LABEL: CONTAINER_LABEL_VALUE}
+    assert build_kwargs["network_mode"] == "none"
     assert captured_contents == {
         "Dockerfile": "FROM scratch\n",
         "agent.py": "print(1)\n",

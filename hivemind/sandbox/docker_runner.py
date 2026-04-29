@@ -804,13 +804,33 @@ class DockerRunner:
             )
 
         client = self._get_client()
-        client.images.build(path=build_path, tag=tag, rm=True)
+        build_kwargs: dict = {
+            "path": build_path,
+            "tag": tag,
+            "rm": True,
+            "forcerm": True,
+            "pull": False,
+            "labels": {CONTAINER_LABEL: CONTAINER_LABEL_VALUE},
+        }
+        build_network = (self.settings.docker_build_network or "").strip()
+        if build_network:
+            build_kwargs["network_mode"] = build_network
+        client.images.build(**build_kwargs)
         logger.info("Built Docker image %s from %s", tag, build_path)
         return tag
 
     async def build_image_async(self, build_path: str, tag: str) -> str:
         """Async wrapper around build_image()."""
-        return await asyncio.to_thread(self.build_image, build_path, tag)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.build_image, build_path, tag),
+                timeout=self.settings.docker_build_timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"Docker image build timed out after "
+                f"{self.settings.docker_build_timeout_seconds}s"
+            ) from e
 
     def image_exists(self, image: str) -> bool:
         """Return True if the Docker image is present locally."""

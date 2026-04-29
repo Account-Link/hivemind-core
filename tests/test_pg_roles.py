@@ -106,6 +106,18 @@ def test_role_password_varies_with_seed():
     assert a != b
 
 
+def test_sql_proxy_connection_locks_use_pool_keys():
+    """SQL proxy locks must track the same effective DSN keys as the pool."""
+    mod = _load_sql_proxy_module()
+    mod.DB_DSN = "postgresql://hivemind:dev@localhost:5432/hivemind"
+    mod._db_locks.clear()
+
+    lock = mod._lock_for_db("tenant_t_abc123")
+
+    assert mod._lock_for_db("tenant_t_abc123") is lock
+    assert list(mod._db_locks) == [mod._dsn_for_db("tenant_t_abc123")]
+
+
 def test_role_password_is_urlsafe_base64_no_padding():
     pw = derive_tenant_role_password(b"seed", "t_abc123")
     assert "=" not in pw

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import ssl
 import sys
 import tempfile
 import uuid
@@ -94,7 +93,7 @@ def main() -> int:
         ca_file.write(pinned_pem)
         ca_file.flush()
         verify: str | bool = ca_file.name
-        print(f"[smoke] enclave TLS — pinning cert from /v1/attestation")
+        print("[smoke] enclave TLS — pinning cert from /v1/attestation")
     else:
         verify = True
 

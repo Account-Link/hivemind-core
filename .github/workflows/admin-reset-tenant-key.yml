@@ -67,11 +67,14 @@ jobs:
           FRIENDLY_NAME: ${{ github.event.inputs.friendly_name }}
         run: |
           set -euo pipefail
+          q() {
+            printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+          }
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             -o TCPKeepAlive=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "TENANT_ID='${TENANT_ID}' DB_NAME='${DB_NAME}' REGISTER='${REGISTER}' FRIENDLY_NAME='${FRIENDLY_NAME}' bash -s" <<'REMOTE'
+            "TENANT_ID=$(q "$TENANT_ID") DB_NAME=$(q "$DB_NAME") REGISTER=$(q "$REGISTER") FRIENDLY_NAME=$(q "$FRIENDLY_NAME") bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/hivemind-core
 

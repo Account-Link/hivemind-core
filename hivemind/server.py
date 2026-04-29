@@ -1024,6 +1024,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 timeout_seconds=req.timeout_seconds,
                 model=req.model,
                 provider=req.provider,
+                policy=req.policy,
             ),
         )
 
@@ -1482,6 +1483,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # falls back to the global default (openrouter).
         model: str | None = Form(None),
         provider: str | None = Form(None),
+        policy: str | None = Form(None),
         # Inspection-mode policy applies only to the query agent. The
         # scope/index agents in this endpoint are A's own agents: their
         # source is owner-readable by design (default 'full').
@@ -1602,6 +1604,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 document_metadata=document_metadata,
                 model=model,
                 provider=provider,
+                policy=policy,
                 tmpdirs=tmpdirs,
                 query_inspection_mode=validated_query_mode,
             ),
@@ -1647,6 +1650,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         document_metadata: str | None,
         model: str | None,
         provider: str | None,
+        policy: str | None,
         tmpdirs: list[str],
         query_inspection_mode: str = "full",
     ) -> None:
@@ -1750,6 +1754,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_tokens=max_tokens,
                 model=model,
                 provider=provider,
+                policy=policy,
             )
 
         except Exception as e:
@@ -1781,6 +1786,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # server to have HIVEMIND_TINFOIL_API_KEY configured.
         model: str | None = Form(None),
         provider: str | None = Form(None),
+        policy: str | None = Form(None),
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Upload query agent source, create a run record, and kick off execution.
@@ -1871,6 +1877,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 mediator_agent_id=mediator_agent_id,
                 model=model,
                 provider=provider,
+                policy=policy,
                 inspection_mode=validated_mode,
             ),
         )
@@ -1900,6 +1907,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mediator_agent_id: str | None,
         model: str | None = None,
         provider: str | None = None,
+        policy: str | None = None,
         inspection_mode: str = "full",
     ) -> None:
         """Background task: build image, register agent, run pipeline."""
@@ -1988,6 +1996,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_tokens=max_tokens,
                 model=model,
                 provider=provider,
+                policy=policy,
             )
 
         except Exception as e:
@@ -2081,23 +2090,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run or not _caller_can_access_run(caller, run):
             raise HTTPException(404, "Artifact not found or expired")
+        from .sandbox.models import validate_artifact_filename
+
+        try:
+            safe_filename = validate_artifact_filename(filename)
+        except ValueError:
+            raise HTTPException(400, "Invalid artifact filename")
         artifact = await asyncio.to_thread(
-            hm.artifact_store.get, run_id, filename
+            hm.artifact_store.get, run_id, safe_filename
         )
         if not artifact:
             raise HTTPException(404, "Artifact not found or expired")
         ttl = hm.settings.artifact_retention_seconds
         import email.utils
+        from urllib.parse import quote
         expires_at = float(artifact["created_at"]) + ttl
+        content_type = artifact["content_type"] or "application/octet-stream"
+        if len(content_type) > 100 or any(
+            ord(ch) < 32 or ord(ch) == 127 for ch in content_type
+        ):
+            content_type = "application/octet-stream"
         return Response(
             content=bytes(artifact["content"]),
-            media_type=artifact["content_type"] or "application/octet-stream",
+            media_type=content_type,
             headers={
                 "Cache-Control": "no-cache, no-store",
                 "X-Retention-Seconds": str(ttl),
                 "Expires": email.utils.formatdate(expires_at, usegmt=True),
                 "Content-Disposition": (
-                    f'attachment; filename="{filename}"'
+                    f'attachment; filename="{safe_filename}"; '
+                    f"filename*=UTF-8''{quote(safe_filename)}"
                 ),
             },
         )
