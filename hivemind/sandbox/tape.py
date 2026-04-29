@@ -18,9 +18,17 @@ def _canonical_json(obj) -> str:
 
 
 def hash_request(kwargs: dict) -> str:
-    """SHA-256 hex digest (first 16 chars) of canonicalized request kwargs."""
+    """SHA-256 hex digest of canonicalized request kwargs.
+
+    Returns the full 64-hex-character digest. Earlier versions truncated to
+    16 chars (64 bits) which made an adversarially crafted tape collision
+    cheap enough to swap a cached response for a different request — the
+    cached response bypasses budget accounting, so a colliding entry could
+    be used to dodge the per-session token cap. 64 hex chars (256 bits) is
+    free; just use the whole digest.
+    """
     canonical = _canonical_json(kwargs)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass

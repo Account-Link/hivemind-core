@@ -1,7 +1,38 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 VALID_AGENT_TYPES = {"index", "scope", "query", "mediator"}
+
+# Bounds on /sandbox/simulate replay tapes. Tapes come from a scope agent
+# (untrusted) and get fully deserialized into memory before replay starts,
+# so unbounded list lengths or per-entry payloads are a memory-DoS vector
+# against the bridge process. Limits are intentionally generous — a real
+# scope-driven replay sequence is on the order of 10–50 entries.
+MAX_REPLAY_TAPE_ENTRIES = 2_000
+MAX_REPLAY_TAPE_ENTRY_BYTES = 256 * 1024  # 256 KiB serialized per entry
+
+
+def _validate_replay_tape(tape: list[dict] | None) -> list[dict] | None:
+    """Cap entry count + per-entry serialized size on a replay tape."""
+    if tape is None:
+        return None
+    if len(tape) > MAX_REPLAY_TAPE_ENTRIES:
+        raise ValueError(
+            f"replay_tape too long: {len(tape)} entries "
+            f"(limit {MAX_REPLAY_TAPE_ENTRIES})"
+        )
+    import json as _json
+    for i, entry in enumerate(tape):
+        try:
+            size = len(_json.dumps(entry, default=str).encode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"replay_tape entry {i} not JSON-serializable: {exc}")
+        if size > MAX_REPLAY_TAPE_ENTRY_BYTES:
+            raise ValueError(
+                f"replay_tape entry {i} too large: {size} bytes "
+                f"(limit {MAX_REPLAY_TAPE_ENTRY_BYTES})"
+            )
+    return tape
 
 
 class AgentConfig(BaseModel):
@@ -133,6 +164,11 @@ class SimulateRequest(BaseModel):
     scope_fn_source: str  # Python source for def scope(sql, params, rows): ...
     replay_tape: list[dict] | None = None  # serialized tape entries for replay
 
+    @field_validator("replay_tape")
+    @classmethod
+    def _bound_replay_tape(cls, v: list[dict] | None) -> list[dict] | None:
+        return _validate_replay_tape(v)
+
 
 class SimulateResponse(BaseModel):
     """Response from POST /sandbox/simulate."""
@@ -148,6 +184,11 @@ class SimulateBatchRequest(BaseModel):
     prompt: str
     candidates: list[str] = Field(..., min_length=1, max_length=3)
     replay_tape: list[dict] | None = None
+
+    @field_validator("replay_tape")
+    @classmethod
+    def _bound_replay_tape(cls, v: list[dict] | None) -> list[dict] | None:
+        return _validate_replay_tape(v)
 
 
 class SimulateBatchItem(BaseModel):

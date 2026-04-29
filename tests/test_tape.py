@@ -24,7 +24,10 @@ class TestHashRequest:
 
     def test_returns_hex_string(self):
         h = hash_request({"messages": [], "max_tokens": 1})
-        assert len(h) == 16
+        # Full SHA-256 hex digest (256 bits / 4 bits per hex char). Earlier
+        # versions truncated to 16 hex chars; collision cost was cheap enough
+        # to swap cached responses and dodge budget accounting.
+        assert len(h) == 64
         int(h, 16)  # should not raise
 
 

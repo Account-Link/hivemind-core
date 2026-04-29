@@ -731,8 +731,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         logger.info(fmt, *args)
 
     def _check_auth(self) -> bool:
+        # Defense-in-depth: PROXY_KEY MUST be set at process startup
+        # (see ``main()`` below). If we ever reach this branch with an
+        # empty key, fail closed rather than fall open — early returns
+        # in past versions defaulted to True here, which silently turned
+        # a misconfigured deploy into an unauthenticated data plane.
         if not PROXY_KEY:
-            return True
+            self._json_response(503, {"error": "proxy misconfigured: SQL_PROXY_KEY unset"})
+            return False
         key = self.headers.get("X-Proxy-Key", "")
         if not secrets.compare_digest(key.encode(), PROXY_KEY.encode()):
             self._json_response(401, {"error": "unauthorized"})
@@ -1047,8 +1053,19 @@ def _resolve_default_db_name() -> str:
 
 def main():
     global _default_db_name
+    # Refuse to start without a data-plane key. The previous behavior emitted
+    # a warning and continued — any caller reachable on the network could
+    # then run arbitrary SQL against any tenant database (since _check_auth
+    # short-circuited to True when PROXY_KEY was empty). A misconfigured
+    # deploy is much safer crashing loudly than silently fail-open. Operators
+    # who genuinely need an unauthenticated proxy can set the variable to a
+    # known sentinel, but the platform never assumes the empty default.
     if not PROXY_KEY:
-        logger.warning("SQL_PROXY_KEY not set — data plane unauthenticated!")
+        logger.error(
+            "SQL_PROXY_KEY is unset — refusing to start. Set the env var to "
+            "a non-empty value before launching the proxy."
+        )
+        sys.exit(2)
     if not ADMIN_KEY:
         logger.warning(
             "SQL_PROXY_ADMIN_KEY not set — admin API disabled"

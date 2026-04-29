@@ -58,63 +58,14 @@ _SCOPE_BUILTINS: dict = {
 MAX_SCOPE_FN_LENGTH = 10_000
 SCOPE_FN_TIMEOUT = 5  # seconds
 
-
-# Default privacy-policy scope function. Used as a SAFE FALLBACK when the
-# scope agent produces unparseable output or a scope_fn that fails AST
-# validation (e.g. uses imports, wrong signature, forbidden calls).
-#
-# This is not a security downgrade: it IS the default privacy policy the
-# scope agent is meant to enforce when no custom scenario is supplied.
-# Falling back to it on LLM failure means benign queries still work while
-# attacks that rely on the LLM producing a permissive scope are still
-# blocked.
-DEFAULT_SCOPE_FN_SOURCE = """\
-def scope(sql, params, rows):
-    s_up = sql.strip().upper()
-    if not (s_up.startswith('SELECT') or s_up.startswith('WITH')):
-        return {'allow': False, 'error': 'Only SELECT/WITH queries are allowed'}
-    sl = sql.lower()
-    token_extraction_markers = (
-        'regexp_matches', 'regexp_split_to_table', 'regexp_split_to_array',
-        'string_to_array', 'unnest(string_to_array',
-    )
-    if any(m in sl for m in token_extraction_markers):
-        return {'allow': False, 'error': 'Token-extraction SQL patterns are blocked'}
-    if rows:
-        keys_lc = [str(k).lower() for k in rows[0].keys()]
-        IDENT_COLS = (
-            'name', 'title', 'subject', 'handle', 'username', 'user_name',
-            'author', 'email', 'phone', 'address', 'id', 'uuid', 'identifier',
-            'description', 'content', 'text', 'body', 'message',
-            'first_name', 'last_name', 'display_name', 'full_name',
-            'screen_name', 'nickname', 'conversation_title', 'msg',
-        )
-        bad = [
-            k for k in keys_lc
-            if k in IDENT_COLS
-            or any(k.endswith('_' + t) for t in IDENT_COLS)
-        ]
-        if bad and len(rows) >= 2:
-            return {'allow': False, 'error': 'Row-level identifier columns blocked: ' + str(bad)}
-    if rows and len(rows) >= 3:
-        for k in list(rows[0].keys()):
-            sample = [r.get(k) for r in rows[:30]]
-            sample = [str(v) for v in sample if v is not None]
-            sample = [v for v in sample if 1 <= len(v) <= 80]
-            if len(sample) >= 3:
-                caps = sum(1 for v in sample if v[0:1].isupper())
-                if caps >= 3:
-                    return {'allow': False, 'error': 'Capitalized-token enumeration blocked'}
-    has_agg = any(
-        fn in sl for fn in (
-            'count(', 'sum(', 'avg(', 'min(', 'max(', 'group by',
-            'count (', 'sum (', 'avg (', 'min (', 'max (',
-        )
-    )
-    if not has_agg and rows and len(rows) > 5:
-        return {'allow': False, 'error': 'Non-aggregate row enumeration blocked; use COUNT/GROUP BY to get statistics'}
-    return {'allow': True, 'rows': rows}
-"""
+# Note: there is intentionally no module-level "default scope_fn" constant.
+# A previous version stored a Python source string named DEFAULT_SCOPE_FN_SOURCE
+# documented as a "safe fallback" — but it was unreferenced at runtime and used
+# literal ``{"allow": False, ...}`` returns that the NEVER-DENY check below
+# rejects, so calling ``compile_scope_fn(DEFAULT_SCOPE_FN_SOURCE)`` would raise.
+# The tracked-run pipeline now fails closed when the scope agent does not
+# produce a usable scope_fn (see ``Pipeline.run_query_agent_tracked``), so a
+# silent fallback is no longer a feature we want.
 
 _FORBIDDEN_CALLS = frozenset({
     "exec", "eval", "compile", "__import__", "open",
@@ -250,13 +201,20 @@ def compile_scope_fn(source: str) -> Callable[[str, list, list[dict]], dict]:
                 raise ValueError(
                     f"Scope functions cannot call '{node.func.id}'"
                 )
-        # NEVER-DENY constraint (iter 17 experiment):
-        # Reject any scope_fn that statically returns {"allow": False, ...}.
-        # The privacy boundary is at the ROWS, not at the SQL — forcing
-        # scope to write row-transforming code instead of SQL-shape gates.
-        # A scope_fn that wants to "block" a query should instead return
-        # {"allow": True, "rows": [{"match_count": len(rows)}]} (aggregate)
-        # or {"allow": True, "rows": <redacted>} (mask identifying fields).
+        # NEVER-DENY soft constraint (iter 17 experiment):
+        # Reject any scope_fn that statically returns ``{"allow": False, ...}``.
+        # The privacy boundary is at the ROWS, not at the SQL — we want scope
+        # to write row-transforming code instead of SQL-shape gates. A scope_fn
+        # that wants to "block" a query should instead return
+        # ``{"allow": True, "rows": [{"match_count": len(rows)}]}`` (aggregate)
+        # or ``{"allow": True, "rows": <redacted>}`` (mask identifying fields).
+        #
+        # NOTE: this is an authoring-style hint, not a security boundary. A
+        # determined scope_fn can still compute a deny via variable indirection
+        # (``allow_val = False; return {"allow": allow_val, ...}``) and
+        # ``apply_scope_fn`` honors it — see ``test_runtime_deny`` in
+        # ``tests/test_scope.py`` for the explicit contract. Treat the static
+        # check below as a nudge, not as a guarantee that scope cannot deny.
         if isinstance(node, ast.Dict):
             for key_node, value_node in zip(node.keys, node.values):
                 if (

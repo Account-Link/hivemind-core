@@ -57,7 +57,20 @@ line-length = 100
 # python idioms) belong in a dedicated cleanup pass — bundling them with
 # behavioral fixes makes diffs unreadable. Run `ruff check --select=I,B,UP
 # --fix` separately when you want that cleanup.
-select = ["F", "E9"]
+#
+# Curated bandit (S) rules: just the ones that catch genuinely dangerous
+# constructs in security-critical code. The full S set is ~1k+ violations
+# (mostly S101 ``assert`` in tests + S106/S108 fixture noise) and would
+# drown the gate. The intentional ``exec`` calls in scope.py compile and
+# run AST-validated user scope_fn source inside a restricted namespace —
+# they carry explicit ``# noqa: S102`` markers so accidental new
+# exec/eval/pickle uses stay visible.
+#   S102 — exec
+#   S307 — eval
+#   S301/S302 — pickle / cPickle deserialization
+#   S324 — insecure hash (md5/sha1) used in a security context
+#   S612 — logging.config.listen() without verify
+select = ["F", "E9", "S102", "S301", "S302", "S307", "S324", "S612"]
 ignore = [
     # F841 in tests is sometimes intentional (capturing kwargs for assertions
     # against side effects). Lift the rule on tests to avoid noise.
