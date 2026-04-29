@@ -1,4 +1,5 @@
-FROM postgres:16
+# postgres:16, resolved 2026-04-29.
+FROM postgres:16@sha256:71e27bf60b70bded003791b5573f8b808365613f341df20ffcf0c1ed7bc13ddf
 
 # Install wal-g and dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,12 +16,8 @@ RUN curl -fsSL "https://github.com/wal-g/wal-g/releases/download/${WALG_VERSION}
     && mv /usr/local/bin/wal-g-pg-22.04-amd64 /usr/local/bin/wal-g \
     && chmod +x /usr/local/bin/wal-g
 
-# WAL-G environment (overridden at runtime by boot script)
-ENV WALG_S3_PREFIX=""
-ENV WALG_LIBSODIUM_KEY=""
-ENV AWS_ENDPOINT=""
-ENV AWS_ACCESS_KEY_ID=""
-ENV AWS_SECRET_ACCESS_KEY=""
+# WAL-G runtime defaults. Secret values are injected by compose/runtime
+# instead of being declared in image metadata.
 ENV AWS_S3_FORCE_PATH_STYLE="true"
 ENV AWS_REGION="auto"
 

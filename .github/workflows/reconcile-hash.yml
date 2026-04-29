@@ -46,7 +46,8 @@ jobs:
       contents: read
     steps:
       - name: Install foundry (for cast)
-        uses: foundry-rs/foundry-toolchain@v1
+        # foundry-rs/foundry-toolchain v1.8.0, resolved 2026-04-29.
+        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d
         with:
           version: stable
 

@@ -10,6 +10,30 @@ from hivemind.db import Database
 from hivemind.version import APP_VERSION
 
 
+DEFAULT_AGENT_IDS = (
+    "default-index",
+    "default-scope",
+    "default-query",
+    "default-mediator",
+)
+
+
+def _clear_default_agents(dsn: str) -> None:
+    db = Database(dsn)
+    try:
+        for agent_id in DEFAULT_AGENT_IDS:
+            db.execute_commit(
+                "DELETE FROM _hivemind_agent_files WHERE agent_id = %s",
+                [agent_id],
+            )
+            db.execute_commit(
+                "DELETE FROM _hivemind_agents WHERE agent_id = %s",
+                [agent_id],
+            )
+    finally:
+        db.close()
+
+
 @pytest.fixture
 def pg_db():
     """Create a test Postgres Database."""
@@ -41,7 +65,8 @@ class TestDatabaseInit:
         # Internal tables should exist after Database.__init__
         rows = pg_db.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name LIKE '_hivemind_%'"
+            "WHERE table_schema = 'public' AND left(table_name, 10) = %s",
+            ["_hivemind_"],
         )
         table_names = {r["table_name"] for r in rows}
         assert "_hivemind_agents" in table_names
@@ -82,6 +107,7 @@ class TestDefaultAgentAutoload:
         test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
         if not test_dsn:
             pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+        _clear_default_agents(test_dsn)
 
         calls: list[str] = []
 
@@ -99,7 +125,10 @@ class TestDefaultAgentAutoload:
                 calls.append(image)
                 return {"agent.py": f"# {image}"}
 
-        monkeypatch.setattr("hivemind.core.DockerRunner", FakeRunner)
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda settings: FakeRunner(settings),
+        )
 
         settings = Settings(
             database_url=test_dsn,
@@ -130,14 +159,20 @@ class TestDefaultAgentAutoload:
             assert len(hm.agent_store.list_file_paths("default-query")) == 1
         finally:
             hm.db.close()
+            _clear_default_agents(test_dsn)
 
     def test_autoload_disabled_does_not_register(self, monkeypatch):
         test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
         if not test_dsn:
             pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+        _clear_default_agents(test_dsn)
 
         runner = MagicMock()
-        monkeypatch.setattr("hivemind.core.DockerRunner", runner)
+        runner.cleanup_stale_containers.return_value = None
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda _settings: runner,
+        )
 
         settings = Settings(
             database_url=test_dsn,
@@ -149,8 +184,11 @@ class TestDefaultAgentAutoload:
         hm = Hivemind(settings)
         try:
             assert hm.agent_store.get("default-index") is None
+            runner.image_exists.assert_not_called()
+            runner.extract_image_files.assert_not_called()
         finally:
             hm.db.close()
+            _clear_default_agents(test_dsn)
 
 
 @pytest.mark.asyncio
