@@ -1,12 +1,12 @@
 """Participant-presented key release for room data.
 
-Room manifests describe who may enter and what may leave. The room vault
+Room manifests describe who may enter and what may leave. The room data store
 stores the owner's room data under a random room DEK that is never derived
 from the CVM/KMS. The DEK is wrapped to participant bearer tokens instead:
 the owner ``hmk_`` and each room invite ``hmq_`` get their own wrap row.
 
 After a restart or redeploy, the in-memory room DEK cache is empty. A room
-with vault items can only be read again when a participant presents a bearer
+with room data can only be read again when a participant presents a bearer
 token that has a wrap for that room. That is the intended interaction gate:
 an operator-approved malicious update cannot decrypt old room data unless a
 participant interacts with that updated backend.
@@ -48,7 +48,7 @@ def _json(value: dict[str, Any]) -> str:
 
 
 class RoomVaultSealed(Exception):
-    """Raised when room vault data exists but no participant has opened it."""
+    """Raised when room data exists but no participant has opened it."""
 
 
 class RoomVault:

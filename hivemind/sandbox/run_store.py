@@ -49,7 +49,7 @@ class RunStore:
         ``issuer_token_id`` is the 12-hex prefix of the capability
         token that initiated this run (None for owner-initiated runs).
         Stored so A can audit "which hmq_ token did what" via
-        ``GET /v1/agent-runs?token_id=…``.
+        ``GET /v1/runs?token_id=…``.
         """
         now = time.time()
         self.db.execute_commit(
@@ -218,7 +218,7 @@ class RunStore:
         """List runs initiated by a given capability token, newest first.
 
         Used by the owner-side audit endpoint
-        (``GET /v1/agent-runs?token_id=…``) so A can see what each
+        (``GET /v1/runs?token_id=…``) so A can see what each
         ``hmq_`` token they minted has actually done. The token_id is
         the 12-hex prefix from ``_capability_tokens``.
         """

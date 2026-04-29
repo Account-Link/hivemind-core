@@ -26,7 +26,7 @@ from typing import Literal
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 RoomQueryMode = Literal["fixed", "uploadable"]
@@ -34,9 +34,8 @@ RoomVisibility = Literal["inspectable", "sealed"]
 RoomOutputVisibility = Literal["querier_only", "owner_and_querier"]
 RoomTrustMode = Literal[
     "pinned",
-    "owner_approved_composes",
-    "operator_approved",
-    "skip",
+    "owner_approved",
+    "operator_updates",
 ]
 
 _KNOWN_LLM_PROVIDERS = {"openrouter", "tinfoil"}
@@ -105,7 +104,7 @@ class RoomEgress(BaseModel):
 
 
 class RoomTrust(BaseModel):
-    mode: RoomTrustMode = "operator_approved"
+    mode: RoomTrustMode = "operator_updates"
     allowed_composes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -153,6 +152,8 @@ class RoomCreateRequest(BaseModel):
 
 
 class RoomRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(..., min_length=1)
     query_agent_id: str | None = None
     mediator_agent_id: str | None = None

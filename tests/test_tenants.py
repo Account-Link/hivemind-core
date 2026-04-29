@@ -257,13 +257,13 @@ def test_list_tenants_includes_provisioned(registry):
 
 def test_register_existing_adopts_db_without_touching_it(registry):
     """register_existing should NOT create the DB, only stamp the row."""
-    adopted_db = _unique("tenant_legacy")
+    adopted_db = _unique("tenant_existing")
     # Create the DB outside of registry, pretend it's an old hivemind DB.
     with psycopg.connect(TEST_DSN, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{adopted_db}"')
     registry._test_created_dbs.append(adopted_db)
 
-    result = registry.register_existing("legacy", adopted_db)
+    result = registry.register_existing("existing", adopted_db)
     assert result["db_name"] == adopted_db
     assert result["api_key"].startswith("hmk_")
 
@@ -401,5 +401,5 @@ def test_docker_image_tag_scoping():
     assert t1 != t2
     assert "t_abc123" in t1
     assert "t_xyz789" in t2
-    # Legacy (no tenant): still works.
+    # No tenant: still works.
     assert _tenant_image_tag(None, "agent1") == "hivemind-agent-agent1:latest"

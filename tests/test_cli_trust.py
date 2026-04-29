@@ -14,6 +14,11 @@ from click.testing import CliRunner
 from hivemind import cli as _cli_mod
 from hivemind import trust as _trust
 
+_ROOM_LINK = (
+    "hmroom://invite/room_test?"
+    "service=https%3A%2F%2Fcvm.example&token=hmq_test&owner_pubkey=test"
+)
+
 
 @pytest.fixture
 def _sandbox(tmp_path, monkeypatch):
@@ -59,8 +64,8 @@ def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):
         }},
     )
     runner = CliRunner()
-    # `hivemind agents` hits the service — triggers _require_trust.
-    result = runner.invoke(_cli_mod.cli, ["agents", "list"], input="N\n")
+    # A service-touching CLI command triggers _require_trust.
+    result = runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK], input="N\n")
     assert result.exit_code == 4
     assert "Aborted" in result.output or "Aborted" in (result.stderr_bytes or b"").decode()
 
@@ -84,7 +89,7 @@ def test_trust_check_records_approval_on_tofu_accept(_sandbox, monkeypatch):
     )
 
     runner = CliRunner()
-    runner.invoke(_cli_mod.cli, ["agents", "list"], input="y\n")
+    runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK], input="y\n")
 
     entry = _trust.get_approved("https://cvm.example")
     assert entry is not None
@@ -109,7 +114,7 @@ def test_trust_all_env_auto_approves_change(_sandbox, monkeypatch):
         ),
     )
     runner = CliRunner()
-    runner.invoke(_cli_mod.cli, ["agents", "list"])
+    runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
 
     entry = _trust.get_approved("https://cvm.example")
     assert entry["approved_compose_hash"] == "0xnew"
@@ -125,7 +130,7 @@ def test_trust_hash_env_aborts_on_mismatch(_sandbox, monkeypatch):
     )
     monkeypatch.setenv("HIVEMIND_TRUST_HASH", "0xexpected")
     runner = CliRunner()
-    result = runner.invoke(_cli_mod.cli, ["agents", "list"])
+    result = runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
     assert result.exit_code == 4
 
 
@@ -145,7 +150,7 @@ def test_trust_hash_env_approves_on_match(_sandbox, monkeypatch):
         ),
     )
     runner = CliRunner()
-    runner.invoke(_cli_mod.cli, ["agents", "list"])
+    runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
     assert _trust.get_approved("https://cvm.example") is not None
 
 
@@ -165,7 +170,7 @@ def test_no_trust_check_env_skips(_sandbox, monkeypatch):
         ),
     )
     runner = CliRunner()
-    runner.invoke(_cli_mod.cli, ["agents", "list"])
+    runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
     # Nothing recorded — we skipped the check entirely.
     assert _trust.get_approved("https://cvm.example") is None
 
@@ -183,7 +188,7 @@ def test_degraded_mode_proceeds_with_warning(_sandbox, monkeypatch):
         ),
     )
     runner = CliRunner()
-    result = runner.invoke(_cli_mod.cli, ["agents", "list"])
+    result = runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
     # Didn't abort on trust check; failed later on the real HTTP call.
     assert result.exit_code != 4
 
@@ -204,7 +209,7 @@ def test_trusted_state_is_silent(_sandbox, monkeypatch):
         ),
     )
     runner = CliRunner()
-    result = runner.invoke(_cli_mod.cli, ["agents", "list"])
+    result = runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
     # No TOFU prompt, no change warning — silent pass through the check.
     assert "compose hash" not in result.output.lower()
 

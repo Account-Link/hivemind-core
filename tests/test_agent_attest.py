@@ -1,4 +1,4 @@
-"""Tests for /v1/agents/{id}/attest and the /v1/scope-attest alias.
+"""Tests for /v1/room-agents/{id}/attest.
 
 Exercises the FastAPI server end-to-end (via ASGI transport, no real
 network) so we cover the auth dispatch, the role gate, the file digest
@@ -159,7 +159,7 @@ def test_image_digest_missing_image_returns_empty():
     )
 
 
-# ── /v1/agents/{id}/attest ────────────────────────────────────────────
+# ── /v1/room-agents/{id}/attest ────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -177,7 +177,7 @@ async def test_owner_can_attest_any_agent(app_and_registry):
 
     async with _client(app) as c:
         r = await c.get(
-            "/v1/agents/agent_alpha/attest",
+            "/v1/room-agents/agent_alpha/attest",
             headers={"Authorization": f"Bearer {t['api_key']}"},
         )
         assert r.status_code == 200, r.text
@@ -191,7 +191,7 @@ async def test_owner_can_attest_any_agent(app_and_registry):
         assert "attestation" in body
         # Owner can also attest the second agent.
         r2 = await c.get(
-            "/v1/agents/agent_beta/attest",
+            "/v1/room-agents/agent_beta/attest",
             headers={"Authorization": f"Bearer {t['api_key']}"},
         )
         assert r2.status_code == 200
@@ -215,14 +215,14 @@ async def test_query_token_can_only_attest_bound_agent(app_and_registry):
 
     async with _client(app) as c:
         r_ok = await c.get(
-            f"/v1/agents/{bound}/attest",
+            f"/v1/room-agents/{bound}/attest",
             headers={"Authorization": f"Bearer {qtoken}"},
         )
         assert r_ok.status_code == 200
         assert r_ok.json()["agent_id"] == bound
 
         r_404 = await c.get(
-            f"/v1/agents/{other}/attest",
+            f"/v1/room-agents/{other}/attest",
             headers={"Authorization": f"Bearer {qtoken}"},
         )
         assert r_404.status_code == 404
@@ -235,7 +235,7 @@ async def test_unknown_agent_returns_404(app_and_registry):
     created.append(t["db_name"])
     async with _client(app) as c:
         r = await c.get(
-            "/v1/agents/does_not_exist/attest",
+            "/v1/room-agents/does_not_exist/attest",
             headers={"Authorization": f"Bearer {t['api_key']}"},
         )
         assert r.status_code == 404
@@ -255,22 +255,22 @@ async def test_files_digest_is_stable_byte_for_byte(app_and_registry):
     _seed_agent(registry, t["tenant_id"], "agent_x", files)
     async with _client(app) as c:
         r = await c.get(
-            "/v1/agents/agent_x/attest",
+            "/v1/room-agents/agent_x/attest",
             headers={"Authorization": f"Bearer {t['api_key']}"},
         )
         assert r.status_code == 200
         server_digest = r.json()["files_digest_sha256"]
 
-        # Re-fetch each file via /v1/agents/{id}/files{,/{path}} and recompute.
+        # Re-fetch each file via /v1/room-agents/{id}/files{,/{path}} and recompute.
         rl = await c.get(
-            "/v1/agents/agent_x/files",
+            "/v1/room-agents/agent_x/files",
             headers={"Authorization": f"Bearer {t['api_key']}"},
         )
         assert rl.status_code == 200
         refetched: dict[str, str] = {}
         for entry in rl.json()["files"]:
             rf = await c.get(
-                f"/v1/agents/agent_x/files/{entry['path']}",
+                f"/v1/room-agents/agent_x/files/{entry['path']}",
                 headers={"Authorization": f"Bearer {t['api_key']}"},
             )
             assert rf.status_code == 200
@@ -278,137 +278,64 @@ async def test_files_digest_is_stable_byte_for_byte(app_and_registry):
         assert _digest(refetched) == server_digest
 
 
-# ── /v1/scope-attest alias ────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_scope_attest_alias_query_token(app_and_registry):
-    app, registry, created = app_and_registry
-    t = registry.provision("zeta")
-    created.append(t["db_name"])
-    _seed_agent(registry, t["tenant_id"], "the_scope", {"a.py": "1\n"})
-    qtoken = registry.mint_capability(
-        t["tenant_id"], "query", "", {"scope_agent_id": "the_scope"}
-    )["token"]
-
-    async with _client(app) as c:
-        r = await c.get(
-            "/v1/scope-attest",
-            headers={"Authorization": f"Bearer {qtoken}"},
-        )
-        assert r.status_code == 200
-        body = r.json()
-        # Alias preserves the legacy top-level scope_agent_id key.
-        assert body["scope_agent_id"] == "the_scope"
-        assert body["agent_id"] == "the_scope"
-        assert "image_digest" in body
-
-
-@pytest.mark.asyncio
-async def test_scope_attest_alias_owner_with_query_param(app_and_registry):
-    """The pre-fix bug: owner's ?scope_agent_id= wasn't being read.
-
-    This test verifies the fix.
-    """
-    app, registry, created = app_and_registry
-    t = registry.provision("eta")
-    created.append(t["db_name"])
-    _seed_agent(registry, t["tenant_id"], "scope_owned", {"a.py": "1\n"})
-
-    async with _client(app) as c:
-        r = await c.get(
-            "/v1/scope-attest?scope_agent_id=scope_owned",
-            headers={"Authorization": f"Bearer {t['api_key']}"},
-        )
-        assert r.status_code == 200
-        assert r.json()["scope_agent_id"] == "scope_owned"
-
-
-@pytest.mark.asyncio
-async def test_scope_attest_owner_missing_query_param_400(app_and_registry):
-    app, registry, created = app_and_registry
-    t = registry.provision("theta")
-    created.append(t["db_name"])
-    async with _client(app) as c:
-        r = await c.get(
-            "/v1/scope-attest",
-            headers={"Authorization": f"Bearer {t['api_key']}"},
-        )
-        assert r.status_code == 400
-
-
-# ── sealed inspection_mode (Phase 6) ──────────────────────────────────
+# ── sealed inspection_mode ────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_sealed_agent_files_endpoint_returns_403(app_and_registry):
     """A sealed-mode agent's plaintext source must NOT be readable via
-    /v1/agents/{id}/files/{path} — even by the room owner. Image digest,
+    /v1/room-agents/{id}/files/{path} — even by the room owner. Image digest,
     file path list, and attested digest stay inspectable."""
-    from hivemind import agent_seal
+    app, registry, created = app_and_registry
+    t = registry.provision("sealed_a")
+    created.append(t["db_name"])
+    registry.resolve_any(t["api_key"])
 
-    agent_seal.reset_for_tests()
-    with agent_seal._state["lock"]:
-        agent_seal._state["key"] = b"\xab" * 32
-        agent_seal._state["key_path"] = "test-key"
-    try:
-        app, registry, created = app_and_registry
-        t = registry.provision("sealed_a")
-        created.append(t["db_name"])
-
-        hive = registry.for_tenant(t["tenant_id"])
-        hive.agent_store.create(
-            AgentConfig(
-                agent_id="agent_sealed",
-                name="sealed-demo",
-                description="",
-                agent_type="query",
-                image="hivemind/sealed-demo:latest",
-                entrypoint=None,
-                memory_mb=64,
-                max_llm_calls=1,
-                max_tokens=1,
-                timeout_seconds=10,
-                inspection_mode="sealed",
-            )
-        )
-        hive.agent_store.save_files(
-            "agent_sealed",
-            {"main.py": "print('SECRET_TOKEN_42')\n"},
+    hive = registry.for_tenant(t["tenant_id"])
+    hive.agent_store.create(
+        AgentConfig(
+            agent_id="agent_private",
+            name="sealed-demo",
+            description="",
+            agent_type="query",
+            image="hivemind/sealed-demo:latest",
+            entrypoint=None,
+            memory_mb=64,
+            max_llm_calls=1,
+            max_tokens=1,
+            timeout_seconds=10,
             inspection_mode="sealed",
         )
+    )
+    hive.agent_store.save_files(
+        "agent_private",
+        {"main.py": "print('SECRET_TOKEN_42')\n"},
+        inspection_mode="sealed",
+    )
 
-        async with _client(app) as c:
-            # Path-list still works (paths/sizes are not secret).
-            rl = await c.get(
-                "/v1/agents/agent_sealed/files",
-                headers={"Authorization": f"Bearer {t['api_key']}"},
-            )
-            assert rl.status_code == 200
-            assert any(
-                f["path"] == "main.py" for f in rl.json()["files"]
-            )
+    async with _client(app) as c:
+        rl = await c.get(
+            "/v1/room-agents/agent_private/files",
+            headers={"Authorization": f"Bearer {t['api_key']}"},
+        )
+        assert rl.status_code == 200
+        assert any(f["path"] == "main.py" for f in rl.json()["files"])
 
-            # Plaintext fetch: 403 under sealed mode.
-            rf = await c.get(
-                "/v1/agents/agent_sealed/files/main.py",
-                headers={"Authorization": f"Bearer {t['api_key']}"},
-            )
-            assert rf.status_code == 403, rf.text
-            assert "sealed" in rf.text.lower()
-            # And the secret never leaks even through the error body.
-            assert "SECRET_TOKEN_42" not in rf.text
+        rf = await c.get(
+            "/v1/room-agents/agent_private/files/main.py",
+            headers={"Authorization": f"Bearer {t['api_key']}"},
+        )
+        assert rf.status_code == 403, rf.text
+        assert "sealed" in rf.text.lower()
+        assert "SECRET_TOKEN_42" not in rf.text
 
-            # Attestation surface still works.
-            ra = await c.get(
-                "/v1/agents/agent_sealed/attest",
-                headers={"Authorization": f"Bearer {t['api_key']}"},
-            )
-            assert ra.status_code == 200
-            body = ra.json()
-            assert body["inspection_mode"] == "sealed"
-            assert body["files_count"] == 1
-            assert body["files_digest_sha256"]
-            assert body["agent"]["inspection_mode"] == "sealed"
-    finally:
-        agent_seal.reset_for_tests()
+        ra = await c.get(
+            "/v1/room-agents/agent_private/attest",
+            headers={"Authorization": f"Bearer {t['api_key']}"},
+        )
+        assert ra.status_code == 200
+        body = ra.json()
+        assert body["inspection_mode"] == "sealed"
+        assert body["files_count"] == 1
+        assert body["files_digest_sha256"]
+        assert body["agent"]["inspection_mode"] == "sealed"

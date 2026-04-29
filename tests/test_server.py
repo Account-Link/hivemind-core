@@ -105,27 +105,21 @@ class TestAuth:
     @pytest.mark.asyncio
     async def test_owner_endpoint_requires_auth(self, server_env):
         client, _api_key = server_env
-        resp = await client.post("/v1/store", json={"sql": "SELECT 1"})
+        resp = await client.get("/v1/room-agents")
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_owner_endpoint_rejects_wrong_key(self, server_env):
         client, _api_key = server_env
-        resp = await client.post(
-            "/v1/store",
-            json={"sql": "SELECT 1"},
-            headers={"Authorization": "Bearer wrong-key"},
+        resp = await client.get(
+            "/v1/room-agents", headers={"Authorization": "Bearer wrong-key"}
         )
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_owner_endpoint_accepts_correct_key(self, server_env):
         client, api_key = server_env
-        resp = await client.post(
-            "/v1/store",
-            json={"sql": "SELECT 1 AS val"},
-            headers=_owner_headers(api_key),
-        )
+        resp = await client.get("/v1/room-agents", headers=_owner_headers(api_key))
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
@@ -133,105 +127,6 @@ class TestAuth:
         client, _api_key = server_env
         resp = await client.get("/v1/health")
         assert resp.status_code == 401
-
-
-class TestStore:
-    @pytest.mark.asyncio
-    async def test_store_select(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/store",
-            json={"sql": "SELECT 1 AS val"},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["rows"] == [{"val": 1}]
-
-    @pytest.mark.asyncio
-    async def test_store_create_insert_read(self, server_env):
-        client, api_key = server_env
-        headers = _owner_headers(api_key)
-        resp = await client.post(
-            "/v1/store",
-            json={
-                "sql": (
-                    "CREATE TABLE IF NOT EXISTS test_server_data "
-                    "(id SERIAL PRIMARY KEY, val TEXT)"
-                )
-            },
-            headers=headers,
-        )
-        assert resp.status_code == 200
-
-        try:
-            resp = await client.post(
-                "/v1/store",
-                json={
-                    "sql": "INSERT INTO test_server_data (val) VALUES (%s)",
-                    "params": ["hello"],
-                },
-                headers=headers,
-            )
-            assert resp.status_code == 200
-            assert resp.json()["rowcount"] == 1
-
-            resp = await client.post(
-                "/v1/store",
-                json={"sql": "SELECT val FROM test_server_data"},
-                headers=headers,
-            )
-            assert resp.status_code == 200
-            assert resp.json()["rows"] == [{"val": "hello"}]
-        finally:
-            await client.post(
-                "/v1/store",
-                json={"sql": "DROP TABLE IF EXISTS test_server_data"},
-                headers=headers,
-            )
-
-    @pytest.mark.asyncio
-    async def test_store_empty_body_422(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/store",
-            json={},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 422
-
-    @pytest.mark.asyncio
-    async def test_store_missing_sql_422(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/store",
-            json={"params": [1]},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 422
-
-
-class TestQuery:
-    @pytest.mark.asyncio
-    async def test_query_empty_body_422(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/query/run/submit",
-            json={},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 422
-
-    @pytest.mark.asyncio
-    async def test_query_no_scope_agent_400(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/query/run/submit",
-            json={"query": "What happened?"},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 400
-        assert "scope_agent_id is required" in resp.json()["detail"]
 
 
 class TestAdminSchema:
@@ -247,34 +142,11 @@ class TestAdminSchema:
         assert "schema" in data
         assert isinstance(data["schema"], list)
 
-
-class TestIndex:
-    @pytest.mark.asyncio
-    async def test_index_empty_body_422(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/index",
-            json={},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 422
-
-    @pytest.mark.asyncio
-    async def test_index_no_agent_400(self, server_env):
-        client, api_key = server_env
-        resp = await client.post(
-            "/v1/index",
-            json={"data": "Some document text"},
-            headers=_owner_headers(api_key),
-        )
-        assert resp.status_code == 400
-
-
 class TestAgentCRUD:
     @pytest.mark.asyncio
     async def test_list_agents(self, server_env):
         client, api_key = server_env
-        resp = await client.get("/v1/agents", headers=_owner_headers(api_key))
+        resp = await client.get("/v1/room-agents", headers=_owner_headers(api_key))
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
@@ -282,7 +154,7 @@ class TestAgentCRUD:
     async def test_get_nonexistent_agent_404(self, server_env):
         client, api_key = server_env
         resp = await client.get(
-            "/v1/agents/nonexistent-agent-id",
+            "/v1/room-agents/nonexistent-agent-id",
             headers=_owner_headers(api_key),
         )
         assert resp.status_code == 404
@@ -291,7 +163,7 @@ class TestAgentCRUD:
     async def test_delete_nonexistent_agent_404(self, server_env):
         client, api_key = server_env
         resp = await client.delete(
-            "/v1/agents/nonexistent-agent-id",
+            "/v1/room-agents/nonexistent-agent-id",
             headers=_owner_headers(api_key),
         )
         assert resp.status_code == 404

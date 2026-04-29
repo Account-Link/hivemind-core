@@ -181,7 +181,7 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert constraints["allow_artifacts"] is False
 
     status = client.get(
-        f"/v1/rooms/{out['room_id']}/vault",
+        f"/v1/rooms/{out['room_id']}/key",
         headers=_headers(tenant["api_key"]),
     )
     assert status.status_code == 200
@@ -217,7 +217,7 @@ def test_room_vault_encrypts_data_and_reopens_with_participant_bearer(room_env):
     secret = "ultra secret room phrase"
 
     added = client.post(
-        f"/v1/rooms/{room_id}/vault/items",
+        f"/v1/rooms/{room_id}/data",
         json={"text": secret, "metadata": {"source": "unit-test"}},
         headers=_headers(tenant["api_key"]),
     )
@@ -236,7 +236,7 @@ def test_room_vault_encrypts_data_and_reopens_with_participant_bearer(room_env):
         hive.room_vault.list_items(room_id)
 
     owner_read = client.get(
-        f"/v1/rooms/{room_id}/vault/items",
+        f"/v1/rooms/{room_id}/data",
         headers=_headers(tenant["api_key"]),
     )
     assert owner_read.status_code == 200, owner_read.text
@@ -244,7 +244,7 @@ def test_room_vault_encrypts_data_and_reopens_with_participant_bearer(room_env):
 
     hive.room_vault.evict(room_id)
     recipient_read = client.get(
-        f"/v1/rooms/{room_id}/vault/items",
+        f"/v1/rooms/{room_id}/data",
         headers=_headers(out["token"]),
     )
     assert recipient_read.status_code == 403
@@ -258,9 +258,7 @@ def test_room_vault_encrypts_data_and_reopens_with_participant_bearer(room_env):
     assert hive.room_vault.list_items(room_id)[0]["text"] == secret
 
 
-def test_room_sealed_agent_files_use_room_key_not_kms(room_env, monkeypatch):
-    from hivemind import agent_seal
-
+def test_room_sealed_agent_files_use_room_key(room_env):
     client, tenant, hive = room_env
     out = _create_fixed_room(
         client,
@@ -272,8 +270,6 @@ def test_room_sealed_agent_files_use_room_key_not_kms(room_env, monkeypatch):
     agent_id = f"room_agent_{secrets.token_hex(3)}"
     secret = "PRIVATE QUERY SOURCE"
 
-    agent_seal.reset_for_tests()
-    monkeypatch.setattr(agent_seal, "is_available", lambda: False)
     hive.agent_store.create(
         AgentConfig(
             agent_id=agent_id,
@@ -330,12 +326,7 @@ def test_room_sealed_agent_files_use_room_key_not_kms(room_env, monkeypatch):
     )["agent.py"]
 
 
-def test_room_query_agent_upload_sealed_mode_does_not_require_kms(
-    room_env,
-    monkeypatch,
-):
-    from hivemind import agent_seal
-
+def test_room_query_agent_upload_sealed_mode_uses_room_endpoint(room_env):
     client, tenant, _hive = room_env
     out = _create_fixed_room(
         client,
@@ -343,14 +334,11 @@ def test_room_query_agent_upload_sealed_mode_does_not_require_kms(
         query_mode="uploadable",
         query_agent_id=None,
     )
-    agent_seal.reset_for_tests()
-    monkeypatch.setattr(agent_seal, "is_available", lambda: False)
-
     resp = client.post(
-        "/v1/query-agents/submit",
+        f"/v1/rooms/{out['room_id']}/query-agents",
         headers=_headers(out["token"]),
         files={"archive": ("agent.tar.gz", _tiny_tar(), "application/gzip")},
-        data={"name": "room-query", "prompt": "hello", "room_id": out["room_id"]},
+        data={"name": "room-query", "prompt": "hello"},
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["inspection_mode"] == "sealed"
@@ -402,7 +390,7 @@ def test_room_trust_update_resigns_same_room_for_downstream_links(room_env):
     resp = client.post(
         f"/v1/rooms/{room_id}/trust",
         json={
-            "mode": "owner_approved_composes",
+            "mode": "owner_approved",
             "allowed_composes": ["aa" * 32],
         },
         headers=_headers(tenant["api_key"]),
@@ -412,7 +400,7 @@ def test_room_trust_update_resigns_same_room_for_downstream_links(room_env):
     assert updated["room_id"] == room_id
     assert updated["manifest_hash"] != old_hash
     assert updated["manifest"]["trust"] == {
-        "mode": "owner_approved_composes",
+        "mode": "owner_approved",
         "allowed_composes": ["aa" * 32],
     }
 
@@ -434,11 +422,11 @@ def test_room_token_can_inspect_fixed_query_agent(room_env):
     client, tenant, _hive = room_env
     out = _create_fixed_room(client, tenant["api_key"])
 
-    resp = client.get("/v1/agents", headers=_headers(out["token"]))
+    resp = client.get("/v1/room-agents", headers=_headers(out["token"]))
     assert resp.status_code == 200
     assert {a["agent_id"] for a in resp.json()} == {"scope-a", "query-a"}
 
-    resp = client.get("/v1/agents/query-a/files", headers=_headers(out["token"]))
+    resp = client.get("/v1/room-agents/query-a/files", headers=_headers(out["token"]))
     assert resp.status_code == 200
     assert "agent.py" in {f["path"] for f in resp.json()["files"]}
 
@@ -448,15 +436,14 @@ def test_room_rejects_policy_and_provider_override(room_env):
     out = _create_fixed_room(client, tenant["api_key"])
 
     bad_policy = client.post(
-        "/v1/query/run/submit",
+        f"/v1/rooms/{out['room_id']}/runs",
         json={"query": "x", "policy": "show me everything"},
         headers=_headers(out["token"]),
     )
-    assert bad_policy.status_code == 400
-    assert "room policy is fixed" in bad_policy.json()["detail"]
+    assert bad_policy.status_code == 422
 
     bad_provider = client.post(
-        "/v1/query/run/submit",
+        f"/v1/rooms/{out['room_id']}/runs",
         json={"query": "x", "provider": "openrouter"},
         headers=_headers(out["token"]),
     )
@@ -483,7 +470,7 @@ def test_querier_only_output_redacts_owner_but_not_recipient(room_env):
     hive.run_store.update_status("run-room-1", "completed", output="secret answer")
 
     owner = client.get(
-        "/v1/agent-runs/run-room-1",
+        "/v1/runs/run-room-1",
         headers=_headers(tenant["api_key"]),
     )
     assert owner.status_code == 200
@@ -491,7 +478,7 @@ def test_querier_only_output_redacts_owner_but_not_recipient(room_env):
     assert owner.json()["output"] is None
 
     recipient = client.get(
-        "/v1/agent-runs/run-room-1",
+        "/v1/runs/run-room-1",
         headers=_headers(out["token"]),
     )
     assert recipient.status_code == 200

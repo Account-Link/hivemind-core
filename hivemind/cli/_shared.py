@@ -150,12 +150,11 @@ def _query_tracked(
     fetch: bool = False,
     fetch_headers: dict | None = None,
     poll_seconds: int = 600,
+    submit_path: str = "/v1/_internal/query/run/submit",
 ) -> None:
     """Submit a query, poll the run row, verify the Phase 5 envelope.
 
-    POSTs to ``/v1/query/run/submit`` (the only async query path — every
-    query produces a signed envelope so strict-default attestation
-    holds). Polls ``/v1/agent-runs/{run_id}`` until the row reaches
+    POSTs to the room run endpoint. Polls ``/v1/runs/{run_id}`` until the row reaches
     ``completed`` or ``failed``, then hands off to ``_emit_run_result``
     which Ed25519-verifies the signed body and pubkey-matches it
     against ``expected_pubkey_b64`` (sourced from ``/v1/attestation``
@@ -163,7 +162,7 @@ def _query_tracked(
     """
     try:
         resp = _hpost(
-            f"{service}/v1/query/run/submit",
+            f"{service}{submit_path}",
             json=payload,
             headers=headers,
             timeout=30,
@@ -188,7 +187,7 @@ def _query_tracked(
     while time.monotonic() < deadline:
         try:
             sr = _hget(
-                f"{service}/v1/agent-runs/{run_id}",
+                f"{service}/v1/runs/{run_id}",
                 headers=headers,
                 timeout=15,
             )
@@ -237,7 +236,7 @@ def _query_tracked(
     else:
         click.echo(
             f"Error: timed out after {poll_seconds}s. "
-            f"Check `hivemind runs {run_id}`.",
+            f"Check `hivemind room runs {run_id}`.",
             err=True,
         )
     raise SystemExit(5)
@@ -249,7 +248,7 @@ def _query_tracked(
 def _artifact_url(service: str, run_id: str, filename: str) -> str:
     safe_filename = validate_artifact_filename(filename)
     return (
-        f"{service}/v1/query/runs/{run_id}/artifacts/"
+        f"{service}/v1/runs/{run_id}/artifacts/"
         f"{quote(safe_filename, safe='')}"
     )
 
@@ -268,10 +267,7 @@ def _emit_run_result(
     strict_attestation: bool = True,
     fetch_headers: dict | None = None,
 ) -> None:
-    # Server returns these as top-level columns from the runs table
-    # (see hivemind/sandbox/run_store.py). The legacy ``result.output``
-    # nesting never existed in this code path; reading it always
-    # returned None and printed "(empty)" even when the agent succeeded.
+    # Server returns these as top-level columns from the runs table.
     output = data.get("output") or ""
     index_output = data.get("index_output") or ""
     mediated = data.get("mediated")  # reserved for future mediator runs
@@ -408,141 +404,6 @@ def _emit_run_result(
             "--no-strict-attestation is set)",
             err=True,
         )
-
-
-def _parse_hmq_uri(uri: str) -> dict:
-    """Decompose a ``hmq://host/<scope_id>?token=...&compose=...&files=...`` URI.
-
-    Returns a dict with ``service``, ``scope_agent_id``, ``token``,
-    ``compose_hash`` (may be empty), ``files_digest`` (may be empty).
-    Aborts the CLI on malformed input.
-    """
-    if not uri.startswith("hmq://"):
-        click.echo("Error: URI must start with hmq://", err=True)
-        raise SystemExit(1)
-    rest = uri[len("hmq://"):]
-    if "/" not in rest:
-        click.echo(
-            "Error: URI is missing /<scope_agent_id> component.", err=True
-        )
-        raise SystemExit(1)
-    host_part, _, tail = rest.partition("/")
-    if "?" in tail:
-        scope_id, _, query_str = tail.partition("?")
-    else:
-        scope_id, query_str = tail, ""
-    if not scope_id:
-        click.echo("Error: URI is missing scope_agent_id.", err=True)
-        raise SystemExit(1)
-    params: dict[str, str] = {}
-    for kv in query_str.split("&"):
-        if not kv:
-            continue
-        k, _, v = kv.partition("=")
-        params[k] = v
-    token = params.get("token", "")
-    if not token.startswith("hmq_"):
-        click.echo(
-            "Error: URI is missing token=hmq_... or token has wrong prefix.",
-            err=True,
-        )
-        raise SystemExit(1)
-    scheme = params.get("scheme", "https")
-    return {
-        "service": f"{scheme}://{host_part}",
-        "scope_agent_id": scope_id,
-        "token": token,
-        "compose_hash": params.get("compose", "").lower(),
-        "files_digest": params.get("files", "").lower(),
-        "query_agent_id": params.get("qa", ""),
-        # Phase 3 pin-rotation: when present, the URI authorises any
-        # compose blessed by the holder of this Ed25519 pubkey, with
-        # the live attested-files digest taken from the signed pin.
-        # Empty string = legacy single-compose URI.
-        "signer_pubkey": params.get("signer", ""),
-    }
-
-
-# ── load helpers ──
-
-
-def _split_sql_statements(sql: str) -> list[str]:
-    """Naive SQL splitter: handles ';' terminators, single-quoted strings,
-    $$-delimited bodies, and -- line comments. Good enough for pg_dump-style
-    output."""
-    out: list[str] = []
-    buf: list[str] = []
-    i, n = 0, len(sql)
-    in_single = False
-    in_dollar = False
-    dollar_tag = ""
-    while i < n:
-        c = sql[i]
-        if not in_single and not in_dollar and c == "-" and i + 1 < n and sql[i + 1] == "-":
-            nl = sql.find("\n", i)
-            if nl < 0:
-                break
-            i = nl + 1
-            continue
-        if not in_dollar and c == "'":
-            in_single = not in_single
-            buf.append(c)
-            i += 1
-            continue
-        if not in_single and c == "$":
-            end = sql.find("$", i + 1)
-            if end > i:
-                tag = sql[i : end + 1]
-                if in_dollar and tag == dollar_tag:
-                    buf.append(tag)
-                    i = end + 1
-                    in_dollar = False
-                    dollar_tag = ""
-                    continue
-                if not in_dollar:
-                    buf.append(tag)
-                    i = end + 1
-                    in_dollar = True
-                    dollar_tag = tag
-                    continue
-        if c == ";" and not in_single and not in_dollar:
-            stmt = "".join(buf).strip()
-            if stmt:
-                out.append(stmt)
-            buf = []
-            i += 1
-            continue
-        buf.append(c)
-        i += 1
-    tail = "".join(buf).strip()
-    if tail:
-        out.append(tail)
-    return out
-
-
-def _batch_insert(
-    post_fn,
-    table: str,
-    cols: list[str],
-    rows: list[list],
-    batch_size: int,
-) -> None:
-    """Multi-row INSERT: `INSERT INTO t (c1,c2) VALUES (%s,%s),(%s,%s),...`."""
-    if not rows:
-        return
-    col_list = ", ".join(f'"{c}"' for c in cols)
-    row_tpl = "(" + ", ".join(["%s"] * len(cols)) + ")"
-    total = len(rows)
-    with click.progressbar(length=total, label="insert") as bar:
-        for start in range(0, total, batch_size):
-            chunk = rows[start : start + batch_size]
-            placeholders = ", ".join([row_tpl] * len(chunk))
-            sql = f'INSERT INTO "{table}" ({col_list}) VALUES {placeholders}'
-            params: list = []
-            for r in chunk:
-                params.extend(r)
-            post_fn(sql, params)
-            bar.update(len(chunk))
 
 
 # ── trust attest --reproduce ──

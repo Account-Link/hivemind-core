@@ -3,7 +3,7 @@
 Verifies that with a sealer bound and the per-tenant DEK cached,
 ``save_files`` writes ciphertext to ``_hivemind_agent_files`` and
 ``read_file`` / ``get_files`` decrypt transparently. Also verifies
-the legacy plaintext path still works (no sealer).
+the no-sealer plaintext path still works.
 
 Postgres-backed; skips when ``HIVEMIND_TEST_DATABASE_URL`` not set.
 """
@@ -86,7 +86,7 @@ def _config(agent_id: str = "agent_demo") -> AgentConfig:
 
 
 def test_plaintext_path_when_no_sealer(fresh_db):
-    """Without a sealer the store keeps plaintext rows (legacy mode)."""
+    """Without a sealer the store keeps plaintext rows."""
     db, _ = fresh_db
     store = AgentStore(db, sealer=None, tenant_id=None)
     cfg = _config("agent_plain")
@@ -112,7 +112,7 @@ def test_ciphertext_path_when_sealer_warm(fresh_db):
     tenant_id = "t_demo"
     sealer.cache(tenant_id, new_dek())
     store = AgentStore(db, sealer=sealer, tenant_id=tenant_id)
-    cfg = _config("agent_sealed")
+    cfg = _config("agent_private")
     store.upsert(cfg)
     store.save_files(
         cfg.agent_id,
@@ -146,7 +146,7 @@ def test_decrypt_fails_when_dek_evicted(fresh_db):
     tenant_id = "t_demo"
     sealer.cache(tenant_id, new_dek())
     store = AgentStore(db, sealer=sealer, tenant_id=tenant_id)
-    cfg = _config("agent_sealed_evict")
+    cfg = _config("agent_private_evict")
     store.upsert(cfg)
     store.save_files(cfg.agent_id, {"a.py": "print('A')\n"})
 
@@ -287,7 +287,7 @@ def test_attestable_under_seal(fresh_db):
     tenant_id = "t_seal_att"
     sealer.cache(tenant_id, new_dek())
     store = AgentStore(db, sealer=sealer, tenant_id=tenant_id)
-    cfg = _config("agent_seal_att")
+    cfg = _config("agent_private_att")
     store.upsert(cfg)
     store.save_files(
         cfg.agent_id,

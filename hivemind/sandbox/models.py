@@ -81,7 +81,7 @@ class AgentConfig(BaseModel):
     # agents inherit from their bound scope agent.
     #   "full"   — owner token can read source via files endpoint.
     #   "sealed" — bytes encrypted for runtime-only use; room uploads use
-    #              the room key, non-room legacy uploads use enclave KMS.
+    #              the room key, reusable room agents use the tenant key.
     #              Files endpoint refuses plaintext to anyone. Image digest
     #              + attested file list still bind the workload.
     inspection_mode: str = "full"
@@ -145,7 +145,7 @@ class BridgeToolResponse(BaseModel):
 
 
 class AgentCreateRequest(BaseModel):
-    """Request body for POST /v1/agents — register a Docker agent."""
+    """Internal request body for registering an already-built Docker image."""
 
     name: str
     image: str  # Docker image reference (required)

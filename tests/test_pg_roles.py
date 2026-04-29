@@ -244,7 +244,7 @@ def test_migrate_tenant_to_role_is_idempotent():
     db_name = f"tenant_{tenant_id}"
     role_name = role_name_for_tenant(tenant_id)
 
-    # Pre-create the DB without a role (legacy path).
+    # Pre-create the DB without a role.
     mod.admin_create_db(db_name)
     try:
         # First migration: creates the role + transfers ownership.

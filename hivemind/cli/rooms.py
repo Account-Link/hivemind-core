@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -10,8 +11,8 @@ import click
 import httpx
 
 from ._config import _headers, _load_config
-from ._http import _api_error
-from ._shared import _query_tracked
+from ._http import _api_error, _tarball_from_dir
+from ._shared import _emit_run_result, _query_tracked
 from ._trust import _require_trust
 from ..rooms import verify_room_envelope
 
@@ -90,8 +91,8 @@ def _live_compose_from_attestation(data: dict) -> str:
 def _enforce_room_trust(room_attest: dict) -> None:
     manifest = (room_attest.get("room") or {}).get("manifest") or {}
     trust = manifest.get("trust") or {}
-    mode = (trust.get("mode") or "operator_approved").strip()
-    if mode in {"operator_approved", "skip"}:
+    mode = (trust.get("mode") or "operator_updates").strip()
+    if mode == "operator_updates":
         return
     live = _live_compose_from_attestation(room_attest)
     allowed = {str(c).lower() for c in (trust.get("allowed_composes") or [])}
@@ -115,13 +116,165 @@ def _parse_meta(pairs: tuple[str, ...]) -> dict:
     return out
 
 
+def _inspection_mode_from_visibility(value: str) -> str:
+    return "sealed" if value == "sealed" else "full"
+
+
+def _archive_for_path(path: Path, name: str | None = None) -> tuple[bytes, str, str]:
+    if path.is_dir():
+        return _tarball_from_dir(path), f"{path.name}.tar.gz", name or path.name
+    if path.suffix in {".gz", ".tgz"} or path.name.endswith(".tar.gz"):
+        agent_name = name or path.name.replace(".tar.gz", "").replace(".tgz", "")
+        return path.read_bytes(), path.name, agent_name
+    raise click.ClickException(f"Unsupported agent path: {path}. Use a directory or .tar.gz.")
+
+
+def _maybe_upload_room_agent(
+    *,
+    service: str,
+    headers: dict,
+    ref: str,
+    agent_type: str,
+    visibility: str,
+    private_paths: tuple[str, ...] = (),
+    as_json: bool = False,
+) -> str:
+    path = Path(ref)
+    if not path.exists():
+        return ref.strip()
+
+    archive_bytes, archive_name, agent_name = _archive_for_path(path)
+    if not as_json:
+        click.echo(f"Uploading {agent_type} agent {archive_name}...")
+    resp = _hpost(
+        f"{service}/v1/room-agents",
+        files={"archive": (archive_name, archive_bytes, "application/gzip")},
+        data={
+            "name": agent_name,
+            "agent_type": agent_type,
+            "description": f"hivemind room {agent_type} agent {path.name}",
+            "private_paths": _json.dumps(list(private_paths)),
+            "inspection_mode": _inspection_mode_from_visibility(visibility),
+        },
+        headers=headers,
+        timeout=60,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    data = resp.json()
+    run_id = data.get("run_id")
+    if run_id:
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            status_resp = _hget(f"{service}/v1/runs/{run_id}", headers=headers, timeout=10)
+            if status_resp.status_code == 404:
+                time.sleep(2)
+                continue
+            status = status_resp.json()
+            state = status.get("status")
+            if state == "completed":
+                break
+            if state == "failed":
+                raise click.ClickException(f"agent build failed: {status.get('error', '?')}")
+            time.sleep(2)
+        else:
+            raise click.ClickException(f"agent build timed out: run {run_id}")
+    return data["agent_id"]
+
+
+def _upload_room_query_agent_and_poll(
+    *,
+    service: str,
+    headers: dict,
+    room_id: str,
+    archive_bytes: bytes,
+    archive_name: str,
+    agent_name: str,
+    description: str,
+    prompt: str,
+    memory_mb: int,
+    max_llm_calls: int,
+    max_tokens: int,
+    timeout: int,
+    model: str | None,
+    provider: str | None,
+    as_json: bool,
+    fetch: bool,
+    expected_pubkey_b64: str | None,
+    expected_compose_hash: str | None,
+    expected_room_manifest_hash: str | None,
+    strict_attestation: bool,
+) -> None:
+    form_data: dict[str, str] = {
+        "name": agent_name,
+        "prompt": prompt,
+        "description": description,
+        "memory_mb": str(memory_mb),
+        "max_llm_calls": str(max_llm_calls),
+        "max_tokens": str(max_tokens),
+        "timeout_seconds": str(min(timeout, 3600)),
+    }
+    if model:
+        form_data["model"] = model
+    if provider:
+        form_data["provider"] = provider
+
+    resp = _hpost(
+        f"{service}/v1/rooms/{room_id}/query-agents",
+        files={"archive": (archive_name, archive_bytes, "application/gzip")},
+        data=form_data,
+        headers=headers,
+        timeout=60,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+
+    submission = resp.json()
+    run_id = submission["run_id"]
+    if not as_json:
+        click.echo(f"Submitted: run_id={run_id} agent_id={submission.get('agent_id')}")
+
+    deadline = time.time() + timeout
+    last_status = ""
+    while time.time() < deadline:
+        sr = _hget(f"{service}/v1/runs/{run_id}", headers=headers, timeout=15)
+        if sr.status_code == 404:
+            time.sleep(2)
+            continue
+        data = sr.json()
+        status = data.get("status", "")
+        if status != last_status and not as_json:
+            click.echo(f"  status: {status}")
+            last_status = status
+        if status == "completed":
+            _emit_run_result(
+                service,
+                data,
+                run_id,
+                as_json=as_json,
+                fetch=fetch,
+                expected_pubkey_b64=expected_pubkey_b64,
+                expected_compose_hash=expected_compose_hash,
+                expected_room_id=room_id,
+                expected_room_manifest_hash=expected_room_manifest_hash,
+                strict_attestation=strict_attestation,
+                fetch_headers=headers,
+            )
+            return
+        if status == "failed":
+            raise click.ClickException(f"run failed: {data.get('error') or '?'}")
+        time.sleep(3)
+
+    raise click.ClickException(f"timed out after {timeout}s; run_id={run_id}")
+
+
 @click.group("room")
 def rooms_cli():
     """Create and use signed data rooms."""
 
 
 @rooms_cli.command("create")
-@click.argument("scope_agent_id")
+@click.argument("scope")
 @click.option("--name", default="", help="Human label for this room.")
 @click.option("--rules", default="", help="Room rules as text.")
 @click.option(
@@ -137,9 +290,28 @@ def rooms_cli():
     help="Read the scope policy from a file.",
 )
 @click.option(
+    "--scope-visibility",
+    type=click.Choice(["sealed", "inspectable"]),
+    default="inspectable",
+    show_default=True,
+    help="Visibility contract when SCOPE is a local agent path.",
+)
+@click.option(
+    "--scope-private",
+    "scope_private_paths",
+    multiple=True,
+    help="Path inside uploaded scope archive to exclude from public digest.",
+)
+@click.option(
     "--query-agent",
     default=None,
-    help="Fixed pre-uploaded query agent id. Omit to allow recipient uploads.",
+    help="Fixed query agent id or local path. Omit to allow recipient uploads.",
+)
+@click.option(
+    "--query-private",
+    "query_private_paths",
+    multiple=True,
+    help="Path inside uploaded fixed query archive to exclude from public digest.",
 )
 @click.option(
     "--query-visibility",
@@ -165,19 +337,22 @@ def rooms_cli():
 @click.option("--allow-artifacts", is_flag=True, help="Allow artifact uploads.")
 @click.option(
     "--trust-mode",
-    type=click.Choice(["operator_approved", "pinned", "owner_approved_composes", "skip"]),
-    default="operator_approved",
+    type=click.Choice(["operator_updates", "pinned", "owner_approved"]),
+    default="operator_updates",
     show_default=True,
     help="Room-level compose trust policy.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 def create_room(
-    scope_agent_id: str,
+    scope: str,
     name: str,
     rules: str,
     rules_file: Path | None,
     policy_file: Path | None,
+    scope_visibility: str,
+    scope_private_paths: tuple[str, ...],
     query_agent: str | None,
+    query_private_paths: tuple[str, ...],
     query_visibility: str,
     output_visibility: str,
     llm_providers: tuple[str, ...],
@@ -195,13 +370,33 @@ def create_room(
         rules = rules_file.read_text(encoding="utf-8")
     policy = policy_file.read_text(encoding="utf-8") if policy_file else None
     providers = [] if no_llm else list(llm_providers)
+    scope_agent_id = _maybe_upload_room_agent(
+        service=service,
+        headers=headers,
+        ref=scope,
+        agent_type="scope",
+        visibility=scope_visibility,
+        private_paths=scope_private_paths,
+        as_json=as_json,
+    )
+    query_agent_id = None
+    if query_agent:
+        query_agent_id = _maybe_upload_room_agent(
+            service=service,
+            headers=headers,
+            ref=query_agent,
+            agent_type="query",
+            visibility=query_visibility,
+            private_paths=query_private_paths,
+            as_json=as_json,
+        )
     payload = {
         "name": name,
         "rules": rules,
         "policy": policy,
         "scope_agent_id": scope_agent_id,
-        "query_mode": "fixed" if query_agent else "uploadable",
-        "query_agent_id": query_agent,
+        "query_mode": "fixed" if query_agent_id else "uploadable",
+        "query_agent_id": query_agent_id,
         "query_visibility": query_visibility,
         "output_visibility": output_visibility,
         "egress": {
@@ -287,7 +482,7 @@ def add_room_data(
     metadata_pairs: tuple[str, ...],
     as_json: bool,
 ):
-    """Add owner data to the encrypted room vault."""
+    """Add owner data to the encrypted room."""
     if bool(text) == bool(file_path):
         raise click.ClickException("provide exactly one of TEXT or --file")
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
@@ -301,7 +496,7 @@ def add_room_data(
     body_text = file_path.read_text(encoding="utf-8") if file_path else text or ""
     payload = {"text": body_text, "metadata": _parse_meta(metadata_pairs)}
     resp = _hpost(
-        f"{service}/v1/rooms/{room_id}/vault/items",
+        f"{service}/v1/rooms/{room_id}/data",
         headers=headers,
         json=payload,
         timeout=60,
@@ -321,7 +516,7 @@ def add_room_data(
 @click.option("--show-text", is_flag=True, help="Print plaintext item contents.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 def list_room_data(room: str, show_text: bool, as_json: bool):
-    """List owner-visible encrypted room vault items."""
+    """List owner-visible encrypted room data."""
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
     data = _fetch_verified_room(
         service,
@@ -331,7 +526,7 @@ def list_room_data(room: str, show_text: bool, as_json: bool):
     )
     _enforce_room_trust(data)
     resp = _hget(
-        f"{service}/v1/rooms/{room_id}/vault/items",
+        f"{service}/v1/rooms/{room_id}/data",
         headers=headers,
         timeout=60,
     )
@@ -358,7 +553,7 @@ def list_room_data(room: str, show_text: bool, as_json: bool):
 @click.argument("room")
 @click.option(
     "--mode",
-    type=click.Choice(["operator_approved", "pinned", "owner_approved_composes", "skip"]),
+    type=click.Choice(["operator_updates", "pinned", "owner_approved"]),
     default=None,
     help="Set the room-level compose trust mode.",
 )
@@ -486,19 +681,16 @@ def ask_room(
         pass
 
     if agent_path is not None:
-        from .recipient import _archive_for_path, _upload_query_agent_and_poll
-
         archive_bytes, archive_name, agent_name = _archive_for_path(agent_path, None)
-        _upload_query_agent_and_poll(
+        _upload_room_query_agent_and_poll(
             service=service,
             headers=headers,
+            room_id=room_id,
             archive_bytes=archive_bytes,
             archive_name=archive_name,
             agent_name=agent_name,
             description=f"hivemind room ask --agent {agent_path.name}",
             prompt=question,
-            scope_id=None,
-            mediator_id=None,
             memory_mb=memory_mb,
             max_llm_calls=max_llm_calls,
             max_tokens=max_tokens,
@@ -509,11 +701,8 @@ def ask_room(
             fetch=fetch,
             expected_pubkey_b64=expected_pubkey,
             expected_compose_hash=live_compose_hash,
-            expected_room_id=room_id,
             expected_room_manifest_hash=manifest_hash,
-            room_id=room_id,
             strict_attestation=not no_strict_attestation,
-            fetch_headers=headers,
         )
         return
 
@@ -521,6 +710,7 @@ def ask_room(
         service,
         headers,
         payload,
+        submit_path=f"/v1/rooms/{room_id}/runs",
         expected_pubkey_b64=expected_pubkey,
         expected_compose_hash=live_compose_hash,
         expected_room_id=room_id,
@@ -531,3 +721,36 @@ def ask_room(
         fetch_headers=headers,
         poll_seconds=timeout,
     )
+
+
+@rooms_cli.command("runs")
+@click.argument("run_id", required=False)
+@click.option("--limit", type=int, default=20, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def room_runs(run_id: str | None, limit: int, as_json: bool):
+    """Show room run status."""
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    url = f"{service}/v1/runs/{run_id}" if run_id else f"{service}/v1/runs?limit={limit}"
+    resp = _hget(url, headers=headers, timeout=30)
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    data = resp.json()
+    if as_json or run_id:
+        click.echo(_json.dumps(data, indent=2, default=str))
+        return
+    if not data:
+        click.echo("(no runs)")
+        return
+    click.echo(f"{'RUN_ID':<14} {'STATUS':<10} {'ROOM':<18} OUTPUT")
+    for row in data:
+        output = (row.get("output") or "").replace("\n", " ")
+        if len(output) > 80:
+            output = output[:77] + "..."
+        click.echo(
+            f"{row.get('run_id','?'):<14} "
+            f"{row.get('status','?'):<10} "
+            f"{row.get('room_id',''):<18} "
+            f"{output}"
+        )

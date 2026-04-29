@@ -19,9 +19,8 @@ class AgentSealedReadError(Exception):
     """Raised when a plaintext read is attempted on a sealed-mode agent.
 
     Sealed agents have ``inspection_mode='sealed'``. Their source bytes
-    are encrypted for runtime-only use (KMS for legacy/non-room agents,
-    room-vault DEK for room-uploaded agents), and HTTP endpoints catch
-    this and translate it to HTTP 403.
+    are encrypted for runtime-only use, and HTTP endpoints catch this
+    and translate it to HTTP 403.
     """
 
     def __init__(self, agent_id: str):
@@ -43,9 +42,8 @@ class AgentStore:
     via the per-request bearer (``hmk_`` or ``hmq_``). Pgdata-only access
     sees ciphertext; reads in a sealed state raise ``TenantSealed``.
 
-    Legacy plaintext rows (uploaded before the seal landed) are still
-    readable as-is, so this is a non-disruptive migration: new uploads
-    encrypt, old uploads keep working.
+    Historical plaintext rows are still readable as-is, so this is a
+    non-disruptive migration: new uploads encrypt, old uploads keep working.
     """
 
     def __init__(
@@ -230,14 +228,13 @@ class AgentStore:
           • ``inspection_mode='sealed'`` with ``room_id`` → ChaCha20
             under that room's participant-presented DEK. After restart,
             internal rebuild/digest paths can decrypt only after a room
-            participant opens the room vault.
-          • ``inspection_mode='sealed'`` without ``room_id`` → legacy
-            ChaCha20 under the enclave-only KMS key
-            (``agent_seal.encrypt_b64``). The files HTTP endpoint
-            refuses to serve plaintext in either sealed case.
+            participant opens the room key.
+          • ``inspection_mode='sealed'`` without ``room_id`` → tenant-key
+            ciphertext. The files HTTP endpoint refuses to serve plaintext
+            in either sealed case.
           • ``inspection_mode='full'`` (default) → encrypt under the
             tenant DEK if a sealer is bound, else store plaintext.
-            Owner endpoint can decrypt, matching legacy behaviour.
+            Owner file endpoints can decrypt unless the agent is sealed.
 
         ``inspection_mode=None`` falls back to the agent record's stored
         mode (so the upload-endpoint → save_files chain doesn't have
@@ -279,17 +276,15 @@ class AgentStore:
                         [agent_id, path, ct, "room", room_id, size, attestable],
                     )
                 return len(files)
-            from .. import agent_seal as _aseal
-
-            if not _aseal.is_available():
+            if not self._seal_active():
                 raise RuntimeError(
-                    "sealed-mode agent requested but agent_seal key is "
-                    "not available — run inside a TEE with KMS access"
+                    "sealed-mode reusable room agent requested but the "
+                    "tenant key is not available; present the owner key first"
                 )
             for path, content in files.items():
                 size = len(content.encode())
                 attestable = path not in private
-                ct = _aseal.encrypt_b64(agent_id, path, content)
+                ct = self._encode_ct(content, agent_id, path)
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
@@ -301,7 +296,7 @@ class AgentStore:
                     "room_id=EXCLUDED.room_id, "
                     "size_bytes=EXCLUDED.size_bytes, "
                     "attestable=EXCLUDED.attestable",
-                    [agent_id, path, ct, "kms", size, attestable],
+                    [agent_id, path, ct, "tenant", size, attestable],
                 )
             return len(files)
         encrypt = self._seal_active()
@@ -376,23 +371,21 @@ class AgentStore:
                         [agent_id, path, ct, "room", room_id, size, attestable],
                     )
                 return len(files)
-            from .. import agent_seal as _aseal
-
-            if not _aseal.is_available():
+            if not self._seal_active():
                 raise RuntimeError(
-                    "sealed-mode agent requested but agent_seal key is "
-                    "not available — run inside a TEE with KMS access"
+                    "sealed-mode reusable room agent requested but the "
+                    "tenant key is not available; present the owner key first"
                 )
             for path, content in files.items():
                 size = len(content.encode())
                 attestable = path not in private
-                ct = _aseal.encrypt_b64(agent_id, path, content)
+                ct = self._encode_ct(content, agent_id, path)
                 self.db.execute_commit(
                     "INSERT INTO _hivemind_agent_files "
                     "(agent_id, file_path, content, ciphertext, "
                     "seal_mode, room_id, size_bytes, attestable) "
                     "VALUES (%s, %s, NULL, %s, %s, NULL, %s, %s)",
-                    [agent_id, path, ct, "kms", size, attestable],
+                    [agent_id, path, ct, "tenant", size, attestable],
                 )
             return len(files)
         encrypt = self._seal_active()
@@ -495,10 +488,9 @@ class AgentStore:
 
         ``seal_mode`` is explicit for new rows:
           - ``room``: room-vault DEK, participant-presented
-          - ``kms``: legacy sealed-agent KMS key
           - ``tenant``: tenant DEK
 
-        Empty legacy rows infer from agent inspection mode.
+        Empty historical rows infer from agent inspection mode.
         """
         seal_mode = (seal_mode or "").strip()
         if seal_mode == "room":
@@ -509,16 +501,12 @@ class AgentStore:
             return self.room_vault.decrypt_agent_file_b64(
                 room_id, agent_id, file_path, ct_b64,
             )
-        if seal_mode == "kms":
-            from .. import agent_seal as _aseal
-            return _aseal.decrypt_b64(agent_id, file_path, ct_b64)
         if seal_mode == "tenant":
             return self._decode_ct(ct_b64, agent_id, file_path)
 
         mode = self._agent_inspection_mode(agent_id)
         if mode == "sealed":
-            from .. import agent_seal as _aseal
-            return _aseal.decrypt_b64(agent_id, file_path, ct_b64)
+            return self._decode_ct(ct_b64, agent_id, file_path)
         return self._decode_ct(ct_b64, agent_id, file_path)
 
     def read_file(

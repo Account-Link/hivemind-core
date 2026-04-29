@@ -1,7 +1,7 @@
 [project]
 name = "hivemind-core"
 version = "0.3.0"
-description = "Forkable agent platform with raw Postgres and scope-function query firewall"
+description = "Signed data-room primitive for private data and mutually distrusting agents"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.0",

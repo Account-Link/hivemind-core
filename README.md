@@ -1,456 +1,149 @@
 # hivemind-core
 
-A forkable agent platform with raw Postgres and a scope-function query firewall. Apps define their own schema, access control, and query logic by registering Docker agent images.
+Hivemind-core is a data-room primitive for mutually distrusting tenants and
+their agents.
 
-Core provides only the irreducible primitives: raw SQL execution, Docker sandboxes, scope function enforcement, and pipeline orchestration. In production, runs inside a dstack Confidential VM where LUKS2 disk encryption and TDX memory encryption protect data-at-rest. On top of that, agent source files are sealed at the application layer with a per-tenant DEK wrapped under the owner's `hmk_` key — capability-token (`hmq_`) requests cannot read encrypted data after a CVM restart until the owner makes any request, surfacing as `503 sealed` in the meantime. See [ARCHITECTURE.md § Tenant Seal](ARCHITECTURE.md#tenant-seal-application-layer-encryption).
+A room owner uploads private data and a scope agent. A participant inspects the
+signed room rules before entering, optionally uploads their own query agent, and
+gets only the room-approved output. The room manifest binds the scope agent,
+query-agent mode, code visibility, output visibility, LLM egress allowlist, and
+deployment trust policy.
 
-## Install the CLI
+The service is designed for a dstack Confidential VM. Tenants verify the live
+CVM attestation before presenting data or agent code. Room data is encrypted
+under a per-room key wrapped to the owner key and invite token. Room-uploaded
+sealed query agents use that same room key, so after a restart or backend update
+private room material stays unreadable until a participant interacts again.
 
-The `hivemind` CLI is a remote client — it talks to a hivemind-core server over HTTP. You don't need to run a local server to use it; if all you want is to query the live CVM (or someone else's deployment), this is the only step.
+## Install
 
 ```bash
-# Prereq: uv (astral.sh/uv)
 uv tool install --editable .
 hivemind --help
 ```
 
-Then jump to **[Using the CLI](#using-the-cli)** below.
-
-## Run a server (only if you want one)
-
-If you want to host your own hivemind-core (or hack on this repo), spin up the full local stack:
+## Connect
 
 ```bash
-# Prereqs: docker, uv
+hivemind init --service https://hivemind.example --api-key hmk_...
+hivemind trust attest
+```
+
+For local development:
+
+```bash
 ./scripts/quickstart.sh
+hivemind init --service http://localhost:8100 --api-key hmk_...
 ```
 
-The script scaffolds `.env`, builds the agent base + four default agent images in parallel, starts Postgres, runs `uv sync`, boots `hivemind.server` on http://localhost:8100, and ends with a real demo run (insert rows → register scope → run query). Pass `--no-demo` to stop after the server is healthy.
+## Owner Flow
 
-### Manual path (if you prefer)
+Create a room from a local scope-agent directory:
 
 ```bash
-uv sync --all-extras
-docker compose -f scripts/docker-compose.dev.yml up -d
-docker build -t hivemind-agent-base -f agents/base/Dockerfile agents/base/
-docker build -t hivemind-default-index:local    agents/default-index
-docker build -t hivemind-default-query:local    agents/default-query
-docker build -t hivemind-default-scope:local    agents/default-scope
-docker build -t hivemind-default-mediator:local agents/default-mediator
-uv run python -m hivemind.server
-curl http://localhost:8100/v1/health
+hivemind room create ./scope-agent \
+  --rules-file rules.md \
+  --scope-visibility inspectable
 ```
 
-## Using the CLI
-
-The `hivemind` CLI is your remote client for everything: connection setup,
-data loading, agent lifecycle (build → upload → poll → fetch artifacts),
-delegated tokens, attestation, and operator workflows. Run
-`hivemind --help` (or `hivemind <subcommand> --help`) for full flags.
-
-### Connect
+Create a fixed-query room:
 
 ```bash
-# Local server (after quickstart):
-hivemind init --api-key hmk_...
-# Live Phala CVM:
-hivemind init --service https://hivemind.teleport.computer --api-key hmk_...
-# (mint a key via `hivemind admin tenants create` if you're the operator)
-
-hivemind rotate-key                # bootstrap → tenant-only key, rewrites profile
-hivemind trust attest              # show + verify the live CVM attestation bundle
-hivemind schema                    # dump the user-table schema
-```
-
-### Load and inspect data
-
-```bash
-# Load a dataset (SQL dump / CSV / JSONL) into Postgres via /v1/store
-hivemind load dump.sql
-hivemind load users.csv --table users
-hivemind load events.jsonl --table events
-
-# Browse what the service already has
-hivemind agents list                   # list registered agents
-hivemind agents rm <agent_id>          # delete one
-hivemind agents upload ./dir --type scope   # generic upload (scope/query/index/mediator)
-hivemind runs                          # list recent runs
-hivemind runs <run_id>                 # stage timings + artifact list
-```
-
-### Register a scope policy and run agents
-
-```bash
-# Register a scope policy (gates what queries may return)
-hivemind scope --from-file policy.md
-hivemind scope "Allow aggregate counts. Never expose individual rows."
-
-# Run your agent — directory containing Dockerfile + agent.py, or a .tar.gz
-hivemind run ./my-agent --prompt "How many documents?"
-hivemind run ./my-agent --json --fetch       # scriptable + downloads artifacts
-
-# Thin natural-language path (default query agent + registered scope)
-hivemind query "What tables are available?"
-hivemind query "..." --async                  # use async submit+poll path
-
-# Index a document
-hivemind index "Q3 retro: …" --metadata '{"team":"payments"}'
-
-# Print the bound endpoint + credentials so you can hand off to a teammate
-hivemind share
-```
-
-Every `--json` output is a stable, pipe-friendly record: `{status, run_id, output, mediated, artifacts:[{filename,url,...}], fetched:[...]}`. Artifact URLs remain fetchable for the server's retention window (default 24h).
-
-### Delegate access (capability tokens)
-
-```bash
-# Owner mints a query token bound to a scope agent (recipient cannot bypass it)
-hivemind tokens issue --label "research-team" --scope-agent abc123def456
-
-hivemind tokens list                # token_id + kind + status + constraints
-hivemind tokens revoke <token_id>   # soft-revoke; future calls 401
-
-# Recipient (holding hmq_…) audits what the gatekeeper actually does
-hivemind agents attest --list-files
-hivemind agents attest --show-file Dockerfile
-
-# One-shot link sharing — owner emits, recipient consumes
-hivemind share --mint                          # prints hmq://host/<scope>?token=…&compose=…&files=…
-hivemind ask 'hmq://…' "How many rows last month?"
-```
-
-See **[Capability Tokens](#capability-tokens-delegated-query)** for the
-full delegation model (`hmq_` prefix, what the holder can do, how the
-recipient pins binding via `agents attest`).
-
-### Data rooms
-
-Rooms wrap delegated access in one signed manifest: scope agent, fixed vs
-uploadable query agent, output visibility, LLM egress allowlist, artifact
-egress, policy text, and compose-trust mode. The CLI keeps it to one link.
-
-```bash
-# Fixed query agent, Tinfoil-only egress, querier-only output by default
-hivemind room create <scope_agent_id> --query-agent <query_agent_id> \
+hivemind room create ./scope-agent \
+  --query-agent ./query-agent \
+  --query-visibility sealed \
   --rules-file rules.md
+```
 
-# Owner adds private room data under the participant-presented room key
+Create an uploadable room where the participant can bring their own sealed
+query agent:
+
+```bash
+hivemind room create ./scope-agent \
+  --query-visibility sealed \
+  --rules-file rules.md
+```
+
+Add private room data:
+
+```bash
 hivemind room add-data <room_id> --file dataset.md --meta source=dataset
 hivemind room data <room_id>
+```
 
-# Recipient side
+The create command prints one `hmroom://...` invite link. That link contains the
+room id, invite token, service URL, and owner signing public key.
+
+## Participant Flow
+
+Inspect the room before entering:
+
+```bash
 hivemind room inspect 'hmroom://...'
+```
+
+Ask with a fixed query agent:
+
+```bash
 hivemind room ask 'hmroom://...' "What changed this month?"
+```
+
+Ask with a participant-uploaded query agent:
+
+```bash
 hivemind room ask 'hmroom://...' "What changed this month?" --agent ./my-query-agent
-
-# Owner approves the current live compose for a strict room without
-# changing downstream links
-hivemind room trust <room_id> --mode owner_approved_composes --approve-live
 ```
 
-Server-side enforcement applies to raw API calls too: room tokens cannot
-override the scope agent, room policy, fixed query agent, or LLM provider
-allowlist. `--no-llm` disables bridge LLM endpoints for the room; omitting
-`--allow-artifacts` disables artifact upload egress. `hmroom://` links carry
-the owner signing pubkey; `room inspect` and `room ask` verify the signed
-manifest and bind the final run attestation to the accepted manifest hash.
+Every answer is checked against the accepted room manifest hash and the live CVM
+run signer. The default behavior is fail-closed when the run attestation is
+missing or does not match the room.
 
-Room vault data is the stronger storage path for private room documents:
-it is encrypted under a random room DEK wrapped to the owner `hmk_` and
-the invite `hmq_`. After a restart or backend update, the vault stays
-sealed until one of those participants interacts again. Sealed query agents
-uploaded through an uploadable room use the same participant-presented room
-key, so their private source parts have the same interaction gate. Legacy
-app tables written through `/v1/store` are still plaintext inside the
-CVM/Postgres boundary and rely on LUKS2/TDX plus the room scope rules.
+## Trust Policy
 
-### Operator commands (`hivemind admin …`)
+Rooms have one deployment trust policy:
 
-Admin-key holders manage tenants and on-chain hash approval:
+- `operator_updates`: accept CVM deployments approved by the operator governance
+  path.
+- `pinned`: accept only the compose hashes listed in the room manifest.
+- `owner_approved`: accept the owner-maintained compose hash allowlist for this
+  room.
+
+Update a room trust allowlist without changing the invite link:
 
 ```bash
-hivemind admin tenants create --name alice-corp
-hivemind admin tenants list
-hivemind admin tenants delete t_abc...
-hivemind admin tenants migrate-roles             # one-shot: per-tenant Postgres roles
-hivemind admin sweep                             # GC orphan agent images
-
-# On-chain governance (when HIVEMIND_APP_AUTH_CONTRACT is set)
-hivemind admin hashes approve <compose_hash>
-hivemind admin hashes revoke <compose_hash>
-hivemind admin hashes list
+hivemind room trust <room_id> --mode owner_approved --approve-live
 ```
 
-### Trust pins (`hivemind trust …`)
+The global `--dangerously-skip-attestations` flag exists only for local
+development without a TEE. Production clients should inspect and verify the room.
 
-For remote/TEE deploys the CLI TOFU-pins the CVM's compose hash on first
-connection. Manage it explicitly:
+## Public API
 
-```bash
-hivemind trust show                              # all services or one
-hivemind trust approve [<service>]               # accept the current remote hash
-hivemind trust reset --all                       # forget all pins (re-prompt next call)
+The public API is room-first:
+
+```text
+POST /v1/rooms
+GET  /v1/rooms
+GET  /v1/rooms/{room_id}
+GET  /v1/rooms/{room_id}/attest
+POST /v1/rooms/{room_id}/open
+POST /v1/rooms/{room_id}/data
+GET  /v1/rooms/{room_id}/data
+POST /v1/rooms/{room_id}/runs
+POST /v1/rooms/{room_id}/query-agents
+
+POST /v1/room-agents
+GET  /v1/room-agents
+GET  /v1/room-agents/{agent_id}
+GET  /v1/room-agents/{agent_id}/attest
+GET  /v1/room-agents/{agent_id}/files
+GET  /v1/room-agents/{agent_id}/files/{path}
+
+GET  /v1/runs
+GET  /v1/runs/{run_id}
+GET  /v1/runs/{run_id}/artifacts/{filename}
+GET  /v1/attestation
 ```
 
-### Named profiles (multi-identity on one laptop)
-
-Profiles let you keep separate identities — admin, watch-history tenant,
-alice-tenant — under different names without `cd`-ing between
-directories. Each profile is a YAML file under `~/.hivemind/profiles/`
-holding a `service` URL + `api_key`. Trust pins (`trust.json`,
-`enclave-tls-*.pem`) live alongside and are shared across profiles.
-
-```bash
-# Create a profile per identity (each writes its own YAML file)
-hivemind --profile admin          init --service https://hivemind.teleport.computer --api-key hmk_admin_...
-hivemind --profile watch-history  init --service https://hivemind.teleport.computer --api-key hmk_2roP...
-hivemind --profile alice          init --service https://hivemind.teleport.computer --api-key hmk_alice_...
-
-# Use them
-hivemind --profile watch-history query "how many rows in watch_history?"
-hivemind --profile alice          load events.jsonl --table events
-
-# Or pin one for the shell
-export HIVEMIND_PROFILE=watch-history
-hivemind query "..."
-
-# Manage them
-hivemind profile list             # * marks the active profile
-hivemind profile show alice       # print the YAML
-hivemind profile delete old-tenant
-```
-
-Profiles created with `hivemind init` (no `--profile`) live as
-`default` — your existing CWD-scoped `./.hivemind/config.yaml` is
-auto-migrated to `~/.hivemind/profiles/default.yaml` on first use.
-
-## How it works
-
-Four HTTP endpoint groups, one enforcement primitive:
-
-- `POST /v1/store` — raw SQL writes against Postgres. The app owns the schema.
-- `POST /v1/query/run/submit` — runs the **scope → query → mediator** agent pipeline. Returns a `run_id`; poll `GET /v1/agent-runs/{run_id}` until the run completes. Completed rows carry an Ed25519-signed attestation envelope (Phase 5) so recipients can verify the output came from the expected enclave.
-- `POST /v1/index` — runs an index agent over documents and stores structured output.
-- `POST /v1/tokens` (and `GET /v1/scope-attest`) — mint / list / revoke delegated capability tokens; recipients verify their binding via scope-attest. See **[Capability tokens](#capability-tokens-delegated-query)** below.
-
-```
-client ──► server ──► pipeline ──► { scope agent } ──► scope_fn
-                                    { query agent } ──► SQL (filtered by scope_fn)
-                                    { mediator }   ──► final answer
-```
-
-The **scope function** is the core primitive: each scope agent emits a small Python function
-`scope(sql, params, rows) -> {allow, rows}` that the bridge calls on every SQL result before
-the query agent sees it. AST-validated, fail-closed, runs in-process — the agent can't bypass it.
-
-Everything else is support: Docker sandboxing (read-only rootfs, dropped caps, internal network,
-bridge-only egress), budget tracking (calls + tokens per stage), and an LLM proxy that speaks
-both OpenAI and Anthropic formats so SDK code works unchanged inside containers.
-
-→ Full pipeline diagrams, security layers, and container contract: **[ARCHITECTURE.md](ARCHITECTURE.md)**
-
-## Multi-tenancy
-
-hivemind-core is **multi-tenant by default**. The operator (you) holds a single
-**admin key** and mints per-tenant API keys on demand. Each tenant lives in an
-isolated Postgres database — when deployed in a TEE (Phala dstack), even the
-admin cannot read tenant data via the API.
-
-```bash
-# One-time: set HIVEMIND_ADMIN_KEY in .env (quickstart.sh does this for you)
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-
-# Provision a tenant (returns api_key once — store it immediately)
-hivemind admin tenants create "alice-corp"
-# → {"tenant_id": "t_abc...", "api_key": "hmk_...", "db_name": "tenant_t_abc..."}
-
-# List / delete
-hivemind admin tenants list
-hivemind admin tenants delete t_abc...
-```
-
-Hand the `hmk_...` key to the tenant — they use it as their normal
-`hivemind init --api-key` and everything else works unchanged.
-
-**First action for every new tenant: rotate the key.** The admin who
-minted it briefly saw the plaintext in the API response. Rotation issues
-a fresh key (the admin's copy stops working immediately) and updates the
-active profile's YAML automatically:
-
-```bash
-hivemind --profile alice init --api-key hmk_bootstrap_...
-hivemind --profile alice rotate-key
-# → prints a fresh hmk_... that only the TEE + the tenant know
-#   and rewrites ~/.hivemind/profiles/alice.yaml
-```
-
-Treat any tenant key that has not been rotated as bootstrap-only.
-
-### Capability tokens (delegated query)
-
-A tenant key (`hmk_…`) is the keys-to-the-kingdom credential — it can read,
-write, mint scope agents, and rotate. To let a third party use a narrow
-slice of your tenant *without* sharing it, mint a **capability token** that
-pins a specific scope agent, or create a room that pins a full room contract:
-
-| Prefix | Kind | What the holder can do | What's pinned at issue |
-|---|---|---|---|
-| `hmq_…` | query | submit prompts via `/v1/query/run/submit`, use room run endpoints, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** or **room id** — every query is forced through it |
-
-```bash
-# Owner mints a query token bound to a scope agent (the recipient
-# cannot bypass that agent — every prompt is gated through it).
-hivemind tokens issue --label "research-team" --scope-agent abc123def456
-# → token: hmq_…  (shown ONCE; copy now or revoke + reissue)
-
-hivemind tokens list                  # token_id + kind + status + constraints
-hivemind tokens revoke <token_id>     # soft-revoke, future calls 401
-```
-
-Hand the recipient the `hmq_…` and they use it as their
-`Authorization: Bearer …` (or `hivemind --profile … init --api-key …`).
-The plaintext is shown exactly once at issue and only the SHA-256 hash is
-persisted on the CVM — losing the plaintext means revoke + reissue.
-
-The recipient can audit their binding before submitting work:
-
-```bash
-# Confirm "the scope agent guarding my queries is what I expected".
-hivemind agents attest --list-files
-# → prints scope_agent_id, files_count, files_digest_sha256, attestation
-#   (compose_hash + app_id), and every extracted source file path.
-```
-
-The digest is a stable `sha256("<path>\0<content>\0…" sorted)` — pin it
-out-of-band and re-derive it later by re-fetching files.
-
-### Remote / TEE deployment
-
-The examples above assume a local server (`http://localhost:8100`). To
-talk to a Phala CVM instead, pass `--service https://<cvm>-8100s.<gateway>`
-to every command (or set it once via `hivemind init --service ...`).
-
-Two extra ceremonies kick in for remote deploys, both documented in
-**[deploy/phala/DEPLOY.md](deploy/phala/DEPLOY.md)**:
-
-- **Compose-hash trust prompt** — first connection asks you to approve
-  the deployed image's hash (TOFU). Manage it with `hivemind trust
-  {show,approve,reset}`.
-- **On-chain approval** — if `HIVEMIND_APP_AUTH_CONTRACT` is set on the
-  server (default in the shipped compose), the contract owner must
-  `hivemind admin hashes approve <hash>` once before any client can
-  connect. Run `curl $URL/v1/attestation | jq .attestation.compose_hash`
-  to find the hash to approve.
-
-## Configuration
-
-Settings load from `.env` with the `HIVEMIND_` prefix. The ones you actually touch:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `HIVEMIND_DATABASE_URL` | `postgresql://hivemind:dev@localhost:5432/postgres` | Postgres DSN — point at the maintenance DB so tenant DBs can be auto-created |
-| `HIVEMIND_ADMIN_KEY` | — | Enables `/v1/admin/tenants` so you can mint tenant keys. Required for multi-tenant use |
-| `HIVEMIND_SQL_PROXY_ADMIN_KEY` | — | Matches `SQL_PROXY_ADMIN_KEY` on sql-proxy — needed only for HTTP-proxy deploys |
-| `HIVEMIND_CONTROL_DATABASE` | `hivemind_control` | Metadata DB (tenant IDs, hashed keys). Auto-created on first boot |
-| `HIVEMIND_TENANT_CACHE_SIZE` | `32` | LRU cache of per-tenant Hivemind instances |
-| `HIVEMIND_HOST` / `HIVEMIND_PORT` | `127.0.0.1` / `8100` | Server bind |
-| `HIVEMIND_LLM_API_KEY` | — | LLM provider key (bridge passes LLM calls through) |
-| `HIVEMIND_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | LLM API base URL |
-| `HIVEMIND_LLM_MODEL` | `anthropic/claude-sonnet-4.5` | Default model |
-| `HIVEMIND_MAX_LLM_CALLS` / `HIVEMIND_MAX_TOKENS` | `50` / `200000` | Per-run budget caps |
-| `HIVEMIND_AGENT_TIMEOUT` | `300` | Seconds before an agent run is killed |
-| `HIVEMIND_AUTOLOAD_DEFAULT_AGENTS` | `true` | Register defaults from `HIVEMIND_DEFAULT_*_IMAGE` at startup |
-
-Container hardening (`HIVEMIND_CONTAINER_*`), network controls (`HIVEMIND_DOCKER_*`,
-`HIVEMIND_ENFORCE_BRIDGE_ONLY_EGRESS*`), and the full default-agent autoload block live in
-[`.env.example`](.env.example). Defaults are safe — don't change them unless you've read the code.
-
-## Uploading Agents
-
-Agents are Docker containers. Upload source files as a tarball — the server builds the image:
-
-```bash
-# Create agent source directory with a Dockerfile
-mkdir my-agent && cd my-agent
-cat > Dockerfile <<'EOF'
-FROM python:3.12-slim
-RUN pip install httpx
-COPY . /app
-WORKDIR /app
-CMD ["python", "agent.py"]
-EOF
-cat > agent.py <<'EOF'
-import os, httpx
-# ... your agent logic using BRIDGE_URL and SESSION_TOKEN ...
-print("Agent output goes to stdout")
-EOF
-
-# Pack and upload
-tar czf ../agent.tar.gz .
-curl -X POST http://localhost:8100/v1/agents/upload \
-  -F "name=my-agent" \
-  -F "archive=@../agent.tar.gz"
-# Returns: {"agent_id": "abc123", "name": "my-agent", "files_extracted": 2}
-```
-
-## Agent Roles
-
-All agents are Docker containers. Core defines four roles:
-
-| Role | Purpose | Tools Available | Bridge Extras |
-|------|---------|-----------------|---------------|
-| **Index** | Process data and write indexes | execute_sql, get_schema (full read/write) | — |
-| **Scope** | Write a scope function (query firewall) | execute_sql, get_schema (full read) | `/sandbox/simulate`, query-agent file inspection |
-| **Query** | Query data and answer questions | execute_sql, get_schema (scoped via scope_fn) | — |
-| **Mediator** | Audit/filter query output | None | — |
-
-Agents write their output to **stdout** and exit with code 0.
-
-## Repo layout
-
-```
-hivemind/          FastAPI server, pipeline, scope compiler, Docker bridge
-  sandbox/         Agent sandbox runtime (bridge, budget, docker_runner, tape)
-  cli.py           The `hivemind` CLI
-agents/            Default + reference agents (see agents/examples/README.md)
-  base/            Agent base Docker image (claude-agent-sdk + Node)
-  default-*/       4 built-in agents: index / query / scope / mediator
-  private-default-scope/  Pattern A reference: host-supplied private prompt
-  examples/        Sample uploadable agents
-deploy/            Production dstack CVM artifacts (postgres/, phala/)
-tests/             Unit + Docker integration tests
-scripts/           quickstart.sh
-```
-
-## Tests
-
-```bash
-uv run pytest tests/ --ignore=tests/test_integration_docker.py -q
-
-# With a Postgres DSN for store/pipeline/tenant tests (use maintenance DB):
-docker compose -f scripts/docker-compose.dev.yml up -d
-export HIVEMIND_TEST_DATABASE_URL="postgresql://hivemind:dev@localhost:5432/postgres"
-uv run pytest tests/ --ignore=tests/test_integration_docker.py -q
-
-# Docker integration (real containers):
-docker build -t hivemind-test-agent:latest -f tests/fixtures/Dockerfile.test-agent tests/fixtures/
-uv run pytest tests/test_integration_docker.py -v
-```
-
-## Production deploy (Phala dstack)
-
-Live instances:
-- **hivemind-core** (friendly URL):  https://hivemind.teleport.computer
-  - Raw / Tier-3 pin URL: `https://0c86afa84ff128820dc201c1549b603566aa55a1-8100s.dstack-pha-prod9.phala.network`
-- **hivemind-pg** (sql proxy): `https://ec76f3a3947408e0f22ac52eacc52222155a9d9f-8080.dstack-pha-prod9.phala.network`
-
-The friendly URL is fronted by `dstack-ingress` (the Phase E pattern feedling and hermes both ship). It terminates LE-issued TLS inside the enclave (ACME DNS-01 via Cloudflare). Tier-3 cert pinning still works — the CLI auto-discovers the raw passthrough URL from `/v1/attestation` and verifies the enclave cert there.
-
-```bash
-# Single env file (deploy/phala/.env) feeds both CVMs.
-phala deploy -n hivemind-pg   -c deploy/phala/docker-compose.postgres.yaml -e deploy/phala/.env --wait
-phala deploy -n hivemind-core -c deploy/phala/docker-compose.core.yaml    -e deploy/phala/.env --wait
-```
-
-Full deploy notes: [`deploy/phala/DEPLOY.md`](deploy/phala/DEPLOY.md).
+Lower-level SQL, token, and generic agent endpoints are internal implementation
+details. New clients should use the room API only.

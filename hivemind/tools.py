@@ -391,7 +391,7 @@ def build_room_vault_tools(
                 "returned_row_count": len(keep),
                 "note": (
                     f"Output exceeded {MAX_RESULT_BYTES} bytes; truncated. "
-                    "Use item_id filters or store smaller room vault items."
+                    "Use item_id filters or store smaller room data items."
                 ),
             },
             default=str,
@@ -419,14 +419,14 @@ def build_room_vault_tools(
                     _source=scope_fn_source,
                 )
             except Exception as e:
-                logger.debug("Room vault scope function error: %s", e)
-                return json.dumps({"error": "Room vault access denied by scope function"})
+                logger.debug("Room data scope function error: %s", e)
+                return json.dumps({"error": "Room data access denied by scope function"})
             if not result.get("allow", False):
                 return json.dumps(
                     {
                         "error": result.get(
                             "error",
-                            "Room vault access denied by scope function",
+                            "Room data access denied by scope function",
                         )
                     }
                 )
@@ -438,7 +438,7 @@ def build_room_vault_tools(
         Tool(
             name="get_room_vault_items",
             description=(
-                "Read encrypted data-room vault items for this room. "
+                "Read encrypted data-room items for this room. "
                 "Scope agents see all rows. Query agents receive only rows "
                 "allowed by the room scope function. Returns JSON rows with "
                 "item_id, text, metadata, created_at, and size_bytes."
@@ -448,7 +448,7 @@ def build_room_vault_tools(
                 "properties": {
                     "item_id": {
                         "type": "string",
-                        "description": "Optional room vault item id to fetch.",
+                        "description": "Optional room data item id to fetch.",
                     },
                 },
                 "required": [],

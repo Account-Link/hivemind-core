@@ -7,12 +7,9 @@ subcommand group lives in its own sub-module under ``~1000`` lines:
 * ``_http.py`` — pinned httpx wrappers + per-host TLS pin cache.
 * ``_config.py`` — profile / config / header helpers.
 * ``_trust.py`` — remote attestation, DCAP, on-chain governance gate.
-* ``_shared.py`` — query helpers (sync/async/poll), hmq:// URI parser.
-* ``owner.py`` — ``init``, ``scope``, ``load``, ``share``, ``schema``,
-  ``rotate-key``.
-* ``recipient.py`` — ``ask``, ``query``, ``run``, ``runs``.
-* ``agents.py`` — ``agents`` subcommand group.
-* ``tokens.py`` — ``tokens`` subcommand group.
+* ``_shared.py`` — room run polling and attestation helpers.
+* ``owner.py`` — ``init`` and ``rotate-key``.
+* ``rooms.py`` — data-room creation, data loading, inspection, and asking.
 * ``profile.py`` — ``profile`` subcommand group.
 * ``admin.py`` — ``admin`` subcommand group.
 * ``trust_cmds.py`` — ``trust`` subcommand group.
@@ -22,7 +19,6 @@ root ``cli`` group, then re-exports the symbols the test suite reaches
 into via ``from hivemind import cli as _cli_mod``:
 
 * ``_cli_mod.cli`` — the click root group (entry point).
-* ``_cli_mod._parse_hmq_uri`` — used by tests/test_cli_share.py.
 * ``_cli_mod.httpx`` — used by tests/test_cli_trust.py for monkey-
   patching ``httpx.get``.
 
@@ -60,9 +56,8 @@ _ACTIVE_POINTER = _HIVEMIND_HOME / "active"
 from ._http import _hdelete, _hget, _hpost  # noqa: F401  (test contract)
 
 # ── Subcommand modules ──
-from . import admin, agents, compose, owner, profile, recipient, rooms, tokens, trust_cmds
+from . import admin, owner, profile, rooms, trust_cmds
 from ._root import cli
-from ._shared import _parse_hmq_uri  # noqa: F401  (test contract)
 
 # ── Test-patchable trust helper ──
 #
@@ -80,28 +75,17 @@ from ._trust import _fetch_attestation  # noqa: F401  (test contract)
 # root ``cli`` group here. This keeps the registration explicit + lets
 # us rename a subcommand without touching the implementation file.
 
-# Owner-side flow.
+# Owner-side identity flow.
 cli.add_command(owner.init)
-cli.add_command(owner.scope)
-cli.add_command(owner.load_cmd, "load")
-cli.add_command(owner.share)
-cli.add_command(owner.schema_cmd, "schema")
 cli.add_command(owner.rotate_key, "rotate-key")
 
-# Recipient / query flow.
-cli.add_command(recipient.ask)
-cli.add_command(recipient.query_cmd, "query")
-cli.add_command(recipient.run_cmd, "run")
-cli.add_command(recipient.runs_cmd, "runs")
+# Room-first product surface.
+cli.add_command(rooms.rooms_cli, "room")
 
 # Subcommand groups.
-cli.add_command(agents.agents_cli, "agents")
-cli.add_command(tokens.tokens_cli, "tokens")
 cli.add_command(profile.profile_cli, "profile")
 cli.add_command(admin.admin_cli, "admin")
 cli.add_command(trust_cmds.trust_group, "trust")
-cli.add_command(compose.compose_cli, "compose")
-cli.add_command(rooms.rooms_cli, "room")
 
 
 if __name__ == "__main__":

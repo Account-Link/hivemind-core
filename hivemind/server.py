@@ -203,14 +203,10 @@ def _validate_inspection_mode(mode: str, *, require_kms: bool = True) -> str:
     when uploading the scope agent. Uploaded query agents (B's path)
     inherit the bound scope agent's mode — they don't get to pick.
 
-    Returns the normalized mode. Raises HTTPException(400) on unknown
-    value, or HTTPException(503) when ``sealed`` needs the legacy
-    enclave-only KMS key and that key is unavailable. Room-uploaded sealed
-    query agents pass ``require_kms=False`` because they are encrypted
-    under the room vault key instead.
+    Returns the normalized mode. The ``require_kms`` argument is retained
+    for older call sites, but sealed room agents now use room or tenant
+    keys rather than an operator-held agent KMS key.
     """
-    from . import agent_seal as _aseal
-
     m = (mode or "full").strip().lower() or "full"
     if m not in {"full", "sealed"}:
         raise HTTPException(
@@ -218,15 +214,6 @@ def _validate_inspection_mode(mode: str, *, require_kms: bool = True) -> str:
             detail=(
                 f"inspection_mode must be one of 'full', 'sealed' "
                 f"(got {mode!r})"
-            ),
-        )
-    if m == "sealed" and require_kms and not _aseal.is_available():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "sealed inspection_mode requires a live dstack-KMS "
-                "connection; the agent_seal key is not currently "
-                "available."
             ),
         )
     return m
@@ -349,7 +336,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=503,
             content={
                 "detail": (
-                    "Room vault is sealed: encrypted room data cannot be "
+                    "Room data is sealed: encrypted room data cannot be "
                     "read until a room participant presents a bearer token "
                     "that has a key wrap for this room."
                 ),
@@ -603,7 +590,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         current: dict,
         req: RoomTrustUpdateRequest,
     ) -> dict:
-        mode = req.mode or current.get("mode") or "operator_approved"
+        mode = req.mode or current.get("mode") or "operator_updates"
         if req.allowed_composes is None:
             allowed = [
                 str(c).strip().lower()
@@ -622,7 +609,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(400, "live compose_hash is not available")
             if live not in allowed:
                 allowed.append(live)
-        if mode in {"pinned", "owner_approved_composes"} and not allowed:
+        if mode in {"pinned", "owner_approved"} and not allowed:
             raise HTTPException(
                 400,
                 f"trust.mode='{mode}' requires allowed_composes or append_live=true",
@@ -695,7 +682,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Rename a Postgres database on the backing cluster.
 
         Body: ``{"old_name": "...", "new_name": "..."}``. Intended for
-        one-shot migrations (e.g., renaming the legacy ``hivemind`` DB to
+        one-shot migrations (e.g., renaming an old ``hivemind`` DB to
         ``tenant_t_<hex>`` before adopting it with
         ``/v1/admin/tenants/register``). Does NOT update control-plane
         rows — call ``/v1/admin/tenants/register`` after renaming.
@@ -779,7 +766,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         is wiped. Agents whose images were either ``:local`` (built
         in-place on the previous CVM) or pulled from a private registry
         (denied on the new CVM) become unrunnable but still appear in
-        listings. ``hivemind run`` fails 500 against them.
+        listings. Room runs fail against them until they are rebuilt.
         """
         from .sandbox.backend import _create_runner
 
@@ -862,15 +849,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"tenant '{tenant_id}' not found")
         return result
 
-    # ── Capability tokens (delegated query) ──
+    # ── Internal invite tokens ──
     #
-    # Owner mints query tokens to share narrow capabilities with third
-    # parties without exposing their hmk_ key. Plaintext is shown
-    # exactly once at /issue; only the hash is stored. Listing reveals
-    # token_id (a short hex prefix of the hash) for revocation; the
-    # plaintext is never recoverable.
+    # Room creation mints invite tokens directly through TenantRegistry.
+    # These endpoints are intentionally hidden from the public API: the
+    # product primitive is a signed room, not a naked capability token.
 
-    @app.post("/v1/tokens")
+    @app.post("/v1/_internal/tokens", include_in_schema=False)
     async def issue_capability(
         payload: dict,
         request: Request,
@@ -897,7 +882,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, str(e))
         return result
 
-    @app.get("/v1/tokens")
+    @app.get("/v1/_internal/tokens", include_in_schema=False)
     async def list_tokens(
         request: Request, hm: Hivemind = Depends(get_tenant_hive),
     ):
@@ -906,7 +891,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows = await asyncio.to_thread(registry.list_capabilities, tenant_id)
         return {"tokens": rows}
 
-    @app.delete("/v1/tokens/{token_id}")
+    @app.delete("/v1/_internal/tokens/{token_id}", include_in_schema=False)
     async def revoke_token(
         token_id: str,
         request: Request,
@@ -1052,11 +1037,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── Identity reflection (any authenticated caller) ──
     #
-    # Lets the CLI resolve its own ``tenant_id`` without grovelling
-    # through ``/v1/agents`` or ``/v1/tokens``. Returns the role + the
-    # token's constraint snapshot (e.g. ``scope_agent_id`` for ``hmq_``)
-    # so a recipient can confirm what the URI actually grants without
-    # decoding the bearer themselves.
+    # Lets the CLI resolve its own ``tenant_id`` and the active invite
+    # constraints without decoding the bearer itself.
     @app.get("/v1/whoami")
     async def whoami(
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1109,7 +1091,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         if (
-            req.trust.mode in {"pinned", "owner_approved_composes"}
+            req.trust.mode in {"pinned", "owner_approved"}
             and not req.trust.allowed_composes
         ):
             compose_hash = _live_compose_hash()
@@ -1118,7 +1100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     400,
                     "strict room trust mode requires a live compose_hash; "
                     "pass trust.allowed_composes explicitly or use "
-                    "trust.mode='operator_approved'",
+                    "trust.mode='operator_updates'",
                 )
             req.trust.allowed_composes = [compose_hash]
 
@@ -1159,7 +1141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
 
-        # Initialize a room vault key and wrap it to both participants.
+        # Initialize a room key and wrap it to both participants.
         # The room DEK is participant-presented, not KMS-derived: after a
         # restart it can only be re-opened by the owner hmk_ or this hmq_.
         dek = await asyncio.to_thread(
@@ -1226,7 +1208,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "attestation": _att.get_bundle(),
         }
 
-    @app.get("/v1/rooms/{room_id}/vault")
+    @app.get("/v1/rooms/{room_id}/key")
     async def room_vault_status(
         room_id: str,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1249,7 +1231,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return await asyncio.to_thread(caller.hive.room_vault.status, room["room_id"])
 
-    @app.post("/v1/rooms/{room_id}/vault/items")
+    @app.post("/v1/rooms/{room_id}/data")
     async def add_room_vault_item(
         room_id: str,
         req: RoomVaultItemRequest,
@@ -1272,7 +1254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return item
 
-    @app.get("/v1/rooms/{room_id}/vault/items")
+    @app.get("/v1/rooms/{room_id}/data")
     async def list_room_vault_items(
         room_id: str,
         request: Request,
@@ -1434,11 +1416,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from . import attestation as _att
         return _att.get_bundle()
 
-    # ── Pipeline endpoints ──
+    # ── Internal pipeline primitives ──
+    #
+    # Room endpoints below are the public execution surface. These lower-level
+    # primitives are kept for tests/admin maintenance and are hidden from the
+    # generated API schema so new clients do not learn the old generic path.
 
     @app.post(
-        "/v1/store",
+        "/v1/_internal/store",
         response_model=StoreResponse,
+        include_in_schema=False,
     )
     async def store(
         req: StoreRequest,
@@ -1474,7 +1461,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # envelope, so strict-default attestation silently degraded for
     # every URI-based recipient call. Backed by the run_store table —
     # completed rows carry an Ed25519 signature over the run body.
-    # Recipients poll status via ``GET /v1/agent-runs/{run_id}``.
+    # Recipients poll status via ``GET /v1/runs/{run_id}``.
 
     async def _submit_query_run_for_request(
         req: QueryRequest,
@@ -1548,7 +1535,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": "pending",
         }
 
-    @app.post("/v1/query/run/submit")
+    @app.post("/v1/_internal/query/run/submit", include_in_schema=False)
     async def submit_query_run(
         req: QueryRequest,
         request: Request,
@@ -1578,8 +1565,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.post(
-        "/v1/index",
+        "/v1/_internal/index",
         response_model=IndexResponse,
+        include_in_schema=False,
     )
     async def index(req: IndexRequest, hm: Hivemind = Depends(get_tenant_hive)):
         try:
@@ -1598,11 +1586,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         schema = await asyncio.to_thread(caller.hive.db.get_schema)
         return {"schema": schema}
 
-    # ── Agent CRUD ──
+    # ── Room agent registry ──
 
     from .sandbox.models import AgentConfig, AgentCreateRequest
 
-    @app.post("/v1/agents")
+    @app.post("/v1/_internal/agents/register-image", include_in_schema=False)
     async def register_agent(
         req: AgentCreateRequest,
         hm: Hivemind = Depends(get_tenant_hive),
@@ -1666,7 +1654,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             visible.add(fixed)
         return agent_id in visible
 
-    @app.get("/v1/agents")
+    @app.get("/v1/room-agents")
     async def list_agents(
         type: str | None = None,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1680,7 +1668,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             agents = [a for a in agents if a.agent_id in visible]
         return [a.model_dump() for a in agents]
 
-    @app.get("/v1/agents/{agent_id}")
+    @app.get("/v1/room-agents/{agent_id}")
     async def get_agent(
         agent_id: str,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1692,7 +1680,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Agent not found")
         return agent.model_dump()
 
-    @app.delete("/v1/agents/{agent_id}")
+    @app.delete("/v1/room-agents/{agent_id}")
     async def delete_agent(
         agent_id: str, hm: Hivemind = Depends(get_tenant_hive)
     ):
@@ -1707,7 +1695,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # extracted source files saved at agent-build time. Owner sees every
     # agent; query-token sees only the bound scope agent.
 
-    @app.get("/v1/agents/{agent_id}/files")
+    @app.get("/v1/room-agents/{agent_id}/files")
     async def list_agent_files(
         agent_id: str,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1722,7 +1710,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return {"agent_id": agent_id, "files": files}
 
-    @app.get("/v1/agents/{agent_id}/files/{file_path:path}")
+    @app.get("/v1/room-agents/{agent_id}/files/{file_path:path}")
     async def read_agent_file(
         agent_id: str,
         file_path: str,
@@ -1757,7 +1745,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #   - the agent's saved config (image, role, budgets…)
     #   - a stable sha256 over the full set of saved source files
     #     (sha256("<path>\0<content>\0…" sorted) — re-derivable by hand
-    #     after re-fetching files via /v1/agents/{id}/files{,/{path}})
+    #     after re-fetching files via /v1/room-agents/{id}/files{,/{path}})
     #   - the resolved Docker image digest (``Id`` + ``RepoDigests``)
     #   - the live /v1/attestation bundle (compose_hash, app_id, quote,
     #     TLS pubkey)
@@ -1799,7 +1787,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "attestation": _att.get_bundle(),
         }
 
-    @app.get("/v1/agents/{agent_id}/attest")
+    @app.get("/v1/room-agents/{agent_id}/attest")
     async def attest_agent(
         agent_id: str,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1808,12 +1796,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Agent not found")
         return await _build_agent_attestation(caller, agent_id)
 
-    # /v1/scope-attest — thin wrapper around the agent-attest helper for
+    # Internal scope-attest — thin wrapper around the agent-attest helper for
     # the query-token recipient flow. Resolves the agent_id from the
     # token binding (query) or the ?scope_agent_id= query param (owner)
     # and delegates to the canonical helper. Adds ``scope_agent_id`` at
     # the top of the response for clients that key off that field.
-    @app.get("/v1/scope-attest")
+    @app.get("/v1/_internal/scope-attest", include_in_schema=False)
     async def scope_attest(
         scope_agent_id: str | None = None,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -1836,9 +1824,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = await _build_agent_attestation(caller, scope_id)
         return {"scope_agent_id": scope_id, **body}
 
-    # ── Agent upload ──
+    # ── Room agent upload ──
 
-    @app.post("/v1/agents/upload")
+    @app.post("/v1/room-agents")
     async def upload_agent(
         name: str = Form(...),
         archive: UploadFile = File(...),
@@ -1853,7 +1841,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # secret prompts, .env). Excluded from attested_files_digest;
         # still bound by image_digest. Defaults to []  (all attestable).
         private_paths: str = Form("[]"),
-        # 'full' (legacy) or 'sealed'. Non-room sealed uploads need KMS.
+        # 'full' or 'sealed'. Room query-agent uploads use the room key;
+        # reusable room agents are tenant-sealed or KMS-sealed depending on mode.
         inspection_mode: str = Form("full"),
         hm: Hivemind = Depends(get_tenant_hive),
     ):
@@ -1945,7 +1934,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return {"agent_id": agent_id, "run_id": run_id, "status": "pending"}
 
-    # ── Unified agent submit ──
+    # ── Internal multi-agent submit ──
 
     async def _build_single_agent(
         runner,
@@ -1962,6 +1951,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hm: Hivemind,
         private_paths: list[str] | None = None,
         inspection_mode: str = "full",
+        room_id: str | None = None,
     ) -> str:
         """Build Docker image, register agent, save files. Returns image tag."""
         image_tag = _tenant_image_tag(hm.tenant_id, agent_id)
@@ -1995,13 +1985,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 files,
                 private_paths or [],
                 inspection_mode,
+                room_id,
             )
         except Exception as e:
             logger.warning("Failed to save agent files for %s: %s", agent_id, e)
 
         return image_tag
 
-    @app.post("/v1/agents/submit")
+    @app.post("/v1/_internal/agents/submit", include_in_schema=False)
     async def submit_agents(
         # Query agent (required)
         query_archive: UploadFile = File(...),
@@ -2316,10 +2307,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass
 
-    # ── Query agent submit + run tracking (async-submit flow) ──
+    # ── Room query-agent submit + run tracking (async-submit flow) ──
 
-    @app.post("/v1/query-agents/submit")
+    @app.post("/v1/rooms/{room_id}/query-agents")
     async def submit_query_agent(
+        room_id: str,
         request: Request,
         name: str = Form(...),
         archive: UploadFile = File(...),
@@ -2330,8 +2322,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_llm_calls: Annotated[int, Form(ge=1)] = 20,
         max_tokens: Annotated[int, Form(ge=1)] = 100_000,
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
-        room_id: str | None = Form(None),
-        scope_agent_id: str | None = Form(None),
         mediator_agent_id: str | None = Form(None),
         # LLM routing (optional). ``provider="tinfoil"`` requires the
         # server to have HIVEMIND_TINFOIL_API_KEY configured.
@@ -2340,97 +2330,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         policy: str | None = Form(None),
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        """Upload query agent source, create a run record, and kick off execution.
-
-        The uploaded query agent inherits its inspection_mode from the
-        bound scope agent: in a sealed room, the query agent is sealed;
-        in a full room, full. B doesn't pick — A's scope-agent policy
-        is the contract.
-        """
+        """Upload query agent source into a room and kick off execution."""
         hm = caller.hive
-        room: dict | None = None
-        if caller.role == "query" and caller.constraints.get("room_id"):
-            room = await _load_room_for_caller(caller, room_id)
-        elif room_id:
-            room = await _load_room_for_caller(caller, room_id)
-
-        # Query-token callers cannot pick their own scope agent — pin it
-        # to the one the owner bound the token to.
-        if room is not None:
-            if room.get("query_mode") != "uploadable":
-                raise HTTPException(
-                    403,
-                    "this room uses a fixed query agent; uploads are disabled",
-                )
-            if not caller.constraints.get("can_upload_query_agent") and caller.role == "query":
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "this room invite may not upload query agents"
-                    ),
-                )
-            scope_agent_id = room["scope_agent_id"]
-            room_policy = room.get("policy") or ""
-            requested_policy = (policy or "").strip()
-            if requested_policy and requested_policy != room_policy:
-                raise HTTPException(
-                    400,
-                    "room policy is fixed by the signed room manifest; "
-                    "caller-supplied policy cannot override it",
-                )
-            policy = room_policy
-            _validate_room_provider(provider, room)
-            validated_mode = _validate_inspection_mode(
-                _room_query_inspection_mode(room),
-                require_kms=False,
+        room = await _load_room_for_caller(caller, room_id)
+        if room.get("query_mode") != "uploadable":
+            raise HTTPException(
+                403,
+                "this room uses a fixed query agent; uploads are disabled",
             )
-        elif caller.role == "query":
-            # Phase 4: query tokens must opt-in to code execution.
-            # Default-false; owner sets `can_upload_query_agent=true`
-            # explicitly via `tokens issue --can-upload-query-agent` to
-            # cede execution surface to the recipient. Without it the
-            # token can only submit prompts via /v1/query/run/submit.
-            if not caller.constraints.get("can_upload_query_agent"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "this query token may not upload query agents; "
-                        "owner must mint a token with "
-                        "can_upload_query_agent=true"
-                    ),
-                )
-            scope_agent_id = caller.constraints.get("scope_agent_id") or ""
+        if not caller.constraints.get("can_upload_query_agent") and caller.role == "query":
+            raise HTTPException(
+                status_code=403,
+                detail="this room invite may not upload query agents",
+            )
+        scope_agent_id = room["scope_agent_id"]
+        room_policy = room.get("policy") or ""
+        requested_policy = (policy or "").strip()
+        if requested_policy and requested_policy != room_policy:
+            raise HTTPException(
+                400,
+                "room policy is fixed by the signed room manifest; "
+                "caller-supplied policy cannot override it",
+            )
+        policy = room_policy
+        _validate_room_provider(provider, room)
+        validated_mode = _validate_inspection_mode(
+            _room_query_inspection_mode(room),
+            require_kms=False,
+        )
         scope_agent_id = _require_scope_agent_id(hm, scope_agent_id)
-
-        if room is None:
-            # Legacy query tokens inherit inspection_mode from the bound
-            # scope agent. Room tokens use query.visibility from the
-            # signed room manifest instead.
-            scope_cfg = await asyncio.to_thread(
-                hm.agent_store.get, scope_agent_id,
-            )
-            if not scope_cfg:
-                raise HTTPException(404, f"Scope agent '{scope_agent_id}' not found")
-            inherited_mode = (
-                getattr(scope_cfg, "inspection_mode", "full") or "full"
-            )
-            validated_mode = _validate_inspection_mode(inherited_mode)
-        else:
-            await _ensure_scope_agent_exists(hm, scope_agent_id)
+        await _ensure_scope_agent_exists(hm, scope_agent_id)
 
         room_vault_items: list[dict] = []
-        if room is not None:
-            bearer = _bearer(request)
-            await asyncio.to_thread(
-                hm.room_vault.open,
-                room["room_id"],
-                _room_wrap_id(caller),
-                bearer,
-            )
-            room_vault_items = await asyncio.to_thread(
-                hm.room_vault.list_items,
-                room["room_id"],
-            )
+        bearer = _bearer(request)
+        await asyncio.to_thread(
+            hm.room_vault.open,
+            room["room_id"],
+            _room_wrap_id(caller),
+            bearer,
+        )
+        room_vault_items = await asyncio.to_thread(
+            hm.room_vault.list_items,
+            room["room_id"],
+        )
 
         try:
             content = await _read_upload_bytes_limited(
@@ -2630,7 +2572,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── Run status / list ──
 
-    @app.get("/v1/agent-runs/{run_id}")
+    @app.get("/v1/runs/{run_id}")
     async def get_agent_run(
         run_id: str,
         caller: Caller = Depends(requires_role("owner", "query")),
@@ -2655,7 +2597,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache, no-store"},
         )
 
-    @app.get("/v1/agent-runs")
+    @app.get("/v1/runs")
     async def list_agent_runs(
         limit: int = 20,
         token_id: str | None = None,
@@ -2665,7 +2607,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         ``token_id`` (owner-only): filter to runs initiated by a single
         capability token. Pass the 12-hex prefix returned by
-        ``/v1/tokens`` (or ``hivemind tokens list``). Lets A audit
+            the room creation response. Lets A audit
         per-token activity without leaking the raw bearer.
         Query-token callers can't pass this — their view is implicitly
         scoped to the runs they themselves initiated, but listing other
@@ -2701,7 +2643,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ── Artifact fetch (Postgres-backed; no S3) ──
 
     @app.get(
-        "/v1/query/runs/{run_id}/artifacts/{filename:path}",
+        "/v1/runs/{run_id}/artifacts/{filename:path}",
     )
     async def get_run_artifact(
         run_id: str,

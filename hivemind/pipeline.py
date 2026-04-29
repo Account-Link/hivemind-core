@@ -149,7 +149,7 @@ class Pipeline:
     ) -> tuple[str | None, bool]:
         """Return ``(provider, llm_egress_enabled)`` for a run.
 
-        ``allowed_llm_providers=None`` is legacy unrestricted behavior.
+        ``allowed_llm_providers=None`` is unrestricted internal behavior.
         ``[]`` means no external LLM egress; the bridge still starts, but
         all LLM endpoints return 403 so non-LLM agents can still use SQL
         tools and produce deterministic output.
@@ -772,7 +772,7 @@ class Pipeline:
 
         Empty strings when the agent doesn't exist or has no files.
         Computed on the same content the runtime reads, so a recipient
-        re-fetching ``/v1/agents/{id}/files`` reproduces both digests.
+        re-fetching ``/v1/room-agents/{id}/files`` reproduces both digests.
         """
         if not agent_id:
             return "", ""

@@ -122,8 +122,8 @@ def _pinning_url(app_id: str) -> str:
 
     Empty if HIVEMIND_ENCLAVE_TLS is off (no Tier 3 to pin) or app_id
     is missing — clients should treat empty as "Tier 3 not available".
-    Override the gateway via HIVEMIND_PINNING_GATEWAY (e.g. for prod5
-    legacy deploys), and the listen port via HIVEMIND_PORT.
+    Override the gateway via HIVEMIND_PINNING_GATEWAY, and the listen port
+    via HIVEMIND_PORT.
     """
     if not os.environ.get("HIVEMIND_ENCLAVE_TLS"):
         return ""
@@ -210,17 +210,6 @@ def bootstrap() -> None:
             report_data = _build_report_data_v2(tls_bundle["fingerprint"])
         else:
             report_data = _build_report_data_v1()
-
-        # ── Sealed-agent enclave key (Phase 6) ──
-        # Best-effort: missing key → sealed-mode uploads fail at the
-        # upload boundary, but ``full`` mode and the rest of the app
-        # keep working in local dev.
-        try:
-            from . import agent_seal as _aseal
-
-            _aseal.bootstrap(dstack)
-        except Exception as ase_e:
-            logger.warning("agent_seal bootstrap failed: %r", ase_e)
 
         # ── Run signer (Phase 5) ──
         # Derive the Ed25519 keypair the pipeline will use to sign run

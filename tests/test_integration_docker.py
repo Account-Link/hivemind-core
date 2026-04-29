@@ -207,9 +207,9 @@ class TestAgentRegistrationAPI:
 
     @pytest.mark.asyncio
     async def test_register_extracts_files(self, sandbox_client):
-        """POST /v1/agents extracts files and returns count."""
+        """POST /v1/room-agents extracts files and returns count."""
         resp = await sandbox_client.post(
-            "/v1/agents",
+            "/v1/room-agents",
             json={
                 "name": "test-agent",
                 "image": TEST_IMAGE,
@@ -223,14 +223,14 @@ class TestAgentRegistrationAPI:
 
     @pytest.mark.asyncio
     async def test_get_agent_does_not_leak_source(self, sandbox_client):
-        """GET /v1/agents/{id} returns config but no source files."""
+        """GET /v1/room-agents/{id} returns config but no source files."""
         resp = await sandbox_client.post(
-            "/v1/agents",
+            "/v1/room-agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
         agent_id = resp.json()["agent_id"]
 
-        resp = await sandbox_client.get(f"/v1/agents/{agent_id}")
+        resp = await sandbox_client.get(f"/v1/room-agents/{agent_id}")
         assert resp.status_code == 200
         data = resp.json()
 
@@ -243,13 +243,13 @@ class TestAgentRegistrationAPI:
 
     @pytest.mark.asyncio
     async def test_list_agents_does_not_leak_source(self, sandbox_client):
-        """GET /v1/agents returns configs but no source files."""
+        """GET /v1/room-agents returns configs but no source files."""
         await sandbox_client.post(
-            "/v1/agents",
+            "/v1/room-agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
 
-        resp = await sandbox_client.get("/v1/agents")
+        resp = await sandbox_client.get("/v1/room-agents")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) >= 1
@@ -260,17 +260,17 @@ class TestAgentRegistrationAPI:
 
     @pytest.mark.asyncio
     async def test_delete_agent_removes_files(self, sandbox_client):
-        """DELETE /v1/agents/{id} removes both config and extracted files."""
+        """DELETE /v1/room-agents/{id} removes both config and extracted files."""
         resp = await sandbox_client.post(
-            "/v1/agents",
+            "/v1/room-agents",
             json={"name": "test-agent", "image": TEST_IMAGE},
         )
         agent_id = resp.json()["agent_id"]
 
-        resp = await sandbox_client.delete(f"/v1/agents/{agent_id}")
+        resp = await sandbox_client.delete(f"/v1/room-agents/{agent_id}")
         assert resp.status_code == 200
 
-        resp = await sandbox_client.get(f"/v1/agents/{agent_id}")
+        resp = await sandbox_client.get(f"/v1/room-agents/{agent_id}")
         assert resp.status_code == 404
 
 

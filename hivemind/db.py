@@ -179,7 +179,7 @@ _INTERNAL_DDL: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS _hivemind_rooms_created_idx
     ON _hivemind_rooms (created_at DESC)
     """,
-    # Room vault: persistent room data encrypted under a per-room DEK.
+        # Room data: persistent room items encrypted under a per-room DEK.
     # The DEK is not KMS-derived. Each participant gets a separate wrap
     # row derived from their bearer token, so data stays sealed after a
     # restart until a participant interacts with the room again.

@@ -61,11 +61,9 @@ class Caller:
     server endpoints use for access decisions. ``constraints`` schema
     depends on role:
       - owner: ``{}``
-      - query: ``{"scope_agent_id": <id>}`` — every query through this
-        token is forced to use this scope agent (enforced in
-        /v1/query/run/submit). New room invites add ``room_id`` and
-        room policy snapshots; the tenant DB room manifest remains the
-        source of truth.
+      - query: room invite constraints. Every run is forced through the
+        signed room manifest; the tenant DB room row remains the source
+        of truth.
     """
 
     tenant_id: str
@@ -192,7 +190,7 @@ class TenantRegistry:
             )
             """
         )
-        # Migrate legacy BYTEA → TEXT for DBs initialized with the older
+        # Migrate BYTEA → TEXT for DBs initialized with the older
         # schema. Guard on the actual column type: if it's already TEXT,
         # running the ALTER with USING encode(...::bytea, 'hex') would
         # re-encode the stored hex string as ASCII bytes → double-hex,
@@ -362,9 +360,8 @@ class TenantRegistry:
             raise ValueError(
                 "query token requires constraints.scope_agent_id"
             )
-        # ``can_upload_query_agent`` (Phase 4) opts a query token into
-        # POST /v1/query-agents/submit. Default false: existing tokens
-        # keep their narrow capability of submitting prompts only.
+        # ``can_upload_query_agent`` opts a room invite into
+        # POST /v1/rooms/{room_id}/query-agents.
         raw_upload = constraints.get("can_upload_query_agent", False)
         if raw_upload not in (True, False):
             raise ValueError(
