@@ -15,7 +15,7 @@ header works for all of them:
 | Prefix | Kind | Scope |
 |---|---|---|
 | `hmk_…` | **tenant owner** | full access to the tenant's DB and pipeline; can mint capability tokens, rotate the key, and run every public endpoint |
-| `hmq_…` | **query capability** | only `/v1/query/run/submit`, `/v1/query-agents/submit`, its own `/v1/agent-runs/*` results/artifacts, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` wrapper), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` (the owner picked it at mint time — the holder cannot override) |
+| `hmq_…` | **query capability** | only `/v1/query/run/submit`, `/v1/query-agents/submit`, its own `/v1/agent-runs/*` results/artifacts, room inspect/open/run endpoints when room-bound, `/v1/agents/{id}/attest` (and the `/v1/scope-attest` wrapper), and read-access to the bound scope agent's source files. Every query is forced through one pinned `scope_agent_id` or room scope agent (the owner picked it at mint time — the holder cannot override) |
 | `<admin-key>` | **operator** | only `/v1/admin/tenants/*` (provision/list/delete/register tenants). Cannot read tenant data through this API |
 
 ```http
@@ -36,7 +36,7 @@ admin tenants create`. To mint capability tokens: `POST /v1/tokens` or
 - IDs (`agent_id`) are opaque strings (currently 12-char hex).
 - Most endpoints use JSON. `POST /v1/agents/upload` uses `multipart/form-data`.
 - Validation errors return `422` (Pydantic/FastAPI). Runtime errors return `400`/`404`/`503`/`500` with `{"detail": ...}`.
-- `503 sealed`: tenant agent files are encrypted at rest under a per-tenant DEK wrapped by the owner's `hmk_` key. The DEK cache lives only in process memory, so a CVM restart wipes it. Capability-token (`hmq_`) requests that need to read encrypted data return `503` with `detail: "Tenant is sealed: ..."` until the owner makes any authenticated request and re-thaws the cache. See [ARCHITECTURE.md § Tenant Seal](ARCHITECTURE.md#tenant-seal-application-layer-encryption).
+- `503 sealed`: tenant agent files are encrypted at rest under a per-tenant DEK wrapped by the owner's `hmk_` key. Room vault rows are encrypted under a per-room DEK wrapped to room participants. These DEK caches live only in process memory, so a CVM restart wipes them. Requests that need sealed data return `503` until a bearer with the matching wrap is presented. See [ARCHITECTURE.md § Tenant Seal](ARCHITECTURE.md#tenant-seal-application-layer-encryption).
 
 ## Public API
 
@@ -210,6 +210,76 @@ tokens inherit the bound scope agent and cannot override it.
 ```json
 {"run_id": "r_xxxx", "agent_id": "abc123def456", "status": "pending"}
 ```
+
+### Rooms
+
+Rooms bind delegated querying to a signed manifest: scope agent, query-agent
+mode, source visibility, output visibility, LLM/artifact egress, room policy,
+and compose trust mode. Auth is owner (`hmk_`) for creation and data writes;
+room-bound query tokens (`hmq_`) can inspect/open/run only their bound room.
+
+#### `POST /v1/rooms`
+
+Create a room and mint one invite token. The response includes an
+`hmroom://...` link that carries the token and owner signing pubkey.
+
+```json
+{
+  "name": "alpha",
+  "rules": "Only answer aggregate questions.",
+  "policy": "Only answer aggregate questions.",
+  "scope_agent_id": "scope-a",
+  "query_mode": "fixed",
+  "query_agent_id": "query-a",
+  "output_visibility": "querier_only",
+  "egress": {"llm_providers": ["tinfoil"], "allow_artifacts": false},
+  "trust": {"mode": "operator_approved"}
+}
+```
+
+Create also initializes a room vault DEK and wraps it to both the owner
+`hmk_` and the minted invite `hmq_`.
+
+#### `GET /v1/rooms/{room_id}` / `GET /v1/rooms/{room_id}/attest`
+
+Return the stored signed manifest. `/attest` also includes live CVM
+attestation and fixed agent attestations so the client can verify the room
+contract before sending a query or opening the vault.
+
+#### `POST /v1/rooms/{room_id}/open`
+
+Open the room vault with the current bearer. Owner and room-bound query
+tokens are accepted when they have a key wrap for the room.
+
+#### `POST /v1/rooms/{room_id}/vault/items`
+
+Owner-only. Add encrypted room data.
+
+```json
+{"text": "private document text", "metadata": {"source": "upload"}}
+```
+
+Rows are stored in `_hivemind_room_vault_items` as ciphertext. Query tokens
+cannot fetch plaintext through this endpoint; during a room run, agents see
+vault rows through `get_room_vault_items`, with query-agent rows filtered by
+the room scope function.
+
+#### `GET /v1/rooms/{room_id}/vault/items`
+
+Owner-only plaintext listing for auditing/debugging. The CLI hides item text
+unless `hivemind room data --show-text` is used.
+
+#### `POST /v1/rooms/{room_id}/runs`
+
+Submit a query under the room contract. Equivalent to
+`POST /v1/query/run/submit` with the room manifest applied server-side:
+scope agent, fixed query agent, policy, provider allowlist, output ACL, and
+artifact setting are all forced by the room.
+
+#### `POST /v1/rooms/{room_id}/trust`
+
+Owner-only. Re-sign the same room with updated compose trust settings
+without changing existing invite links.
 
 ### `POST /v1/index`
 

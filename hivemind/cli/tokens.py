@@ -12,9 +12,10 @@ from ._http import _api_error, _hdelete, _hget, _hpost
 # ── Capability tokens ──
 #
 # Owner-side commands to issue / list / revoke delegated query tokens.
-#   * ``query`` (``hmq_…``) — recipient may submit prompts via /v1/query
-#     and upload their own query agent via /v1/query-agents/submit. Every
-#     such call is forced through the scope agent the owner pins here.
+#   * ``query`` (``hmq_…``) — recipient may submit prompts via
+#     /v1/query/run/submit and upload their own query agent via
+#     /v1/query-agents/submit. Every such call is forced through the scope
+#     agent or room the owner pins here.
 #
 # Plaintext is shown ONCE at issue. Loss == revoke + reissue.
 

@@ -175,6 +175,11 @@ class RoomTrustUpdateRequest(BaseModel):
     append_live: bool = False
 
 
+class RoomVaultItemRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    metadata: dict = Field(default_factory=dict)
+
+
 def build_room_manifest(
     *,
     room_id: str,
@@ -420,6 +425,7 @@ __all__ = [
     "RoomStore",
     "RoomTrust",
     "RoomTrustUpdateRequest",
+    "RoomVaultItemRequest",
     "build_room_manifest",
     "inspection_mode_from_visibility",
     "normalize_llm_providers",

@@ -102,6 +102,19 @@ def _enforce_room_trust(room_attest: dict) -> None:
         )
 
 
+def _parse_meta(pairs: tuple[str, ...]) -> dict:
+    out: dict[str, str] = {}
+    for raw in pairs:
+        if "=" not in raw:
+            raise click.ClickException("--meta values must be key=value")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise click.ClickException("--meta key cannot be empty")
+        out[key] = value
+    return out
+
+
 @click.group("room")
 def rooms_cli():
     """Create and use signed data rooms."""
@@ -248,6 +261,97 @@ def inspect_room(room: str, as_json: bool):
     click.echo(f"Hash:   {data['room']['manifest_hash']}")
     click.echo(f"Trust:  {manifest['trust']['mode']}")
     click.echo("Sig:    verified")
+
+
+@rooms_cli.command("add-data")
+@click.argument("room")
+@click.argument("text", required=False)
+@click.option(
+    "--file",
+    "file_path",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Read vault item text from a file.",
+)
+@click.option(
+    "--meta",
+    "metadata_pairs",
+    multiple=True,
+    help="Metadata key=value. Repeat for multiple.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def add_room_data(
+    room: str,
+    text: str | None,
+    file_path: Path | None,
+    metadata_pairs: tuple[str, ...],
+    as_json: bool,
+):
+    """Add owner data to the encrypted room vault."""
+    if bool(text) == bool(file_path):
+        raise click.ClickException("provide exactly one of TEXT or --file")
+    service, room_id, headers, owner_pubkey = _parse_room_ref(room)
+    data = _fetch_verified_room(
+        service,
+        room_id,
+        headers,
+        owner_pubkey_b64=owner_pubkey,
+    )
+    _enforce_room_trust(data)
+    body_text = file_path.read_text(encoding="utf-8") if file_path else text or ""
+    payload = {"text": body_text, "metadata": _parse_meta(metadata_pairs)}
+    resp = _hpost(
+        f"{service}/v1/rooms/{room_id}/vault/items",
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    out = resp.json()
+    if as_json:
+        click.echo(_json.dumps(out, indent=2))
+        return
+    click.echo(f"Room: {room_id}")
+    click.echo(f"Item: {out['item_id']}")
+
+
+@rooms_cli.command("data")
+@click.argument("room")
+@click.option("--show-text", is_flag=True, help="Print plaintext item contents.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def list_room_data(room: str, show_text: bool, as_json: bool):
+    """List owner-visible encrypted room vault items."""
+    service, room_id, headers, owner_pubkey = _parse_room_ref(room)
+    data = _fetch_verified_room(
+        service,
+        room_id,
+        headers,
+        owner_pubkey_b64=owner_pubkey,
+    )
+    _enforce_room_trust(data)
+    resp = _hget(
+        f"{service}/v1/rooms/{room_id}/vault/items",
+        headers=headers,
+        timeout=60,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    out = resp.json()
+    if as_json:
+        click.echo(_json.dumps(out, indent=2))
+        return
+    items = out.get("items") or []
+    click.echo(f"Room:  {room_id}")
+    click.echo(f"Items: {len(items)}")
+    for item in items:
+        click.echo(
+            f"- {item['item_id']} "
+            f"({item.get('size_bytes', 0)} bytes) "
+            f"{_json.dumps(item.get('metadata') or {}, sort_keys=True)}"
+        )
+        if show_text:
+            click.echo(item.get("text") or "")
 
 
 @rooms_cli.command("trust")

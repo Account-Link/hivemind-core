@@ -5,14 +5,17 @@ sandboxed agents. The intended operator boundary is: the host cannot read disk
 or RAM, and tenants can verify the live CVM before releasing data or agents.
 Only agent-mediated, scope-constrained, mediator-audited answers leave.
 
-Runs inside a dstack Confidential VM. Postgres is plaintext inside the CVM.
+Runs inside a dstack Confidential VM. Normal app tables are plaintext inside
+the CVM; room vault rows and sealed agent files are application ciphertext.
 Disk encryption (LUKS2) and memory encryption (TDX) are handled by hardware.
-Application-level encryption is narrow: agent source files can be sealed
-under a per-tenant DEK wrapped by the owner's `hmk_` key, so capability
-tokens alone cannot decrypt them after a restart. App-defined tables stay
-plaintext under LUKS2/TDX once inside the CVM. Room manifests make the
-rules attestable, but they do not turn arbitrary app tables into encrypted
-application-layer records.
+Application-level encryption is deliberately scoped. Agent source files can
+be sealed under a per-tenant DEK wrapped by the owner's `hmk_` key. Room
+vault items are sealed under a per-room DEK wrapped to the owner `hmk_` and
+room invite `hmq_`, so a restart or backend update leaves that room data
+unreadable until a participant interacts again. App-defined tables written
+through `/v1/store` stay plaintext under LUKS2/TDX once inside the CVM; room
+manifests make their access rules attestable, but they do not retroactively
+turn arbitrary app tables into encrypted application-layer records.
 
 ---
 
@@ -51,6 +54,10 @@ POST /v1/rooms         Create a signed room manifest + invite token.
 GET  /v1/rooms/{id}    Fetch the signed room manifest.
 GET  /v1/rooms/{id}/attest
                        Manifest + live CVM attestation + agent digests.
+POST /v1/rooms/{id}/open
+                       Present a participant bearer and open the room vault.
+POST /v1/rooms/{id}/vault/items
+                       Owner adds encrypted room-vault data.
 POST /v1/rooms/{id}/runs
                        Ask through the room contract.
 
@@ -227,11 +234,13 @@ hivemind room create <scope_agent_id> \
   --query-agent <query_agent_id> \
   --rules-file rules.md \
   --llm-provider tinfoil
+hivemind room add-data <room_id> --file dataset.md --meta source=dataset
 ```
 
 This calls `POST /v1/rooms`, stores the signed envelope in
-`_hivemind_rooms`, mints an `hmq_` token with `room_id`, and prints an
-`hmroom://...` link. Recipients can run:
+`_hivemind_rooms`, initializes a room vault key, wraps it to the owner
+`hmk_` and the invite `hmq_`, mints an `hmq_` token with `room_id`, and
+prints an `hmroom://...` link. Recipients can run:
 
 ```bash
 hivemind room inspect 'hmroom://...'
@@ -259,9 +268,23 @@ Enforcement is server-side and applies even if the client ignores the CLI:
   trust settings, so existing `hmroom://` links keep working while B still
   verifies the new manifest against the original owner pubkey.
 
+Room vault data is the storage path for the stronger "malicious approved
+update cannot read old room data unless a participant interacts" property.
+Rows in `_hivemind_room_vault_items` contain AEAD ciphertext only. The
+per-room DEK is cached in process memory after `POST /v1/rooms/{id}/open`,
+`room add-data`, or a room run that presents a wrapped participant bearer.
+After a restart, `hmk_` and `hmq_` participants can each re-open the same
+room through their own wrap row in `_hivemind_room_key_wraps`.
+
+Agents see vault data through the `get_room_vault_items` tool. Scope agents
+get full vault rows so they can write the room scope function. Query agents
+get the same rows only after that scope function allows them, matching the
+`execute_sql` path.
+
 The run attestation body now includes `room_id`, `room_manifest_hash`,
-`output_visibility`, `allowed_llm_providers`, and `artifacts_enabled`, so
-the answer is cryptographically tied back to the room contract.
+`output_visibility`, `allowed_llm_providers`, `artifacts_enabled`, and
+`room_vault_item_count`, so the answer is cryptographically tied back to
+the room contract and records whether vault data was in scope.
 
 ---
 
@@ -274,6 +297,7 @@ bridge's `/tools/{name}` HTTP endpoint.
 ```
 execute_sql(sql, params)     Full read-only access to all user tables
 get_schema()                 Full database schema (tables, columns, types)
+get_room_vault_items(id?)    Full room-vault rows for the current room
 list_query_agent_files()     Query agent's source file listing
 read_query_agent_file(path)  Read query agent source file
 simulate(prompt, scope_fn)   Run query agent with proposed scope function
@@ -283,6 +307,7 @@ simulate(prompt, scope_fn)   Run query agent with proposed scope function
 ```
 execute_sql(sql, params)     SQL against full DB, results filtered by scope function
 get_schema()                 Database schema (excluding _hivemind_* internal tables)
+get_room_vault_items(id?)    Room-vault rows filtered by scope function
 ```
 
 ### Index Agent Tools
@@ -383,7 +408,7 @@ Postgres tables (`_hivemind_agent_files`).
 ║  │                                                                          │  ║
 ║  │  PYTHON  (FastAPI) — Orchestrator                                        │  ║
 ║  │                                                                          │  ║
-║  │  Routes /v1/store, /v1/query, /v1/index, /v1/health                     │  ║
+║  │  Routes /v1/store, /v1/query/run/submit, /v1/rooms, /v1/index          │  ║
 ║  │  Talks to Postgres directly (same CVM, localhost)                        │  ║
 ║  │  Manages agent lifecycle, sandbox orchestration, budget enforcement       │  ║
 ║  │                                                                          │  ║
@@ -464,9 +489,9 @@ tokens — they don't derive from the owner key, they sit alongside it):
   │  Prefix      │ Kind     │ What the holder can do                       │
   ├──────────────┼──────────┼──────────────────────────────────────────────┤
   │  hmk_…       │ owner    │ Everything (mint tokens, rotate, etc.)       │
-  │  hmq_…       │ query    │ /v1/query{,/submit} + upload-and-run a query │
-  │              │          │ agent. Always forced through one pinned      │
-  │              │          │ scope agent — token holder cannot bypass.    │
+  │  hmq_…       │ query    │ /v1/query/run/submit + upload-and-run a     │
+  │              │          │ query agent, or bound room endpoints.        │
+  │              │          │ Always forced through pinned scope/room.     │
   └──────────────┴──────────┴──────────────────────────────────────────────┘
 ```
 
@@ -527,17 +552,17 @@ Threat coverage:
 
 Caveats:
 
-- Only `_hivemind_agent_files.ciphertext` is sealed today. Room manifests,
-  run output ACLs, and egress rules are application-level controls, but
-  app-defined tables remain plaintext inside the CVM/Postgres boundary.
-  A future sealed room-data store should follow the same pattern
-  (per-row AAD scoped to room id + primary key).
+- `_hivemind_agent_files.ciphertext` and `_hivemind_room_vault_items`
+  are the application-encrypted stores today. Room manifests, run output
+  ACLs, and egress rules are application-level controls. App-defined tables
+  written through `/v1/store` remain plaintext inside the CVM/Postgres
+  boundary.
 - `inspection_mode=sealed` agent files are encrypted from HTTP inspection,
   but the internal rebuild path can decrypt them inside any KMS-approved
   compose. For the stricter "malicious approved update cannot read old
-  room data or private agent parts until a participant interacts" property,
-  room data and sealed agent parts need participant-presented key release,
-  not only compose-gated KMS release.
+  private agent parts until a participant interacts" property, sealed agent
+  parts still need room participant-presented key release; room vault data
+  already uses that pattern.
 - The seal does not protect against an attacker who can induce the
   owner to make an HTTP request after they've compromised the CVM
   process — process memory is the trust boundary above LUKS2/TDX.
@@ -582,14 +607,14 @@ Caveats:
   │  Operator    │            │  Can destroy data but not read it.   │
   ├──────────────┼────────────┼──────────────────────────────────────┤
   │  Postgres    │  YES       │  Plaintext inside CVM for app data.  │
-  │  (in CVM)    │  (all)     │  _hivemind_agent_files holds AEAD    │
-  │              │            │  ciphertext sealed under tenant DEK. │
+  │  (in CVM)    │  (all)     │  Agent files and room vault rows can │
+  │              │            │  hold AEAD ciphertext.               │
   ├──────────────┼────────────┼──────────────────────────────────────┤
   │  Python      │  YES       │  Can query Postgres directly.        │
   │  (in CVM)    │  (all)     │  Orchestrates agents. Routes tools.  │
   ├──────────────┼────────────┼──────────────────────────────────────┤
-  │  Scope Agent │  read-only │  Full DB read + query agent source.  │
-  │  (Docker)    │  (all)     │  Produces scope function.            │
+  │  Scope Agent │  read-only │  Full DB read + query agent source + │
+  │  (Docker)    │  (all)     │  room vault rows. Produces scope fn. │
   ├──────────────┼────────────┼──────────────────────────────────────┤
   │  Query Agent │  filtered  │  SQL against full DB, but results    │
   │  (Docker)    │  only      │  pass through scope function.        │

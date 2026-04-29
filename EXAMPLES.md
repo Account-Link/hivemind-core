@@ -42,7 +42,7 @@ api() {
 If commands return `401 Unauthorized`, your token is wrong, revoked, or
 the tenant has been deleted/suspended. `403` means the token authenticated
 but isn't allowed for that endpoint/operation (e.g. write token on
-`/v1/query`, write token inserting into a non-allowed table).
+`/v1/query/run/submit`, write token inserting into a non-allowed table).
 
 ## 2) Health Check
 
@@ -393,7 +393,7 @@ runs, nor the host it runs on.
 
 ```bash
 # Use an existing query agent
-curl -X POST $BASE/v1/query \
+curl -X POST $BASE/v1/query/run/submit \
   -H "Authorization: Bearer $QUERY_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
@@ -409,3 +409,34 @@ curl -X POST $BASE/v1/query-agents/submit \
   -F "query=Top genres by watch time?" | jq
 # → {"run_id": "...", "agent_id": "...", "status": "pending"}
 ```
+
+## 11) Signed Data Room With Encrypted Room Vault
+
+Use case: A wants B to attest room rules, bring their own query agent if
+allowed, and ask questions over room data that stays sealed after a restart
+until A or B presents their room bearer again.
+
+```bash
+# Owner creates a room. Defaults are Tinfoil-only LLM egress,
+# no artifacts, and querier-only output.
+hivemind room create "$SCOPE_ID" \
+  --query-agent "$QUERY_AGENT" \
+  --rules-file rules.md
+# Room: room_…
+# Invite: hmroom://…
+
+# Owner adds private room data to the participant-presented room vault.
+hivemind room add-data room_... --file dataset.md --meta source=dataset
+hivemind room data room_...
+
+# Recipient verifies the signed manifest and live attestation before asking.
+hivemind room inspect 'hmroom://...'
+hivemind room ask 'hmroom://...' "What changed this month?"
+
+# Uploadable rooms also let the recipient supply a query agent:
+hivemind room ask 'hmroom://...' "What changed this month?" --agent ./my-agent
+```
+
+Room vault rows are stored as ciphertext in `_hivemind_room_vault_items`.
+Agents access them through `get_room_vault_items`; query-agent access is
+filtered by the room scope function.

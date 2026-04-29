@@ -135,6 +135,10 @@ egress, policy text, and compose-trust mode. The CLI keeps it to one link.
 hivemind room create <scope_agent_id> --query-agent <query_agent_id> \
   --rules-file rules.md
 
+# Owner adds private room data under the participant-presented room key
+hivemind room add-data <room_id> --file dataset.md --meta source=dataset
+hivemind room data <room_id>
+
 # Recipient side
 hivemind room inspect 'hmroom://...'
 hivemind room ask 'hmroom://...' "What changed this month?"
@@ -151,6 +155,13 @@ allowlist. `--no-llm` disables bridge LLM endpoints for the room; omitting
 `--allow-artifacts` disables artifact upload egress. `hmroom://` links carry
 the owner signing pubkey; `room inspect` and `room ask` verify the signed
 manifest and bind the final run attestation to the accepted manifest hash.
+
+Room vault data is the stronger storage path for private room documents:
+it is encrypted under a random room DEK wrapped to the owner `hmk_` and
+the invite `hmq_`. After a restart or backend update, the vault stays
+sealed until one of those participants interacts again. Legacy app tables
+written through `/v1/store` are still plaintext inside the CVM/Postgres
+boundary and rely on LUKS2/TDX plus the room scope rules.
 
 ### Operator commands (`hivemind admin …`)
 
@@ -278,12 +289,12 @@ Treat any tenant key that has not been rotated as bootstrap-only.
 
 A tenant key (`hmk_…`) is the keys-to-the-kingdom credential — it can read,
 write, mint scope agents, and rotate. To let a third party use a narrow
-slice of your tenant *without* sharing it, mint a **capability token**
-that pins a specific scope agent:
+slice of your tenant *without* sharing it, mint a **capability token** that
+pins a specific scope agent, or create a room that pins a full room contract:
 
 | Prefix | Kind | What the holder can do | What's pinned at issue |
 |---|---|---|---|
-| `hmq_…` | query | submit prompts via `/v1/query/run/submit`, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** — every query is forced through it |
+| `hmq_…` | query | submit prompts via `/v1/query/run/submit`, use room run endpoints, upload their own query agent, read scope-agent files for audit | exactly one **scope agent id** or **room id** — every query is forced through it |
 
 ```bash
 # Owner mints a query token bound to a scope agent (the recipient

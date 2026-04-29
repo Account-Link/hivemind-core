@@ -34,6 +34,7 @@ from .rooms import (
     RoomCreateRequest,
     RoomRunRequest,
     RoomTrustUpdateRequest,
+    RoomVaultItemRequest,
     build_room_manifest,
     inspection_mode_from_visibility,
     room_constraints,
@@ -41,6 +42,7 @@ from .rooms import (
     verify_room_envelope,
     visibility_from_inspection_mode,
 )
+from .room_vault import RoomVaultSealed
 from .sandbox.settings import build_sandbox_settings
 from .tenants import Caller, Role, TenantRegistry
 from .version import APP_VERSION
@@ -339,6 +341,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.exception_handler(RoomVaultSealed)
+    async def _on_room_vault_sealed(_request, exc):  # pragma: no cover
+        return _JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "Room vault is sealed: encrypted room data cannot be "
+                    "read until a room participant presents a bearer token "
+                    "that has a key wrap for this room."
+                ),
+                "error": str(exc),
+            },
+        )
+
     cors_origins = [
         origin.strip()
         for origin in (settings.cors_allow_origins or "").split(",")
@@ -510,6 +526,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         manifest = room.get("manifest") or {}
         query = manifest.get("query") or {}
         return inspection_mode_from_visibility(query.get("visibility"))
+
+    def _room_wrap_id(caller: Caller) -> str:
+        if caller.role == "owner":
+            return "owner"
+        token_id = (caller.token_id or "").strip()
+        if not token_id:
+            raise HTTPException(500, "query caller is missing token_id")
+        return f"query:{token_id}"
 
     def _room_link(request: Request, room_id: str, token: str, pubkey_b64: str) -> str:
         base = str(request.base_url).rstrip("/")
@@ -1133,6 +1157,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+        # Initialize a room vault key and wrap it to both participants.
+        # The room DEK is participant-presented, not KMS-derived: after a
+        # restart it can only be re-opened by the owner hmk_ or this hmq_.
+        dek = await asyncio.to_thread(
+            hm.room_vault.ensure_room_key,
+            room_id,
+            "owner",
+            bearer,
+        )
+        await asyncio.to_thread(
+            hm.room_vault.add_wrap,
+            room_id,
+            f"query:{cap['token_id']}",
+            cap["token"],
+            dek=dek,
+        )
+
         return {
             "room_id": room_id,
             "room": room,
@@ -1183,6 +1224,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "attestation": _att.get_bundle(),
         }
 
+    @app.get("/v1/rooms/{room_id}/vault")
+    async def room_vault_status(
+        room_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        room = await _load_room_for_caller(caller, room_id)
+        return await asyncio.to_thread(caller.hive.room_vault.status, room["room_id"])
+
+    @app.post("/v1/rooms/{room_id}/open")
+    async def open_room_vault(
+        room_id: str,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        room = await _load_room_for_caller(caller, room_id)
+        await asyncio.to_thread(
+            caller.hive.room_vault.open,
+            room["room_id"],
+            _room_wrap_id(caller),
+            _bearer(request),
+        )
+        return await asyncio.to_thread(caller.hive.room_vault.status, room["room_id"])
+
+    @app.post("/v1/rooms/{room_id}/vault/items")
+    async def add_room_vault_item(
+        room_id: str,
+        req: RoomVaultItemRequest,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        room = await _load_room_for_caller(caller, room_id)
+        bearer = _bearer(request)
+        await asyncio.to_thread(
+            caller.hive.room_vault.ensure_room_key,
+            room["room_id"],
+            "owner",
+            bearer,
+        )
+        item = await asyncio.to_thread(
+            caller.hive.room_vault.put_item,
+            room["room_id"],
+            text=req.text,
+            metadata=req.metadata,
+        )
+        return item
+
+    @app.get("/v1/rooms/{room_id}/vault/items")
+    async def list_room_vault_items(
+        room_id: str,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        room = await _load_room_for_caller(caller, room_id)
+        items = await asyncio.to_thread(
+            caller.hive.room_vault.list_items_for_bearer,
+            room["room_id"],
+            "owner",
+            _bearer(request),
+        )
+        return {"items": items}
+
     @app.delete("/v1/rooms/{room_id}")
     async def revoke_room(
         room_id: str,
@@ -1228,6 +1330,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def submit_room_run(
         room_id: str,
         req: RoomRunRequest,
+        request: Request,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
         room = await _load_room_for_caller(caller, room_id)
@@ -1243,7 +1346,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider=req.provider,
         )
         qreq = _apply_room_to_query_request(qreq, room)
-        return await _submit_query_run_for_request(qreq, caller, room)
+        return await _submit_query_run_for_request(
+            qreq,
+            caller,
+            room,
+            bearer=_bearer(request),
+        )
 
     # ── Liveness (unauthed, no tenant scope) ──
 
@@ -1370,6 +1478,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         req: QueryRequest,
         caller: Caller,
         room: dict | None = None,
+        bearer: str | None = None,
     ) -> dict:
         hm = caller.hive
         query_agent_id = req.query_agent_id or hm.settings.default_query_agent
@@ -1379,6 +1488,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 400, "query_agent_id is required (no default configured)"
             )
         await _ensure_scope_agent_exists(hm, scope_agent_id)
+        room_vault_items: list[dict] = []
+        if room is not None:
+            room_vault_items = await asyncio.to_thread(
+                hm.room_vault.list_items_for_bearer,
+                room["room_id"],
+                _room_wrap_id(caller),
+                bearer or "",
+            )
 
         run_id = uuid4().hex[:12]
         await asyncio.to_thread(
@@ -1417,6 +1534,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
                 artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
+                room_vault_items=room_vault_items,
             ),
         )
 
@@ -1431,6 +1549,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/v1/query/run/submit")
     async def submit_query_run(
         req: QueryRequest,
+        request: Request,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
         """Submit a query for tracked async processing.
@@ -1449,7 +1568,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             req = _apply_room_to_query_request(req, room)
         else:
             req = _force_scope_for_query_token(req, caller)
-        return await _submit_query_run_for_request(req, caller, room)
+        return await _submit_query_run_for_request(
+            req,
+            caller,
+            room,
+            bearer=_bearer(request),
+        )
 
     @app.post(
         "/v1/index",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import secrets
 
@@ -8,10 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hivemind.config import Settings
+from hivemind.room_vault import RoomVaultSealed
 from hivemind.rooms import verify_room_envelope
 from hivemind.sandbox.models import AgentConfig
 from hivemind.server import create_app
 from hivemind.tenants import TenantRegistry
+from hivemind.tools import AccessLevel, build_room_vault_tools
 
 
 TEST_DSN = os.environ.get(
@@ -160,6 +163,14 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert constraints["allowed_llm_providers"] == ["tinfoil"]
     assert constraints["allow_artifacts"] is False
 
+    status = client.get(
+        f"/v1/rooms/{out['room_id']}/vault",
+        headers=_headers(tenant["api_key"]),
+    )
+    assert status.status_code == 200
+    assert status.json()["wrap_count"] == 2
+    assert status.json()["item_count"] == 0
+
 
 def test_room_envelope_verification_detects_tamper(room_env):
     client, tenant, _hive = room_env
@@ -180,6 +191,89 @@ def test_room_envelope_verification_detects_tamper(room_env):
     ok, reason = verify_room_envelope(tampered, expected_pubkey_b64=pubkey)
     assert not ok
     assert "manifest_hash" in reason
+
+
+def test_room_vault_encrypts_data_and_reopens_with_participant_bearer(room_env):
+    client, tenant, hive = room_env
+    out = _create_fixed_room(client, tenant["api_key"])
+    room_id = out["room_id"]
+    secret = "ultra secret room phrase"
+
+    added = client.post(
+        f"/v1/rooms/{room_id}/vault/items",
+        json={"text": secret, "metadata": {"source": "unit-test"}},
+        headers=_headers(tenant["api_key"]),
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["item_id"].startswith("rvi_")
+
+    rows = hive.db.execute(
+        "SELECT ciphertext FROM _hivemind_room_vault_items WHERE room_id = %s",
+        [room_id],
+    )
+    assert len(rows) == 1
+    assert secret not in rows[0]["ciphertext"]
+
+    hive.room_vault.evict(room_id)
+    with pytest.raises(RoomVaultSealed):
+        hive.room_vault.list_items(room_id)
+
+    owner_read = client.get(
+        f"/v1/rooms/{room_id}/vault/items",
+        headers=_headers(tenant["api_key"]),
+    )
+    assert owner_read.status_code == 200, owner_read.text
+    assert owner_read.json()["items"][0]["text"] == secret
+
+    hive.room_vault.evict(room_id)
+    recipient_read = client.get(
+        f"/v1/rooms/{room_id}/vault/items",
+        headers=_headers(out["token"]),
+    )
+    assert recipient_read.status_code == 403
+
+    opened = client.post(
+        f"/v1/rooms/{room_id}/open",
+        headers=_headers(out["token"]),
+    )
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["open"] is True
+    assert hive.room_vault.list_items(room_id)[0]["text"] == secret
+
+
+def test_room_vault_tool_applies_scope_function():
+    items = [
+        {
+            "item_id": "rvi_1",
+            "text": "allowed row",
+            "metadata": {},
+            "created_at": 1.0,
+            "size_bytes": 11,
+        },
+        {
+            "item_id": "rvi_2",
+            "text": "blocked row",
+            "metadata": {},
+            "created_at": 2.0,
+            "size_bytes": 11,
+        },
+    ]
+
+    def scope_fn(sql, params, rows):
+        assert "room_vault_items" in sql
+        return {
+            "allow": True,
+            "rows": [row for row in rows if row["item_id"] == "rvi_1"],
+        }
+
+    tool = build_room_vault_tools(
+        items,
+        AccessLevel.SCOPED,
+        scope_fn=scope_fn,
+    )[0]
+    out = tool.handler()
+    rows = json.loads(out)
+    assert [row["item_id"] for row in rows] == ["rvi_1"]
 
 
 def test_room_trust_update_resigns_same_room_for_downstream_links(room_env):

@@ -345,6 +345,119 @@ def build_sql_tools(
     return tools
 
 
+def build_room_vault_tools(
+    items: list[dict],
+    access: AccessLevel,
+    scope_fn: Callable[[str, list, list[dict]], dict] | None = None,
+    scope_fn_source: str | None = None,
+) -> list[Tool]:
+    """Build tools for encrypted room-vault documents.
+
+    Scope agents get full read access so they can write a scope function
+    that handles room-vault rows. Query agents get only the rows allowed by
+    that same scope function, mirroring ``execute_sql`` for table data.
+    """
+    if access == AccessLevel.NONE or not items:
+        return []
+    if access == AccessLevel.SCOPED and scope_fn is None:
+        raise ValueError(
+            "build_room_vault_tools(SCOPED, scope_fn=None) is unsafe: room "
+            "vault rows require the room scope_fn before query-agent access."
+        )
+
+    room_rows = [
+        {
+            "item_id": str(item.get("item_id") or ""),
+            "text": item.get("text") or "",
+            "metadata": item.get("metadata") or {},
+            "created_at": item.get("created_at"),
+            "size_bytes": int(item.get("size_bytes") or 0),
+        }
+        for item in items
+    ]
+
+    def _serialize_rows(rows: list[dict]) -> str:
+        out = json.dumps(rows, default=str)
+        if len(out) <= MAX_RESULT_BYTES:
+            return out
+        keep = rows
+        while keep and len(json.dumps(keep, default=str)) > MAX_RESULT_BYTES:
+            keep = keep[: max(1, len(keep) // 2)]
+        return json.dumps(
+            {
+                "rows": keep,
+                "truncated": True,
+                "original_row_count": len(rows),
+                "returned_row_count": len(keep),
+                "note": (
+                    f"Output exceeded {MAX_RESULT_BYTES} bytes; truncated. "
+                    "Use item_id filters or store smaller room vault items."
+                ),
+            },
+            default=str,
+        )
+
+    def get_room_vault_items(item_id: str | None = None) -> str:
+        rows = room_rows
+        requested = (item_id or "").strip()
+        params: list = []
+        sql = "SELECT item_id, text, metadata, created_at, size_bytes FROM room_vault_items"
+        if requested:
+            rows = [r for r in rows if r["item_id"] == requested]
+            params = [requested]
+            sql += " WHERE item_id = %s"
+
+        if access == AccessLevel.SCOPED:
+            from .scope import apply_scope_fn
+
+            try:
+                result = apply_scope_fn(
+                    scope_fn,
+                    sql,
+                    params,
+                    rows,
+                    _source=scope_fn_source,
+                )
+            except Exception as e:
+                logger.debug("Room vault scope function error: %s", e)
+                return json.dumps({"error": "Room vault access denied by scope function"})
+            if not result.get("allow", False):
+                return json.dumps(
+                    {
+                        "error": result.get(
+                            "error",
+                            "Room vault access denied by scope function",
+                        )
+                    }
+                )
+            rows = result.get("rows") or []
+
+        return _serialize_rows(rows)
+
+    return [
+        Tool(
+            name="get_room_vault_items",
+            description=(
+                "Read encrypted data-room vault items for this room. "
+                "Scope agents see all rows. Query agents receive only rows "
+                "allowed by the room scope function. Returns JSON rows with "
+                "item_id, text, metadata, created_at, and size_bytes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": "string",
+                        "description": "Optional room vault item id to fetch.",
+                    },
+                },
+                "required": [],
+            },
+            handler=get_room_vault_items,
+        )
+    ]
+
+
 def build_agent_file_tools(agent_store, query_agent_id: str) -> list[Tool]:
     """Build tools for scoping agents to inspect a query agent's source code."""
 

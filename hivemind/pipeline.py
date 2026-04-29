@@ -26,7 +26,12 @@ from .sandbox.backend import SandboxBackend
 from .sandbox.models import AgentConfig
 from .sandbox.settings import build_sandbox_settings
 from .scope import compile_scope_fn
-from .tools import AccessLevel, build_agent_file_tools, build_sql_tools
+from .tools import (
+    AccessLevel,
+    build_agent_file_tools,
+    build_room_vault_tools,
+    build_sql_tools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +375,7 @@ class Pipeline:
         model: str | None = None,
         provider: str | None = None,
         llm_egress_enabled: bool = True,
+        room_vault_items: list[dict] | None = None,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -416,6 +422,7 @@ class Pipeline:
                 replay_tape=replay_tape,
                 return_tape=True,
                 llm_egress_enabled=llm_egress_enabled,
+                room_vault_items=room_vault_items,
             )
 
         env = {
@@ -437,6 +444,12 @@ class Pipeline:
 
         # Scope agents get FULL_READ access
         scope_tools = build_sql_tools(self.db, AccessLevel.FULL_READ)
+        scope_tools.extend(
+            build_room_vault_tools(
+                room_vault_items or [],
+                AccessLevel.FULL_READ,
+            )
+        )
 
         # Add agent file inspection tools if query agent exists
         if query_agent_id:
@@ -536,6 +549,7 @@ class Pipeline:
         model: str | None = None,
         provider: str | None = None,
         llm_egress_enabled: bool = True,
+        room_vault_items: list[dict] | None = None,
     ):
         """Run query agent with SCOPED access, return output and optionally usage/tape."""
         agent_config = await asyncio.to_thread(
@@ -552,6 +566,14 @@ class Pipeline:
             AccessLevel.SCOPED,
             scope_fn=scope_fn,
             scope_fn_source=scope_fn_source or None,
+        )
+        tools.extend(
+            build_room_vault_tools(
+                room_vault_items or [],
+                AccessLevel.SCOPED,
+                scope_fn=scope_fn,
+                scope_fn_source=scope_fn_source or None,
+            )
         )
         tool_handlers = {t.name: t.handler for t in tools}
 
@@ -775,6 +797,7 @@ class Pipeline:
         output_visibility: str | None = None,
         allowed_llm_providers: list[str] | None = None,
         artifacts_enabled: bool | None = True,
+        room_vault_item_count: int = 0,
     ) -> dict | None:
         """Build the signed run attestation envelope, or ``None`` if the
         run signer isn't available (e.g. local dev without dstack).
@@ -842,6 +865,7 @@ class Pipeline:
             "output_visibility": output_visibility or "",
             "allowed_llm_providers": list(allowed_llm_providers or []),
             "artifacts_enabled": bool(artifacts_enabled),
+            "room_vault_item_count": int(room_vault_item_count or 0),
             "prompt_hash": self._sha256_hex(prompt or ""),
             "output_hash": self._sha256_hex(output or ""),
             "error_hash": self._sha256_hex(error) if error else "",
@@ -879,6 +903,7 @@ class Pipeline:
         output_visibility: str = "owner_and_querier",
         allowed_llm_providers: list[str] | None = None,
         artifacts_enabled: bool = True,
+        room_vault_items: list[dict] | None = None,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -904,6 +929,7 @@ class Pipeline:
                 provider,
                 allowed_llm_providers,
             )
+            room_vault_items = list(room_vault_items or [])
 
             global_max = self._sandbox_settings.global_max_tokens
             effective_max = min(max_tokens or global_max, global_max)
@@ -936,6 +962,7 @@ class Pipeline:
                         max_calls=max_calls, timeout_seconds=timeout_seconds,
                         model=model, provider=provider,
                         llm_egress_enabled=llm_egress_enabled,
+                        room_vault_items=room_vault_items,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -981,6 +1008,14 @@ class Pipeline:
                 AccessLevel.SCOPED,
                 scope_fn=scope_fn,
                 scope_fn_source=scope_fn_source or None,
+            )
+            tools.extend(
+                build_room_vault_tools(
+                    room_vault_items,
+                    AccessLevel.SCOPED,
+                    scope_fn=scope_fn,
+                    scope_fn_source=scope_fn_source or None,
+                )
             )
             tool_handlers = {t.name: t.handler for t in tools}
 
@@ -1085,6 +1120,7 @@ class Pipeline:
                 output_visibility=output_visibility,
                 allowed_llm_providers=allowed_llm_providers,
                 artifacts_enabled=artifacts_enabled,
+                room_vault_item_count=len(room_vault_items),
             )
             await asyncio.to_thread(
                 run_store.update_status, run_id, "completed",
@@ -1111,6 +1147,7 @@ class Pipeline:
                     output_visibility=output_visibility,
                     allowed_llm_providers=allowed_llm_providers,
                     artifacts_enabled=artifacts_enabled,
+                    room_vault_item_count=len(room_vault_items or []),
                 )
                 await asyncio.to_thread(
                     run_store.update_status, run_id, "failed",
