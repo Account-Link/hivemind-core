@@ -119,6 +119,7 @@ def room_env():
 
     seed_agent("scope-a", "scope")
     seed_agent("query-a", "query")
+    seed_agent("mediator-a", "mediator")
 
     app = create_app(settings)
     app.state.registry = registry
@@ -147,6 +148,7 @@ def _create_fixed_room(client: TestClient, owner_key: str, **overrides) -> dict:
         "scope_agent_id": "scope-a",
         "query_mode": "fixed",
         "query_agent_id": "query-a",
+        "mediator_agent_id": "mediator-a",
         "output_visibility": "querier_only",
         "egress": {"llm_providers": ["tinfoil"], "allow_artifacts": False},
     }
@@ -167,6 +169,7 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert manifest["scope"]["agent_id"] == "scope-a"
     assert manifest["query"]["mode"] == "fixed"
     assert manifest["query"]["agent_id"] == "query-a"
+    assert manifest["mediator"]["agent_id"] == "mediator-a"
     assert manifest["output"]["visibility"] == "querier_only"
     assert room["manifest_hash"] == room["envelope"]["manifest_hash"]
     assert room["envelope"]["signature_b64"]
@@ -177,6 +180,7 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert constraints["room_id"] == out["room_id"]
     assert constraints["scope_agent_id"] == "scope-a"
     assert constraints["fixed_query_agent_id"] == "query-a"
+    assert constraints["fixed_mediator_agent_id"] == "mediator-a"
     assert constraints["allowed_llm_providers"] == ["tinfoil"]
     assert constraints["allow_artifacts"] is False
 
@@ -452,7 +456,11 @@ def test_room_token_can_inspect_fixed_query_agent(room_env):
 
     resp = client.get("/v1/room-agents", headers=_headers(out["token"]))
     assert resp.status_code == 200
-    assert {a["agent_id"] for a in resp.json()} == {"scope-a", "query-a"}
+    assert {a["agent_id"] for a in resp.json()} == {
+        "scope-a",
+        "query-a",
+        "mediator-a",
+    }
 
     resp = client.get("/v1/room-agents/query-a/files", headers=_headers(out["token"]))
     assert resp.status_code == 200
@@ -477,6 +485,14 @@ def test_room_rejects_policy_and_provider_override(room_env):
     )
     assert bad_provider.status_code == 400
     assert "not allowed by this room" in bad_provider.json()["detail"]
+
+    bad_mediator = client.post(
+        f"/v1/rooms/{out['room_id']}/runs",
+        json={"query": "x", "mediator_agent_id": "other-mediator"},
+        headers=_headers(out["token"]),
+    )
+    assert bad_mediator.status_code == 400
+    assert "mediator agent is fixed" in bad_mediator.json()["detail"]
 
 
 def test_querier_only_output_redacts_owner_but_not_recipient(room_env):

@@ -30,11 +30,14 @@ as CLI flags.
 ## Fixed Query Agent
 
 Use this when the owner chooses the query agent and the participant only asks
-questions. This is the default shape for repeatable rooms.
+questions. This is the default shape for repeatable rooms. A mediator should be
+pinned in the room too; if you omit `--mediator-agent`, the service default is
+pinned when one is configured.
 
 ```bash
 hivemind room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
+  --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md
 ```
 
@@ -48,31 +51,47 @@ the uploaded source is stored.
 For the current live watch-history tenant:
 
 ```bash
-hivemind --profile watch-history room create agents/examples/watch-history-scope \
+hivemind --profile watch-history room create fae0070e6f1f \
   --name watch-history-hashtags \
-  --query-agent agents/examples/watch-history-hashtag-query \
+  --query-agent 730f2d35c608 \
+  --mediator-agent default-mediator \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
   --trust-mode owner_approved \
-  --no-llm
+  --llm-provider tinfoil \
+  --llm-provider openrouter
 ```
 
-That command creates a fixed-query room with deterministic watch-history scope
-and hashtag query agents, disables external LLM egress, and prints the
-`hmroom://...` invite link to share. Because query visibility is
-`inspectable`, prompts for room runs are stored in run history.
+That command creates a fixed-query room with pinned dynamic scope, query, and
+mediator agents. The scope agent can inspect the query agent, simulate it, and
+produce a per-question scope function under the signed room rules. Because
+query visibility is `inspectable`, prompts for room runs are stored in run
+history.
 
 Ask through the invite:
 
 ```bash
 hivemind -y room ask 'hmroom://...' \
   --timeout 900 \
+  --max-tokens 1000000 \
+  --max-llm-calls 60 \
+  --provider tinfoil \
+  --model kimi-k2-6 \
   "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
 ```
 
-Provider/model flags matter only for LLM-backed query agents. This fixed
-hashtag query agent does not call an LLM.
+Use OpenRouter instead when you want the cheaper non-TEE upstream model:
+
+```bash
+hivemind -y room ask 'hmroom://...' \
+  --timeout 900 \
+  --max-tokens 1000000 \
+  --max-llm-calls 60 \
+  --provider openrouter \
+  --model moonshotai/kimi-k2.6 \
+  "Show me my top 30 hashtags by watch count as a markdown table with columns: rank, hashtag, watches. Just the table, no explanation."
+```
 
 ## Participant Uploads Query Agent
 
@@ -80,6 +99,7 @@ Use this when the participant should bring their own query logic.
 
 ```bash
 hivemind room create <scope-agent-id-or-path> \
+  --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md \
   --query-visibility sealed
 ```
@@ -118,6 +138,7 @@ Default room creation allows Tinfoil LLM egress. To allow OpenRouter instead:
 ```bash
 hivemind room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
+  --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md \
   --llm-provider openrouter
 ```
@@ -127,6 +148,7 @@ To allow both:
 ```bash
 hivemind room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
+  --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md \
   --llm-provider tinfoil \
   --llm-provider openrouter
@@ -136,6 +158,11 @@ To disable external LLM calls:
 
 ```bash
 hivemind room create <scope-agent-id-or-path> \
+  --query-agent <query-agent-id-or-path> \
   --rules-file rules.md \
   --no-llm
 ```
+
+Use `--no-llm` only for rooms whose pinned agents are deterministic and never
+call the bridge LLM endpoints. Do not use it for the default dynamic
+scope/query/mediator flow.

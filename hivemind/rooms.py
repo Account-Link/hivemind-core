@@ -133,6 +133,8 @@ class RoomCreateRequest(BaseModel):
     query_mode: RoomQueryMode | None = None
     query_agent_id: str | None = None
     query_visibility: RoomVisibility = "sealed"
+    mediator_agent_id: str | None = None
+    mediator_visibility: RoomVisibility | None = None
     output_visibility: RoomOutputVisibility = "querier_only"
     egress: RoomEgress = Field(default_factory=RoomEgress)
     trust: RoomTrust = Field(default_factory=RoomTrust)
@@ -147,6 +149,8 @@ class RoomCreateRequest(BaseModel):
             raise ValueError("query_agent_id is required when query_mode='fixed'")
         if self.query_agent_id is not None:
             self.query_agent_id = self.query_agent_id.strip() or None
+        if self.mediator_agent_id is not None:
+            self.mediator_agent_id = self.mediator_agent_id.strip() or None
         self.scope_agent_id = self.scope_agent_id.strip()
         return self
 
@@ -189,8 +193,12 @@ def build_room_manifest(
     req: RoomCreateRequest,
     scope_visibility: RoomVisibility,
     query_visibility: RoomVisibility,
+    mediator_visibility: RoomVisibility | None,
     signer_pubkey_b64: str,
 ) -> dict:
+    mediator = {"agent_id": req.mediator_agent_id or ""}
+    if req.mediator_agent_id:
+        mediator["visibility"] = mediator_visibility or "inspectable"
     return {
         "schema": "hivemind.room.v1",
         "room_id": room_id,
@@ -208,6 +216,7 @@ def build_room_manifest(
             "agent_id": req.query_agent_id or "",
             "visibility": query_visibility,
         },
+        "mediator": mediator,
         "output": {
             "visibility": req.output_visibility,
         },
@@ -285,6 +294,9 @@ def room_constraints(envelope: dict) -> dict:
         "can_upload_query_agent": query["mode"] == "uploadable",
         "query_mode": query["mode"],
         "fixed_query_agent_id": query.get("agent_id") or "",
+        "fixed_mediator_agent_id": (
+            (manifest.get("mediator") or {}).get("agent_id") or ""
+        ),
         "query_inspection_mode": inspection_mode_from_visibility(
             query.get("visibility")
         ),
@@ -376,6 +388,9 @@ class RoomStore:
             "manifest_hash": row["manifest_hash"],
             "scope_agent_id": row["scope_agent_id"],
             "fixed_query_agent_id": row.get("fixed_query_agent_id") or "",
+            "fixed_mediator_agent_id": (
+                (envelope.get("manifest") or {}).get("mediator") or {}
+            ).get("agent_id") or "",
             "query_mode": row["query_mode"],
             "output_visibility": row["output_visibility"],
             "allowed_llm_providers": json.loads(

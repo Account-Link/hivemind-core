@@ -43,7 +43,8 @@ The manifest is the contract both parties verify. It commits to:
 - the scope agent identity and visibility mode;
 - whether the query agent is fixed by the owner or uploaded by the
   participant;
-- query-agent visibility, output visibility, LLM egress, and artifact egress;
+- query-agent and mediator-agent visibility;
+- output visibility, LLM egress, and artifact egress;
 - deployment trust policy and accepted compose hashes;
 - the owner public key.
 
@@ -81,7 +82,7 @@ query agent
   -> receives only rows allowed by scope_fn
   -> produces raw answer and optional artifacts
 
-mediator, optional
+mediator, pinned by the room when configured
   -> sees raw answer and policy
   -> has no data tools
   -> produces final output

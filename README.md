@@ -33,6 +33,7 @@ Create a fixed-query room and share the printed invite:
 hivemind room create ./scope-agent \
   --name example-room \
   --query-agent ./query-agent \
+  --mediator-agent ./mediator-agent \
   --scope-visibility inspectable \
   --query-visibility inspectable \
   --rules-file rules.md \
@@ -72,6 +73,8 @@ owner data + scope agent         participant question or query agent
                     |
           query agent receives scoped tools
                     |
+          pinned mediator audits the answer
+                    |
           signed, room-approved output
 ```
 
@@ -79,7 +82,8 @@ A signed room is the runtime agreement. Its manifest binds:
 
 - the scope agent and whether its source is inspectable or sealed;
 - the query mode: fixed query agent or participant-uploaded query agent;
-- query-agent visibility: `inspectable` or `sealed`;
+- query-agent and mediator-agent visibility: `inspectable` or `sealed`;
+- the pinned mediator agent when one is configured;
 - output visibility;
 - allowed LLM providers and artifact egress;
 - deployment trust policy.
@@ -137,10 +141,9 @@ participant's task through scoped tools. Examples live in:
 
 - `agents/default-scope/`
 - `agents/default-query/`
+- `agents/default-mediator/`
 - `agents/examples/simple-query/`
 - `agents/examples/tiktok-analytics/`
-- `agents/examples/watch-history-hashtag-query/`
-- `agents/examples/watch-history-scope/`
 
 ## Owner Flow
 
@@ -148,6 +151,7 @@ Canonical flow: create a signed room, add private data, and share the invite.
 
 ```bash
 hivemind room create ./scope-agent \
+  --mediator-agent ./mediator-agent \
   --rules-file rules.md
 
 hivemind room add-data <room_id> --file dataset.md --meta source=dataset
@@ -163,15 +167,18 @@ Common room variants:
 # Owner pre-loads the query logic; participant only supplies the question.
 hivemind room create ./scope-agent \
   --query-agent ./query-agent \
+  --mediator-agent ./mediator-agent \
   --rules-file rules.md
 
 # Participant can upload their own query agent for this room.
 hivemind room create ./scope-agent \
+  --mediator-agent ./mediator-agent \
   --query-visibility sealed \
   --rules-file rules.md
 
-# No external LLM calls are allowed from room agents.
+# Only for deterministic agents: no external LLM calls are allowed.
 hivemind room create ./scope-agent \
+  --query-agent ./query-agent \
   --rules-file rules.md \
   --no-llm
 ```

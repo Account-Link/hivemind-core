@@ -549,6 +549,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> QueryRequest:
         manifest = room.get("manifest") or {}
         query = manifest.get("query") or {}
+        mediator = manifest.get("mediator")
         mode = query.get("mode") or room.get("query_mode")
         fixed_query_agent_id = (
             query.get("agent_id")
@@ -575,12 +576,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "room policy is fixed by the signed room manifest; "
                 "caller-supplied policy cannot override it",
             )
+        mediator_agent_id = req.mediator_agent_id
+        if isinstance(mediator, dict):
+            fixed_mediator_agent_id = (mediator.get("agent_id") or "").strip()
+            requested_mediator_agent_id = (req.mediator_agent_id or "").strip()
+            if fixed_mediator_agent_id:
+                if (
+                    requested_mediator_agent_id
+                    and requested_mediator_agent_id != fixed_mediator_agent_id
+                ):
+                    raise HTTPException(
+                        400,
+                        "room mediator agent is fixed by the signed room "
+                        "manifest; caller-supplied mediator cannot override it",
+                    )
+                mediator_agent_id = fixed_mediator_agent_id
+            elif requested_mediator_agent_id:
+                raise HTTPException(
+                    400,
+                    "room manifest does not allow a mediator-agent override",
+                )
         _validate_room_provider(req.provider, room)
         return req.model_copy(
             update={
                 "room_id": room["room_id"],
                 "scope_agent_id": room["scope_agent_id"],
                 "query_agent_id": query_agent_id,
+                "mediator_agent_id": mediator_agent_id,
                 "policy": room_policy,
             }
         )
@@ -1099,6 +1121,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 getattr(query_cfg, "inspection_mode", "full")
             )
 
+        if not req.mediator_agent_id:
+            req.mediator_agent_id = settings.default_mediator_agent or None
+        mediator_visibility = None
+        if req.mediator_agent_id:
+            mediator_cfg = await asyncio.to_thread(
+                hm.agent_store.get, req.mediator_agent_id,
+            )
+            if not mediator_cfg:
+                raise HTTPException(
+                    404, f"Mediator agent '{req.mediator_agent_id}' not found"
+                )
+            mediator_visibility = visibility_from_inspection_mode(
+                getattr(mediator_cfg, "inspection_mode", "full")
+            )
+            if (
+                req.mediator_visibility
+                and req.mediator_visibility != mediator_visibility
+            ):
+                raise HTTPException(
+                    400,
+                    "mediator_visibility does not match the registered mediator "
+                    f"agent inspection_mode ({mediator_visibility})",
+                )
+
         if (
             req.trust.mode in {"pinned", "owner_approved"}
             and not req.trust.allowed_composes
@@ -1133,6 +1179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             req=req,
             scope_visibility=scope_visibility,
             query_visibility=query_visibility,
+            mediator_visibility=mediator_visibility,
             signer_pubkey_b64=pub_b64,
         )
         envelope = sign_manifest(manifest, priv)
@@ -1210,10 +1257,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             fixed_query = await _build_agent_attestation(
                 caller, room["fixed_query_agent_id"]
             )
+        fixed_mediator = None
+        if room.get("fixed_mediator_agent_id"):
+            fixed_mediator = await _build_agent_attestation(
+                caller, room["fixed_mediator_agent_id"]
+            )
         return {
             "room": room,
             "scope_agent": scope,
             "query_agent": fixed_query,
+            "mediator_agent": fixed_mediator,
             "attestation": _att.get_bundle(),
         }
 
@@ -1662,6 +1715,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fixed = caller.constraints.get("fixed_query_agent_id") or ""
         if fixed:
             visible.add(fixed)
+        mediator = caller.constraints.get("fixed_mediator_agent_id") or ""
+        if mediator:
+            visible.add(mediator)
         return agent_id in visible
 
     @app.get("/v1/room-agents")
@@ -1675,6 +1731,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             fixed = caller.constraints.get("fixed_query_agent_id") or ""
             if fixed:
                 visible.add(fixed)
+            mediator = caller.constraints.get("fixed_mediator_agent_id") or ""
+            if mediator:
+                visible.add(mediator)
             agents = [a for a in agents if a.agent_id in visible]
         return [a.model_dump() for a in agents]
 

@@ -110,6 +110,7 @@ owner hmk_
   -> server resolves tenant and owner Caller
   -> validate scope agent exists
   -> if fixed query room, validate query agent exists
+  -> if mediator is configured, validate mediator agent exists
   -> derive owner signing key from hmk_ + tenant_id
   -> build canonical room manifest
   -> sign manifest with Ed25519
@@ -126,6 +127,7 @@ The room manifest is the contract both parties verify. It binds:
 - scope agent id and source visibility;
 - query mode: fixed agent or participant-uploaded agent;
 - query-agent visibility: inspectable or sealed;
+- mediator agent id and source visibility when a mediator is configured;
 - output visibility: `querier_only` or `owner_and_querier`;
 - allowed LLM providers and artifact egress setting;
 - room-level compose trust mode and allowed compose hashes;
@@ -217,6 +219,7 @@ hmroom:// link
 - the signed room row;
 - scope-agent attestation;
 - fixed query-agent attestation when the room has one;
+- mediator-agent attestation when the room pins one;
 - the live CVM attestation bundle.
 
 The live attestation bundle includes the dstack quote, compose hash, app id,
@@ -264,7 +267,8 @@ flowchart LR
     ScopedTools --> QueryRun["query agent run"]
     Client --> QueryRun
     QueryRun --> RawOutput["raw query output and optional artifacts"]
-    RawOutput --> Mediator["optional mediator, no data tools"]
+    Manifest --> Mediator["pinned mediator, no data tools"]
+    RawOutput --> Mediator
     Mediator --> RunRow["signed run row"]
     RawOutput --> RunRow
 ```
@@ -365,6 +369,7 @@ client submits query
   -> load and verify room envelope
   -> force room scope_agent_id
   -> force fixed query_agent_id, or require an uploaded query_agent_id
+  -> force room mediator_agent_id when the manifest pins one
   -> reject caller policy override
   -> validate provider against room egress allowlist
   -> open room vault with caller bearer
@@ -388,7 +393,7 @@ query stage
   -> every SQL result and room-vault result passes through scope_fn
   -> bridge enforces LLM budget, provider allowlist, and artifact setting
 
-mediator stage, optional
+mediator stage, pinned when configured
   -> mediator receives raw query output and policy
   -> mediator has no SQL or room-vault tools
 ```

@@ -327,6 +327,30 @@ def rooms_cli():
     ),
 )
 @click.option(
+    "--mediator-agent",
+    default=None,
+    help=(
+        "Pinned mediator agent id or local path. Omit to pin the service "
+        "default mediator when configured."
+    ),
+)
+@click.option(
+    "--mediator-private",
+    "mediator_private_paths",
+    multiple=True,
+    help="Path inside uploaded mediator archive to exclude from public digest.",
+)
+@click.option(
+    "--mediator-visibility",
+    type=click.Choice(["sealed", "inspectable"]),
+    default="inspectable",
+    show_default=True,
+    help=(
+        "Mediator source visibility when --mediator-agent is a local path. "
+        "Existing agent ids use their registered inspection mode."
+    ),
+)
+@click.option(
     "--output-visibility",
     type=click.Choice(["querier_only", "owner_and_querier"]),
     default="querier_only",
@@ -367,6 +391,9 @@ def create_room(
     query_agent: str | None,
     query_private_paths: tuple[str, ...],
     query_visibility: str,
+    mediator_agent: str | None,
+    mediator_private_paths: tuple[str, ...],
+    mediator_visibility: str,
     output_visibility: str,
     llm_providers: tuple[str, ...],
     no_llm: bool,
@@ -403,6 +430,17 @@ def create_room(
             private_paths=query_private_paths,
             as_json=as_json,
         )
+    mediator_agent_id = None
+    if mediator_agent:
+        mediator_agent_id = _maybe_upload_room_agent(
+            service=service,
+            headers=headers,
+            ref=mediator_agent,
+            agent_type="mediator",
+            visibility=mediator_visibility,
+            private_paths=mediator_private_paths,
+            as_json=as_json,
+        )
     payload = {
         "name": name,
         "rules": rules,
@@ -411,6 +449,8 @@ def create_room(
         "query_mode": "fixed" if query_agent_id else "uploadable",
         "query_agent_id": query_agent_id,
         "query_visibility": query_visibility,
+        "mediator_agent_id": mediator_agent_id,
+        "mediator_visibility": mediator_visibility if mediator_agent_id else None,
         "output_visibility": output_visibility,
         "egress": {
             "llm_providers": providers,
@@ -461,6 +501,11 @@ def inspect_room(room: str, as_json: bool):
     click.echo(f"Scope:  {manifest['scope']['agent_id']} ({manifest['scope']['visibility']})")
     q = manifest["query"]
     click.echo(f"Query:  {q['mode']} {q.get('agent_id') or ''} ({q['visibility']})")
+    m = manifest.get("mediator") or {}
+    if m.get("agent_id"):
+        click.echo(f"Mediator: {m['agent_id']} ({m.get('visibility') or 'unknown'})")
+    else:
+        click.echo("Mediator: disabled")
     click.echo(f"Output: {manifest['output']['visibility']}")
     click.echo(
         "LLM:    "

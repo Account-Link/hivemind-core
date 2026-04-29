@@ -403,6 +403,7 @@ class TenantRegistry:
             "room_manifest_hash",
             "query_mode",
             "fixed_query_agent_id",
+            "fixed_mediator_agent_id",
             "query_inspection_mode",
             "output_visibility",
             "policy",
