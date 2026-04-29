@@ -16,12 +16,10 @@ from __future__ import annotations
 
 import base64
 
-import click
 import pytest
 
 from hivemind.cli._shared import _emit_run_result, _verify_run_attestation
 from hivemind.run_signer import (
-    canonical_json,
     derive_run_signer,
     sign_payload,
 )

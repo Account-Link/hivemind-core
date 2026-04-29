@@ -3,7 +3,7 @@ import logging
 from inspect import isawaitable
 
 from .config import Settings
-from .db import Database, connect
+from .db import connect
 from .pipeline import Pipeline
 from .sandbox.agents import AgentStore
 from .sandbox.artifact_store import ArtifactStore

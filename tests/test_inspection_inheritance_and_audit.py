@@ -17,6 +17,7 @@ import os
 import secrets
 import tarfile
 
+import httpx
 import psycopg
 import pytest
 from fastapi.testclient import TestClient

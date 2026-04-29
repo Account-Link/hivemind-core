@@ -6,10 +6,8 @@ import sys
 import types
 
 import pytest
-from fastapi.testclient import TestClient
 
 from hivemind import attestation
-from hivemind.server import create_app
 
 
 @pytest.fixture(autouse=True)

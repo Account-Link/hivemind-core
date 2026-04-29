@@ -11,10 +11,8 @@ import httpx
 from .. import reproduce as _reproduce
 from ._config import _DEFAULT_PROFILE  # noqa: F401  (re-export hook)
 from ._config import (
-    _config_path,
     _headers,
     _load_config,
-    _profile_name,
 )
 from ._http import (
     _api_error,

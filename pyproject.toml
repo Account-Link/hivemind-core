@@ -38,3 +38,30 @@ packages = ["hivemind"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+filterwarnings = [
+    # Starlette TestClient deprecation noise from third-party — not actionable.
+    "ignore::DeprecationWarning:starlette.testclient",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Real-bug-class only for the gating pass: pyflakes (F) + a narrow slice of
+# pycodestyle (E9 syntax). Style rules (I import sort, B bugbear, UP modern-
+# python idioms) belong in a dedicated cleanup pass — bundling them with
+# behavioral fixes makes diffs unreadable. Run `ruff check --select=I,B,UP
+# --fix` separately when you want that cleanup.
+select = ["F", "E9"]
+ignore = [
+    # F841 in tests is sometimes intentional (capturing kwargs for assertions
+    # against side effects). Lift the rule on tests to avoid noise.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F841"]

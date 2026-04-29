@@ -20,7 +20,6 @@ from __future__ import annotations
 import base64
 import os
 import secrets
-import time
 from urllib.parse import quote as _quote
 
 import psycopg
@@ -402,7 +401,6 @@ def test_ask_rejects_when_attested_files_change(share_env):
     runner, _profile, scope_id, client, api_key, tenant_id = share_env
     uri = _bless_and_mint(runner)
     # Mutate an attestable file via direct store access.
-    from hivemind.tenants import TenantRegistry
     reg: TenantRegistry = client.app.state.registry  # type: ignore[attr-defined]
     hive = reg.for_tenant(tenant_id)
     assert hive is not None

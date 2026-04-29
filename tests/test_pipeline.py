@@ -1,6 +1,6 @@
 """Tests for the Pipeline orchestrator with mocked Docker."""
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -440,7 +440,6 @@ class TestProviderRouting:
 
     def _bare_pipeline(self, *, tinfoil: str = "") -> Pipeline:
         """Build a Pipeline without touching Postgres."""
-        from unittest.mock import MagicMock
         settings = Settings(
             database_url="unused",
             llm_api_key="test",
@@ -477,7 +476,6 @@ class TestProviderRouting:
 
     def test_run_query_eager_validates_unknown_provider(self):
         """An unknown provider must fail before any agent runs (no scope/query spend)."""
-        from unittest.mock import MagicMock
         pipeline = self._bare_pipeline()
         pipeline._run_scope_agent = AsyncMock()
         pipeline._run_query_agent = AsyncMock()

@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import hivemind.core as core_module
 from hivemind.config import Settings
 from hivemind.core import Hivemind
 from hivemind.db import Database

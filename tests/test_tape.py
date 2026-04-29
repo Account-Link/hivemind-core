@@ -1,6 +1,5 @@
-import pytest
 
-from hivemind.sandbox.tape import Tape, TapeEntry, hash_request
+from hivemind.sandbox.tape import Tape, hash_request
 
 
 class TestHashRequest:
