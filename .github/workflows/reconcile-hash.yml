@@ -93,16 +93,13 @@ jobs:
           echo "app_id:            ${APP_ID}"
           echo "gateway:           ${GATEWAY}"
 
-          # ── Step 2: idempotent guard ──
-          # Cheap on-chain check before pulling the 8090 page, so a
-          # no-op reconcile doesn't pay for HTML parsing or gh calls.
+          # ── Step 2: approval status ──
+          # We still fetch app_compose below even when the hash is already
+          # approved, because the source metadata might point at the static
+          # repo template instead of the rendered compose hint.
           ALREADY=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
             'isAppAllowed(bytes32)(bool)' "0x${HASH}" 2>/dev/null || echo "false")
           echo "on-chain isAppAllowed: ${ALREADY}"
-          if [ "${ALREADY}" = "true" ]; then
-            echo "✓ already approved — nothing to do"
-            exit 0
-          fi
 
           # ── Step 3: app_compose → image short SHA → full SHA ──
           # The dstack 8090 page exposes the raw app_compose JSON whose
@@ -182,13 +179,33 @@ jobs:
             exit 0
           fi
 
+          GIT_SHA="${FULL_SHA}"
+          COMPOSE_URI="https://github.com/${REPO}/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml?image_sha=${IMAGE_TAG}"
+
+          if [ "${ALREADY}" = "true" ]; then
+            CURRENT_URI=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
+              'releases(bytes32)(bool,uint64,uint64,string,string)' \
+              "0x${HASH}" 2>/dev/null | tail -n 1 | sed -E 's/^"//; s/"$//' || true)
+            if [ "${CURRENT_URI}" = "${COMPOSE_URI}" ]; then
+              echo "✓ already approved with current metadata — nothing to do"
+              exit 0
+            fi
+            echo "approved hash has stale metadata; replacing source pointer"
+          fi
+
           if [ -z "${PRIVATE_KEY:-}" ]; then
             echo "::error::PRIVATE_KEY secret not set — cannot approve"
             exit 1
           fi
 
-          GIT_SHA="${FULL_SHA}"
-          COMPOSE_URI="https://github.com/${REPO}/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
+          if [ "${ALREADY}" = "true" ]; then
+            cast send "${CONTRACT}" \
+              'revoke(bytes32)' \
+              "0x${HASH}" \
+              --rpc-url "${RPC_URL}" \
+              --private-key "${PRIVATE_KEY}" \
+              --confirmations 1
+          fi
 
           echo "approving on ${CONTRACT} (Sepolia)"
           cast send "${CONTRACT}" \

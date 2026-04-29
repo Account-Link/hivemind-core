@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 from typing import Any
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import httpx
 
@@ -103,6 +104,16 @@ def parse_app_compose(app_compose_str: str) -> dict[str, Any]:
     return json.loads(app_compose_str)
 
 
+def _strip_query(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def _query_params(url: str) -> dict[str, str]:
+    params = parse_qs(urlsplit(url).query, keep_blank_values=False)
+    return {k: v[-1] for k, v in params.items() if v}
+
+
 def blob_to_raw(github_blob_url: str) -> str | None:
     """Convert a GitHub blob URL to the raw-content URL.
 
@@ -113,7 +124,7 @@ def blob_to_raw(github_blob_url: str) -> str | None:
     """
     m = re.match(
         r"^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$",
-        github_blob_url,
+        _strip_query(github_blob_url),
     )
     if not m:
         return None
@@ -125,7 +136,7 @@ def _parse_blob_url(blob_url: str) -> tuple[str, str, str, str] | None:
     """Return ``(owner, repo, ref, path)`` for a GitHub blob URL."""
     m = re.match(
         r"^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$",
-        blob_url,
+        _strip_query(blob_url),
     )
     if not m:
         return None
@@ -254,6 +265,58 @@ def fetch_repo_yaml(blob_url: str, *, timeout: float = 15.0) -> str:
     )
 
 
+def _replace_core_image(yaml_text: str, image_ref: str) -> str:
+    pattern = re.compile(
+        r"(^\s*image:\s*)"
+        r"ghcr\.io/account-link/hivemind-core(?::[^\s#]+|@[^\s#]+)?"
+        r"([^\S\r\n]*(?:#.*)?$)",
+        re.MULTILINE,
+    )
+    rendered, count = pattern.subn(
+        lambda m: f"{m.group(1)}{image_ref}{m.group(2)}",
+        yaml_text,
+        count=1,
+    )
+    if count != 1:
+        raise ValueError(
+            "registered compose render requested a core image override, "
+            "but no ghcr.io/account-link/hivemind-core image line was found"
+        )
+    return rendered
+
+
+def render_registered_compose(
+    compose_uri: str,
+    yaml_text: str,
+) -> tuple[str, list[str]]:
+    """Apply deterministic render hints carried by the on-chain URI.
+
+    The deploy workflow can register a source pointer like:
+
+        .../docker-compose.core.yaml?image_sha=3c3fcbb
+
+    That says "use the repo YAML at this commit, then rewrite the core
+    service image to the exact tag deployed by CI". The query string is
+    part of the on-chain signed source metadata, so the verifier is not
+    accepting an implicit local mutation.
+    """
+    params = _query_params(compose_uri)
+    core_image = params.get("core_image", "").strip()
+    image_sha = params.get("image_sha", "").strip()
+    if core_image:
+        return (
+            _replace_core_image(yaml_text, core_image),
+            [f"core image override: {core_image}"],
+        )
+    if image_sha:
+        image_ref = f"ghcr.io/account-link/hivemind-core:{image_sha}"
+        return (
+            _replace_core_image(yaml_text, image_ref),
+            [f"core image tag override: {image_sha}"],
+        )
+    return yaml_text, []
+
+
 def short_source(git_commit: str, compose_uri: str) -> str:
     """Format a one-line `owner/repo@<short_sha>:path` summary.
 
@@ -264,7 +327,7 @@ def short_source(git_commit: str, compose_uri: str) -> str:
     """
     m = re.match(
         r"^https://github\.com/([^/]+)/([^/]+)/blob/[^/]+/(.+)$",
-        compose_uri,
+        _strip_query(compose_uri),
     )
     short = git_commit[:7] if all(c in "0123456789abcdef" for c in git_commit.lower()) else git_commit
     if m:
@@ -297,6 +360,7 @@ __all__ = [
     "parse_app_compose",
     "blob_to_raw",
     "fetch_repo_yaml",
+    "render_registered_compose",
     "short_source",
     "extract_image_refs",
 ]

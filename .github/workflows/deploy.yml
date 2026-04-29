@@ -341,18 +341,38 @@ jobs:
           fi
           echo "live compose_hash: ${HASH}"
 
-          # Idempotent guard: skip if the contract already lists
-          # this hash as approved (re-deploys of the same image, or
-          # workflow re-runs).
+          # GIT_SHA comes from the env (event context) — see top of step.
+          # IMAGE_SHA, when present, is the deterministic render hint used by
+          # the relay before deploy. Carry it in the on-chain source URI so
+          # `hivemind trust attest --reproduce` verifies the exact rendered
+          # compose instead of the static repo template.
+          COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
+          if [ -n "${IMAGE_SHA:-}" ]; then
+            COMPOSE_URI="${COMPOSE_URI}?image_sha=${IMAGE_SHA}"
+          fi
+
+          # Idempotent guard: skip only when both the hash and the registered
+          # source pointer are already correct. If the hash is approved but the
+          # metadata points at the unrendered template, revoke and re-add so
+          # auditors can reproduce the exact live compose.
           ALREADY=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
             'isAppAllowed(bytes32)(bool)' "0x${HASH}" 2>/dev/null || echo "false")
           if [ "${ALREADY}" = "true" ]; then
-            echo "compose_hash 0x${HASH} already approved — skipping cast send"
-            exit 0
+            CURRENT_URI=$(cast call --rpc-url "${RPC_URL}" "${CONTRACT}" \
+              'releases(bytes32)(bool,uint64,uint64,string,string)' \
+              "0x${HASH}" 2>/dev/null | tail -n 1 | sed -E 's/^"//; s/"$//' || true)
+            if [ "${CURRENT_URI}" = "${COMPOSE_URI}" ]; then
+              echo "compose_hash 0x${HASH} already approved with current metadata — skipping cast send"
+              exit 0
+            fi
+            echo "compose_hash 0x${HASH} approved with stale metadata; replacing source pointer"
+            cast send "${CONTRACT}" \
+              'revoke(bytes32)' \
+              "0x${HASH}" \
+              --rpc-url "${RPC_URL}" \
+              --private-key "${PRIVATE_KEY}" \
+              --confirmations 1
           fi
-
-          # GIT_SHA comes from the env (event context) — see top of step.
-          COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
 
           echo "approving on ${CONTRACT} (Sepolia)"
           cast send "${CONTRACT}" \

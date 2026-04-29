@@ -517,10 +517,11 @@ def _run_reproduce(bundle: dict) -> None:
         raise SystemExit(5)
     click.echo(f"      ✓ {len(repo_yaml)} bytes from {raw_url}")
 
-    # Step 4 — byte-compare repo YAML vs the docker_compose_file embedded
-    # in the verified app_compose.
+    # Step 4 — apply any render hints registered on-chain, then
+    # byte-compare against the docker_compose_file embedded in the
+    # verified app_compose.
     click.echo(
-        "[4/4] Comparing repo YAML to docker_compose_file in app_compose…"
+        "[4/4] Comparing registered compose to docker_compose_file in app_compose…"
     )
     try:
         ac = _reproduce.parse_app_compose(app_compose_str)
@@ -528,19 +529,29 @@ def _run_reproduce(bundle: dict) -> None:
         click.echo(f"      ✗ app_compose is not valid JSON: {e}", err=True)
         raise SystemExit(6)
     deployed_yaml = ac.get("docker_compose_file") or ""
-    yaml_match = deployed_yaml == repo_yaml
+    try:
+        registered_yaml, render_notes = _reproduce.render_registered_compose(
+            compose_uri,
+            repo_yaml,
+        )
+    except ValueError as e:
+        click.echo(f"      ✗ render failed: {e}", err=True)
+        raise SystemExit(7)
+    for note in render_notes:
+        click.echo(f"      · {note}")
+    yaml_match = deployed_yaml == registered_yaml
     if yaml_match:
         click.echo(
             f"      ✓ byte-identical "
-            f"(sha256: {_hashlib.sha256(repo_yaml.encode()).hexdigest()[:16]}…)"
+            f"(sha256: {_hashlib.sha256(registered_yaml.encode()).hexdigest()[:16]}…)"
         )
     else:
         deployed_h = _hashlib.sha256(deployed_yaml.encode()).hexdigest()
-        repo_h = _hashlib.sha256(repo_yaml.encode()).hexdigest()
+        registered_h = _hashlib.sha256(registered_yaml.encode()).hexdigest()
         click.echo(
             f"      ✗ YAML differs\n"
             f"        deployed sha256: {deployed_h}\n"
-            f"        repo    sha256: {repo_h}",
+            f"        registered sha256: {registered_h}",
             err=True,
         )
 
@@ -562,18 +573,17 @@ def _run_reproduce(bundle: dict) -> None:
     if yaml_match:
         click.echo(
             "✓ Full chain verified: the docker-compose YAML running in "
-            "the enclave is byte-identical to the one at "
+            "the enclave is byte-identical to the registered source at "
             f"{_reproduce.short_source(git_commit, compose_uri)}."
         )
     else:
         click.echo(
             "✗ Chain broken at step 4: the docker-compose YAML running "
-            "in the enclave does NOT match the one at the on-chain-"
-            "registered ref. Either the registered git_commit/URI is "
-            "stale (e.g. the reconcile workflow recorded `main` instead "
-            "of the deploy SHA) or someone deployed code that wasn't "
-            "registered. Inspect `live image references` above and "
-            f"compare against the YAML at {raw_url}."
+            "in the enclave does NOT match the on-chain-registered "
+            "source plus its deterministic render hints. Either the "
+            "registered git_commit/URI is stale, the render hint is wrong, "
+            "or someone deployed code that wasn't registered. Inspect "
+            f"`live image references` above and compare against {raw_url}."
         )
         raise SystemExit(7)
 

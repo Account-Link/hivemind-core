@@ -395,6 +395,21 @@ wheels = [
 ]
 
 [[package]]
+name = "dcap-qvl"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/e1/c163d56d30bb9f984363ed150e517d206fdd99a45c038d4b3557b2272407/dcap_qvl-0.4.0.tar.gz", hash = "sha256:a729bfd8daa36530feaaa54bf58fab9c5107103c4a7471ef480cad39db1b8e6b", size = 250840, upload-time = "2026-04-22T11:27:07.9Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/33/28914a83320200a20b38aacba9335f8a69c7f5f7dbdc8e5516b774cf3c90/dcap_qvl-0.4.0-cp38-abi3-macosx_10_12_x86_64.whl", hash = "sha256:00974f12027b6167972fb9f1a013ee15b69bbd2dafc69ff0f3c3d77c5796da8d", size = 1620119, upload-time = "2026-04-22T11:26:54.587Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/23/f5f2081f531ee52e0d6c2d364648a4439fed01e808891bbbaed6d003658a/dcap_qvl-0.4.0-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:1704b588df68d89537744a4a950fd2e8723adad798e3a79abc2cf48f3814ee11", size = 4191185, upload-time = "2026-04-22T11:26:56.746Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/69/30ff7c8b70a772163fd80c48b6eb108c9300c67ceba00af214194a606f22/dcap_qvl-0.4.0-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4099c5f04abd8a7cfb0865dc0333c86ded35cb14d1b9a326a6a64c0d71068e0d", size = 1866222, upload-time = "2026-04-22T11:26:58.32Z" },
+    { url = "https://files.pythonhosted.org/packages/da/ce/8b0c7a405eefb7c43acea59b85ca7b1abdbf070c0cc39bf3b322ffa847c1/dcap_qvl-0.4.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:15bff64e138a3a98d283b9bfffb1077f0994ea8b29c13b823b1c73bc97349de8", size = 1916908, upload-time = "2026-04-22T11:27:00.233Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/c1/4e22d91d813cb3c222d763d8c058fa749bc04e5943184d88ee9137ebedfa/dcap_qvl-0.4.0-cp38-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:2c9def35ae5419c9616dab69b65da13cffce984f11ec4c4abe2c70a8f611d01e", size = 1864757, upload-time = "2026-04-22T11:27:02.228Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/5a/93f3cb5175ff240b6b199443fc17c33d8e9aed94dfd952c48619023e356a/dcap_qvl-0.4.0-cp38-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:3b02d374af58b0d9314116a4445dffb5d7ae45b0ced31388293ade4ee07cd7e8", size = 1913349, upload-time = "2026-04-22T11:27:03.759Z" },
+    { url = "https://files.pythonhosted.org/packages/65/81/ac99711068cbb4f28a9801c1592e270b773a4e0b330185cd34d8fc8c6858/dcap_qvl-0.4.0-cp38-abi3-win_amd64.whl", hash = "sha256:46ed03e546b83e7debc5a00c191b4e750b90c9b0fbf57ef4d57793ebf6926535", size = 1557679, upload-time = "2026-04-22T11:27:05.897Z" },
+]
+
+[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -464,6 +479,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "cryptography" },
+    { name = "dcap-qvl" },
     { name = "docker" },
     { name = "dstack-sdk" },
     { name = "fastapi" },
@@ -491,6 +507,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "cryptography", specifier = ">=42.0" },
+    { name = "dcap-qvl", specifier = ">=0.4.0" },
     { name = "docker", specifier = ">=7.0" },
     { name = "dstack-sdk", specifier = ">=0.5.0" },
     { name = "fastapi", specifier = ">=0.100" },

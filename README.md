@@ -102,7 +102,14 @@ hivemind --help
 ```bash
 hivemind init --service https://hivemind.example --api-key hmk_...
 hivemind trust attest
+hivemind trust attest --reproduce
 ```
+
+For non-local services, the CLI fails closed unless it can verify the CVM's
+TDX quote and enclave TLS binding. Use `--allow-degraded-attestation` only for
+debugging a known service without full proof. Use
+`--dangerously-skip-attestations` when you explicitly choose to skip all
+client-side attestation checks.
 
 For local development:
 
@@ -190,9 +197,12 @@ Update a room trust allowlist without changing the invite link:
 hivemind room trust <room_id> --mode owner_approved --approve-live
 ```
 
-The global `--dangerously-skip-attestations` flag exists only for local
-development without a TEE. Production clients should inspect and verify the
-room.
+Production HTTPS clients require DCAP quote verification and TLS pinning by
+default. `hivemind trust attest --reproduce` walks the source chain from the
+attested compose hash to the registered compose source and any deterministic
+deploy render hints. The global `--dangerously-skip-attestations` flag is an
+explicit bypass for tenants or operators who choose not to perform client-side
+attestation for a command.
 
 ## Public API
 

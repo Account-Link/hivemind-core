@@ -40,8 +40,19 @@ def _sandbox(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HIVEMIND_PROFILE", raising=False)
 
-    for var in ("HIVEMIND_TRUST_ALL", "HIVEMIND_TRUST_HASH", "HIVEMIND_NO_TRUST_CHECK"):
+    for var in (
+        "HIVEMIND_TRUST_ALL",
+        "HIVEMIND_TRUST_HASH",
+        "HIVEMIND_NO_TRUST_CHECK",
+        "HIVEMIND_ALLOW_DEGRADED_ATTESTATION",
+        "HIVEMIND_REQUIRE_DCAP",
+        "HIVEMIND_REQUIRE_TLS_PIN",
+    ):
         monkeypatch.delenv(var, raising=False)
+    # Most tests stub a fake HTTPS CVM without a real TDX quote. Preserve
+    # the legacy trust-store behavior under an explicit degraded-attestation
+    # opt-in, and cover the production default in a dedicated test below.
+    monkeypatch.setenv("HIVEMIND_ALLOW_DEGRADED_ATTESTATION", "1")
 
     yield tmp_path
 
@@ -54,6 +65,22 @@ def _stub_attestation(monkeypatch, bundle: dict):
         "_fetch_attestation",
         lambda service: (bundle, None),
     )
+
+
+def test_remote_https_requires_full_attestation_by_default(
+    _sandbox, monkeypatch
+):
+    monkeypatch.delenv("HIVEMIND_ALLOW_DEGRADED_ATTESTATION", raising=False)
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {
+            "compose_hash": "0xabc", "app_id": "appid",
+        }},
+    )
+    runner = CliRunner()
+    result = runner.invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
+    assert result.exit_code == 4
+    assert "TDX quote" in result.output
 
 
 def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):

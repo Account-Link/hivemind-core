@@ -25,7 +25,7 @@ from ._http import _api_error, _hget, _pin_service_cert
 #
 #   HIVEMIND_TRUST_ALL=1          auto-approve any change
 #   HIVEMIND_TRUST_HASH=0x...     abort unless hash matches (strict CI)
-#   HIVEMIND_NO_TRUST_CHECK=1     skip the check entirely (dev)
+#   HIVEMIND_NO_TRUST_CHECK=1     skip the check entirely (explicit risk opt-out)
 #
 # If the attestation bundle includes an ``app_auth`` block with a
 # non-empty contract address, the CLI queries the on-chain registry
@@ -33,6 +33,29 @@ from ._http import _api_error, _hget, _pin_service_cert
 # hard-aborts with no y/N prompt. Unknown/unreachable contracts fall
 # back to the local TOFU / change-prompt flow (fail-closed on the
 # local store — never fail-open on the RPC).
+
+
+def _is_local_service(service: str) -> bool:
+    parsed = _urlparse(service)
+    host = (parsed.hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"} or host.endswith(
+        ".localhost"
+    )
+
+
+def _allow_degraded_attestation() -> bool:
+    return bool(os.environ.get("HIVEMIND_ALLOW_DEGRADED_ATTESTATION"))
+
+
+def _strict_remote_attestation_required(service: str) -> bool:
+    """True when a service must prove its CVM identity before use."""
+    if os.environ.get("HIVEMIND_REQUIRE_DCAP") or os.environ.get(
+        "HIVEMIND_REQUIRE_TLS_PIN"
+    ):
+        return True
+    if _allow_degraded_attestation():
+        return False
+    return bool(service) and not _is_local_service(service)
 
 
 def _fetch_attestation(service: str) -> tuple[dict, bytes | None]:
@@ -149,30 +172,32 @@ def _fetch_cert_fingerprint(url: str) -> bytes | None:
     return _hashlib.sha256(der).digest()
 
 
-def _dcap_augment(bundle: dict) -> dict:
+def _dcap_augment(bundle: dict, *, service: str = "") -> dict:
     """Cryptographically verify the quote and pin the compose_hash.
 
     If verification succeeds, returns a new bundle whose
     ``attestation.compose_hash`` is the hash extracted from the
     verified ``mr_config_id`` register — overriding whatever the server
     claimed. If verification can't run, the bundle passes through
-    unchanged (unless HIVEMIND_REQUIRE_DCAP=1, which hard-aborts).
+    unchanged only for local/dev services or when explicitly allowed.
     """
     if os.environ.get("HIVEMIND_DISABLE_DCAP"):
         return bundle
     if not bundle.get("ready"):
         return bundle
 
-    require = bool(os.environ.get("HIVEMIND_REQUIRE_DCAP"))
+    require = bool(os.environ.get("HIVEMIND_REQUIRE_DCAP")) or (
+        _strict_remote_attestation_required(service)
+        and not _allow_degraded_attestation()
+    )
 
     if not _dcap.available():
         if require:
             click.echo(
-                "Error: HIVEMIND_REQUIRE_DCAP=1 but the dcap_qvl wheel "
-                "is not installed. Build it from "
-                "/Users/sxysun/Desktop/suapp/feedling-mcp-v1/ios/vendor/"
-                "dcap-qvl/python-bindings (maturin build --release) and "
-                "`uv pip install` the wheel.",
+                "Error: strict attestation requires the dcap-qvl verifier, "
+                "but it is not installed. Install hivemind-core with current "
+                "dependencies, or pass --allow-degraded-attestation only for "
+                "debugging.",
                 err=True,
             )
             raise SystemExit(4)
@@ -181,11 +206,25 @@ def _dcap_augment(bundle: dict) -> dict:
     att = bundle.get("attestation") or {}
     quote_hex = att.get("tdx_quote_hex") or ""
     if not quote_hex:
+        if require:
+            click.echo(
+                "Error: strict attestation required, but the attestation "
+                "bundle did not include a TDX quote.",
+                err=True,
+            )
+            raise SystemExit(4)
         return bundle
 
     result = _dcap.verify_quote(quote_hex)
 
     if result.status == "verified":
+        if require and not result.verified_compose_hash:
+            click.echo(
+                "Error: strict attestation required, but the verified quote "
+                "did not contain a dstack compose_hash in mr_config_id.",
+                err=True,
+            )
+            raise SystemExit(4)
         # Replace the server-claimed hash with the cryptographically
         # verified one and annotate the bundle for downstream UX.
         new_att = {
@@ -210,6 +249,13 @@ def _dcap_augment(bundle: dict) -> dict:
         raise SystemExit(4)
 
     if result.status == "tcb_issue":
+        if require and not result.verified_compose_hash:
+            click.echo(
+                "Error: strict attestation required, but the verified quote "
+                "did not contain a dstack compose_hash in mr_config_id.",
+                err=True,
+            )
+            raise SystemExit(4)
         click.echo(
             f"! TCB warning: status={result.tcb_status}; "
             f"advisories={list(result.advisory_ids)}. "
@@ -232,7 +278,7 @@ def _dcap_augment(bundle: dict) -> dict:
     # network / unavailable → warn and fall back
     if require:
         click.echo(
-            f"Error: HIVEMIND_REQUIRE_DCAP=1 but DCAP failed "
+            f"Error: strict attestation required, but DCAP failed "
             f"({result.status}): {result.reason}",
             err=True,
         )
@@ -324,34 +370,50 @@ def _verify_tls_pin(
     mismatch — that's the signal that something between us and the
     enclave is serving its own cert.
 
-    No-op when:
+    No-op for local/dev services when:
       - bundle is ``report_data_version=1`` (TLS-in-enclave off),
-      - we didn't observe a fingerprint (plain http://),
-      - dcap wheel isn't installed (can't parse quote).
+      - we didn't observe a fingerprint (plain http://).
 
     Toggle ``HIVEMIND_DISABLE_TLS_PIN=1`` to skip (dev only). Strict
-    mode via ``HIVEMIND_REQUIRE_TLS_PIN=1`` aborts if we can't run
-    the check (mirror of ``HIVEMIND_REQUIRE_DCAP``).
+    mode is the default for non-local services and can also be forced
+    with ``HIVEMIND_REQUIRE_TLS_PIN=1``.
     """
     if os.environ.get("HIVEMIND_DISABLE_TLS_PIN"):
         return
     if not bundle.get("ready"):
         return
     att = bundle.get("attestation") or {}
+    strict = bool(os.environ.get("HIVEMIND_REQUIRE_TLS_PIN")) or (
+        _strict_remote_attestation_required(service or "")
+        and not _allow_degraded_attestation()
+    )
     if att.get("report_data_version") != 2:
+        if strict:
+            click.echo(
+                "Error: strict attestation required, but this CVM did not "
+                "publish REPORT_DATA v2 with enclave TLS binding.",
+                err=True,
+            )
+            raise SystemExit(4)
         return
-    strict = bool(os.environ.get("HIVEMIND_REQUIRE_TLS_PIN"))
     if observed_fp is None:
         if strict:
             click.echo(
-                "Error: HIVEMIND_REQUIRE_TLS_PIN=1 but service URL is "
-                "not https:// — no live cert to pin against.",
+                "Error: strict attestation required, but service URL is "
+                "not https:// or no live cert was observed.",
                 err=True,
             )
             raise SystemExit(4)
         return
     quote_hex = att.get("tdx_quote_hex") or ""
     if not quote_hex:
+        if strict:
+            click.echo(
+                "Error: strict attestation required, but the attestation "
+                "bundle did not include a TDX quote for TLS binding.",
+                err=True,
+            )
+            raise SystemExit(4)
         return
     rd_hex = _dcap.extract_report_data_hex(quote_hex)
     if not rd_hex:
@@ -488,7 +550,7 @@ def _require_trust(config: dict) -> None:
     # Toggles:
     #   HIVEMIND_REQUIRE_DCAP=1  → abort if DCAP can't run or fails.
     #   HIVEMIND_DISABLE_DCAP=1  → skip DCAP entirely (dev).
-    bundle = _dcap_augment(bundle)
+    bundle = _dcap_augment(bundle, service=service)
 
     # ── TLS-cert-fingerprint pinning (feedling's first binding) ──
     # When the bundle is report_data_version=2 and we observed a cert
@@ -552,6 +614,15 @@ def _require_trust(config: dict) -> None:
         return
 
     if decision.status == "degraded":
+        if _strict_remote_attestation_required(service):
+            click.echo(
+                f"Error: remote attestation unavailable ({decision.reason}). "
+                "Production services fail closed by default. Use localhost "
+                "for dev, or pass --allow-degraded-attestation only when you "
+                "intentionally want to debug without a verified CVM.",
+                err=True,
+            )
+            raise SystemExit(4)
         click.echo(
             f"! Remote attestation unavailable ({decision.reason}). "
             f"Treating as dev mode.",
@@ -583,7 +654,8 @@ def _require_trust(config: dict) -> None:
     skip_hint = (
         "  Skip this prompt next time:\n"
         "    --yes                            auto-approve (TLS pin + on-chain revoke still enforced)\n"
-        "    --dangerously-skip-attestations  disable all verification (DEV / localhost only)"
+        "    --allow-degraded-attestation     permit missing DCAP/TLS proof for debugging\n"
+        "    --dangerously-skip-attestations  disable all verification (explicit risk opt-out)"
     )
     if decision.status == "tofu":
         click.echo(
@@ -615,7 +687,7 @@ def _require_trust(config: dict) -> None:
     except (click.Abort, EOFError):
         click.echo(
             "Aborted — no input available. Re-run with --yes (auto-approve) "
-            "or --dangerously-skip-attestations (full skip, dev only) for "
+            "or --dangerously-skip-attestations (full verification skip) for "
             "non-interactive use.\n"
             "Env-var equivalents: HIVEMIND_TRUST_ALL=1, "
             "HIVEMIND_TRUST_HASH=<hex>, HIVEMIND_NO_TRUST_CHECK=1.",

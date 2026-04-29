@@ -222,7 +222,11 @@ hmroom:// link
 The live attestation bundle includes the dstack quote, compose hash, app id,
 measurements, optional enclave TLS certificate binding, app-auth metadata, and
 the KMS-derived run-signer public key. The CLI verifies the room signature and
-enforces room trust before submitting a prompt.
+enforces room trust before submitting a prompt. For non-local services, client
+verification is fail-closed by default: DCAP must verify the quote and recover
+the compose hash from `mr_config_id`, and REPORT_DATA v2 must bind the
+observed TLS certificate to the quote unless the operator explicitly allows a
+degraded debug connection.
 
 Room trust modes:
 

@@ -368,6 +368,11 @@ def admin_sweep_broken_agents(
     default="",
     help="Raw-URL pointer to the compose file (defaults to a github.com stub)",
 )
+@click.option(
+    "--replace",
+    is_flag=True,
+    help="If already approved, revoke then re-add with the supplied metadata.",
+)
 def admin_approve_hash(
     compose_hash: str,
     contract: str,
@@ -375,6 +380,7 @@ def admin_approve_hash(
     private_key: str,
     git_commit: str,
     compose_yaml_uri: str,
+    replace: bool,
 ) -> None:
     """Approve a compose_hash on the HivemindAppAuth contract.
 
@@ -401,6 +407,39 @@ def admin_approve_hash(
 
     if not compose_hash.startswith("0x"):
         compose_hash = "0x" + compose_hash
+
+    if replace:
+        check = subprocess.run(
+            [
+                "cast", "call",
+                "--rpc-url", rpc_url,
+                contract,
+                "isAppAllowed(bytes32)(bool)",
+                compose_hash,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if check.returncode == 0 and check.stdout.strip() == "true":
+            click.echo(f"Revoking existing approval for {compose_hash}...")
+            revoke = subprocess.run(
+                [
+                    "cast", "send",
+                    contract,
+                    "revoke(bytes32)",
+                    compose_hash,
+                    "--rpc-url", rpc_url,
+                    "--private-key", private_key,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if revoke.returncode != 0:
+                click.echo(
+                    f"Error: cast revoke failed.\n{revoke.stderr}",
+                    err=True,
+                )
+                raise SystemExit(3)
 
     cmd = [
         "cast", "send",

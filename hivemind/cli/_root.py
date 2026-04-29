@@ -20,8 +20,17 @@ import click
     "skip_attestations",
     is_flag=True,
     help="Disable ALL attestation verification — no TLS pin, no on-chain "
-    "check, no compose-hash prompt. Only meaningful against a local "
-    "dev server (no TEE). Never use against a Phala CVM.",
+    "check, no compose-hash prompt. This is an explicit tenant/operator "
+    "risk-acceptance bypass for cases where you do not want client-side "
+    "attestation.",
+)
+@click.option(
+    "--allow-degraded-attestation",
+    "allow_degraded_attestation",
+    is_flag=True,
+    help="Permit remote services whose CVM attestation cannot be fully "
+    "verified. Intended for debugging only; production HTTPS services "
+    "fail closed by default.",
 )
 @click.option(
     "--profile",
@@ -33,7 +42,12 @@ import click
     "service+api_key pair stored at ~/.hivemind/profiles/<NAME>.yaml. "
     "Defaults to 'default'. Example: hivemind --profile alice query '...'",
 )
-def cli(auto_yes: bool, skip_attestations: bool, profile: str) -> None:
+def cli(
+    auto_yes: bool,
+    skip_attestations: bool,
+    allow_degraded_attestation: bool,
+    profile: str,
+) -> None:
     """Hivemind — conditional recall for the privacy-quality frontier."""
     # Set the same env vars the trust layer already reads, so we don't
     # have to thread a context object into every subcommand. Flags win
@@ -43,5 +57,7 @@ def cli(auto_yes: bool, skip_attestations: bool, profile: str) -> None:
         os.environ["HIVEMIND_TRUST_ALL"] = "1"
     if skip_attestations:
         os.environ["HIVEMIND_NO_TRUST_CHECK"] = "1"
+    if allow_degraded_attestation:
+        os.environ["HIVEMIND_ALLOW_DEGRADED_ATTESTATION"] = "1"
     if profile:
         os.environ["HIVEMIND_PROFILE"] = profile
