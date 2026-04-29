@@ -133,6 +133,43 @@ class Pipeline:
             f"{sorted(self.llm_clients)}"
         )
 
+    def _provider_key(self, provider: str | None) -> str:
+        key = (provider or "").strip().lower()
+        return key or "openrouter"
+
+    def _resolve_provider_for_egress(
+        self,
+        provider: str | None,
+        allowed_llm_providers: list[str] | None,
+    ) -> tuple[str | None, bool]:
+        """Return ``(provider, llm_egress_enabled)`` for a run.
+
+        ``allowed_llm_providers=None`` is legacy unrestricted behavior.
+        ``[]`` means no external LLM egress; the bridge still starts, but
+        all LLM endpoints return 403 so non-LLM agents can still use SQL
+        tools and produce deterministic output.
+        """
+        if allowed_llm_providers is None:
+            self._client_for(provider)
+            return provider, True
+
+        allowed = []
+        for raw in allowed_llm_providers:
+            key = self._provider_key(raw)
+            if key not in allowed:
+                allowed.append(key)
+        if not allowed:
+            return provider, False
+
+        selected = self._provider_key(provider) if provider else allowed[0]
+        if selected not in allowed:
+            raise ValueError(
+                f"provider '{selected}' is not allowed by this room; "
+                f"allowed_llm_providers={allowed}"
+            )
+        self._client_for(selected)
+        return selected, True
+
     # -- Store pipeline --
 
     async def run_store(self, req: StoreRequest) -> StoreResponse:
@@ -295,6 +332,7 @@ class Pipeline:
         extra_volumes: dict[str, dict[str, str]] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        llm_egress_enabled: bool = True,
     ):
         """Run a Docker agent with tools and return its stdout."""
         backend = SandboxBackend(
@@ -320,6 +358,7 @@ class Pipeline:
             replay_tape=replay_tape,
             return_tape=return_tape,
             extra_volumes=extra_volumes,
+            llm_egress_enabled=llm_egress_enabled,
         )
 
     async def _run_scope_agent(
@@ -330,6 +369,7 @@ class Pipeline:
         timeout_seconds: int | None = None,
         model: str | None = None,
         provider: str | None = None,
+        llm_egress_enabled: bool = True,
     ) -> tuple[Callable, str, dict]:
         """Run scope agent to produce a scope function.
 
@@ -375,6 +415,7 @@ class Pipeline:
                 return_usage=True,
                 replay_tape=replay_tape,
                 return_tape=True,
+                llm_egress_enabled=llm_egress_enabled,
             )
 
         env = {
@@ -443,6 +484,7 @@ class Pipeline:
             extra_volumes=scope_volumes,
             model=model,
             provider=provider,
+            llm_egress_enabled=llm_egress_enabled,
         )
 
         try:
@@ -493,6 +535,7 @@ class Pipeline:
         return_tape: bool = False,
         model: str | None = None,
         provider: str | None = None,
+        llm_egress_enabled: bool = True,
     ):
         """Run query agent with SCOPED access, return output and optionally usage/tape."""
         agent_config = await asyncio.to_thread(
@@ -541,6 +584,7 @@ class Pipeline:
             return_budget_summary=return_usage,
             replay_tape=replay_tape,
             return_tape=return_tape,
+            llm_egress_enabled=llm_egress_enabled,
         )
 
         if return_usage and return_tape:
@@ -565,6 +609,7 @@ class Pipeline:
         policy: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        llm_egress_enabled: bool = True,
     ) -> tuple[str, dict]:
         """Run mediator agent to filter/audit output. Returns (output, usage)."""
         agent_config = await asyncio.to_thread(
@@ -600,6 +645,7 @@ class Pipeline:
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
             return_budget_summary=True,
+            llm_egress_enabled=llm_egress_enabled,
         )
         return output, usage
 
@@ -724,6 +770,11 @@ class Pipeline:
         prompt: str,
         output: str,
         error: str | None,
+        room_id: str | None = None,
+        room_manifest_hash: str | None = None,
+        output_visibility: str | None = None,
+        allowed_llm_providers: list[str] | None = None,
+        artifacts_enabled: bool | None = True,
     ) -> dict | None:
         """Build the signed run attestation envelope, or ``None`` if the
         run signer isn't available (e.g. local dev without dstack).
@@ -780,12 +831,17 @@ class Pipeline:
             "run_id": run_id,
             "status": status,
             "compose_hash": compose_hash,
+            "room_id": room_id or "",
+            "room_manifest_hash": room_manifest_hash or "",
             "scope_agent_id": scope_agent_id or "",
             "scope_files_digest": scope_full,
             "scope_attested_files_digest": scope_att,
             "query_agent_id": query_agent_id,
             "query_files_digest": query_full,
             "query_attested_files_digest": query_att,
+            "output_visibility": output_visibility or "",
+            "allowed_llm_providers": list(allowed_llm_providers or []),
+            "artifacts_enabled": bool(artifacts_enabled),
             "prompt_hash": self._sha256_hex(prompt or ""),
             "output_hash": self._sha256_hex(output or ""),
             "error_hash": self._sha256_hex(error) if error else "",
@@ -818,6 +874,11 @@ class Pipeline:
         model: str | None = None,
         provider: str | None = None,
         policy: str | None = None,
+        room_id: str | None = None,
+        room_manifest_hash: str | None = None,
+        output_visibility: str = "owner_and_querier",
+        allowed_llm_providers: list[str] | None = None,
+        artifacts_enabled: bool = True,
     ) -> None:
         """Run the full 3-stage pipeline with run tracking and artifact upload.
 
@@ -835,9 +896,14 @@ class Pipeline:
                 run_store.update_status, run_id, "running"
             )
 
-            # Eager validation so an unknown provider fails the whole run
-            # before any container starts.
-            self._client_for(provider)
+            # Eagerly resolve egress so a forbidden provider fails before
+            # any container starts. ``llm_egress_enabled=False`` keeps
+            # non-LLM agents runnable while making bridge LLM endpoints
+            # return 403.
+            provider, llm_egress_enabled = self._resolve_provider_for_egress(
+                provider,
+                allowed_llm_providers,
+            )
 
             global_max = self._sandbox_settings.global_max_tokens
             effective_max = min(max_tokens or global_max, global_max)
@@ -869,6 +935,7 @@ class Pipeline:
                         req_for_scope, max_tokens=scope_budget,
                         max_calls=max_calls, timeout_seconds=timeout_seconds,
                         model=model, provider=provider,
+                        llm_egress_enabled=llm_egress_enabled,
                     )
                     used = scope_usage.get("total_tokens", 0)
                     remaining = max(1, remaining - used)
@@ -945,11 +1012,12 @@ class Pipeline:
                 max_calls=max_calls,
                 max_tokens=query_max_tokens,
                 timeout_seconds=timeout_seconds,
-                artifact_store=artifact_store,
+                artifact_store=artifact_store if artifacts_enabled else None,
                 artifact_retention_seconds=artifact_retention_seconds,
                 run_id=run_id,
                 run_store=run_store,
                 return_budget_summary=True,
+                llm_egress_enabled=llm_egress_enabled,
             )
             used = query_usage.get("total_tokens", 0)
             remaining = max(1, remaining - used)
@@ -983,6 +1051,7 @@ class Pipeline:
                         policy=policy,
                         model=model,
                         provider=provider,
+                        llm_egress_enabled=llm_egress_enabled,
                     )
                 except ValueError as e:
                     if "not found" in str(e).lower():
@@ -1011,6 +1080,11 @@ class Pipeline:
                 prompt=prompt,
                 output=final_output,
                 error=None,
+                room_id=room_id,
+                room_manifest_hash=room_manifest_hash,
+                output_visibility=output_visibility,
+                allowed_llm_providers=allowed_llm_providers,
+                artifacts_enabled=artifacts_enabled,
             )
             await asyncio.to_thread(
                 run_store.update_status, run_id, "completed",
@@ -1032,6 +1106,11 @@ class Pipeline:
                     prompt=prompt,
                     output="",
                     error=err_str,
+                    room_id=room_id,
+                    room_manifest_hash=room_manifest_hash,
+                    output_visibility=output_visibility,
+                    allowed_llm_providers=allowed_llm_providers,
+                    artifacts_enabled=artifacts_enabled,
                 )
                 await asyncio.to_thread(
                     run_store.update_status, run_id, "failed",

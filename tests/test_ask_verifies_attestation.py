@@ -42,6 +42,8 @@ def _signed_run_record(
     *,
     output: str = "the answer",
     compose_hash: str = "ab" * 32,
+    room_id: str = "",
+    room_manifest_hash: str = "",
     seed: bytes = b"\xa1" * 32,
 ) -> tuple[dict, str]:
     """Build a server-shaped run row + return (data, expected_pubkey_b64)."""
@@ -52,6 +54,8 @@ def _signed_run_record(
         "run_id": "r-1",
         "status": "completed",
         "compose_hash": compose_hash,
+        "room_id": room_id,
+        "room_manifest_hash": room_manifest_hash,
         "scope_agent_id": "s",
         "scope_files_digest": "",
         "scope_attested_files_digest": "",
@@ -130,6 +134,35 @@ def test_verify_helper_rejects_compose_mismatch():
     )
     assert not ok
     assert "compose_hash" in reason
+
+
+def test_verify_helper_rejects_room_manifest_mismatch():
+    data, pub_b64 = _signed_run_record(
+        room_id="room_ok",
+        room_manifest_hash="aa" * 32,
+    )
+    ok, reason = _verify_run_attestation(
+        data,
+        expected_pubkey_b64=pub_b64,
+        expected_room_id="room_ok",
+        expected_room_manifest_hash="bb" * 32,
+    )
+    assert not ok
+    assert "room_manifest_hash" in reason
+
+
+def test_verify_helper_accepts_room_manifest_match():
+    data, pub_b64 = _signed_run_record(
+        room_id="room_ok",
+        room_manifest_hash="aa" * 32,
+    )
+    ok, reason = _verify_run_attestation(
+        data,
+        expected_pubkey_b64=pub_b64,
+        expected_room_id="room_ok",
+        expected_room_manifest_hash="aa" * 32,
+    )
+    assert ok, reason
 
 
 def test_verify_helper_rejects_signature_tamper():

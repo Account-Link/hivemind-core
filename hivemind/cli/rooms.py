@@ -1,0 +1,429 @@
+"""Room CLI: compact create / inspect / ask UX."""
+
+from __future__ import annotations
+
+import json as _json
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+import click
+import httpx
+
+from ._config import _headers, _load_config
+from ._http import _api_error
+from ._shared import _query_tracked
+from ._trust import _require_trust
+from ..rooms import verify_room_envelope
+
+
+def _hget(*a, **kw):
+    from . import _hget as _f
+    return _f(*a, **kw)
+
+
+def _hpost(*a, **kw):
+    from . import _hpost as _f
+    return _f(*a, **kw)
+
+
+def _parse_room_ref(
+    ref: str,
+    config: dict | None = None,
+) -> tuple[str, str, dict, str | None]:
+    """Return ``(service, room_id, headers, owner_pubkey)``."""
+    if ref.startswith("hmroom://"):
+        parsed = urlparse(ref)
+        room_id = parsed.path.strip("/")
+        qs = parse_qs(parsed.query)
+        service = unquote((qs.get("service") or [""])[0]).rstrip("/")
+        token = unquote((qs.get("token") or [""])[0])
+        owner_pubkey = unquote((qs.get("owner_pubkey") or [""])[0]) or None
+        if not room_id or not service or not token:
+            raise click.ClickException("invalid hmroom link")
+        if owner_pubkey is None:
+            raise click.ClickException("invalid hmroom link: missing owner_pubkey")
+        return service, room_id, {"Authorization": f"Bearer {token}"}, owner_pubkey
+
+    cfg = config or _load_config()
+    return cfg["service"], ref.strip(), _headers(cfg), None
+
+
+def _fetch_verified_room(
+    service: str,
+    room_id: str,
+    headers: dict,
+    *,
+    owner_pubkey_b64: str | None,
+) -> dict:
+    if owner_pubkey_b64:
+        # hmroom links do not load a local profile, so they would skip
+        # the normal profile-based attestation gate unless we run it
+        # explicitly before sending the room token.
+        _require_trust({"service": service})
+    resp = _hget(
+        f"{service}/v1/rooms/{room_id}/attest",
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    data = resp.json()
+    envelope = ((data.get("room") or {}).get("envelope") or {})
+    ok, reason = verify_room_envelope(
+        envelope,
+        expected_pubkey_b64=owner_pubkey_b64,
+    )
+    if not ok:
+        raise click.ClickException(f"room manifest verification failed: {reason}")
+    return data
+
+
+def _live_compose_from_attestation(data: dict) -> str:
+    return (
+        ((data.get("attestation") or {}).get("attestation") or {}).get(
+            "compose_hash"
+        )
+        or ""
+    ).lower()
+
+
+def _enforce_room_trust(room_attest: dict) -> None:
+    manifest = (room_attest.get("room") or {}).get("manifest") or {}
+    trust = manifest.get("trust") or {}
+    mode = (trust.get("mode") or "operator_approved").strip()
+    if mode in {"operator_approved", "skip"}:
+        return
+    live = _live_compose_from_attestation(room_attest)
+    allowed = {str(c).lower() for c in (trust.get("allowed_composes") or [])}
+    if not live or live not in allowed:
+        raise click.ClickException(
+            "live compose_hash is not allowed by the room manifest. "
+            f"mode={mode} live={live or '(missing)'} allowed={sorted(allowed)}"
+        )
+
+
+@click.group("room")
+def rooms_cli():
+    """Create and use signed data rooms."""
+
+
+@rooms_cli.command("create")
+@click.argument("scope_agent_id")
+@click.option("--name", default="", help="Human label for this room.")
+@click.option("--rules", default="", help="Room rules as text.")
+@click.option(
+    "--rules-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Read room rules from a file.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Read the scope policy from a file.",
+)
+@click.option(
+    "--query-agent",
+    default=None,
+    help="Fixed pre-uploaded query agent id. Omit to allow recipient uploads.",
+)
+@click.option(
+    "--query-visibility",
+    type=click.Choice(["sealed", "inspectable"]),
+    default="sealed",
+    show_default=True,
+    help="Visibility for recipient-uploaded query agents.",
+)
+@click.option(
+    "--output-visibility",
+    type=click.Choice(["querier_only", "owner_and_querier"]),
+    default="querier_only",
+    show_default=True,
+)
+@click.option(
+    "--llm-provider",
+    "llm_providers",
+    multiple=True,
+    default=("tinfoil",),
+    help="Allowed LLM provider. Repeat for multiple. Use --no-llm for none.",
+)
+@click.option("--no-llm", is_flag=True, help="Disable external LLM egress.")
+@click.option("--allow-artifacts", is_flag=True, help="Allow artifact uploads.")
+@click.option(
+    "--trust-mode",
+    type=click.Choice(["operator_approved", "pinned", "owner_approved_composes", "skip"]),
+    default="operator_approved",
+    show_default=True,
+    help="Room-level compose trust policy.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def create_room(
+    scope_agent_id: str,
+    name: str,
+    rules: str,
+    rules_file: Path | None,
+    policy_file: Path | None,
+    query_agent: str | None,
+    query_visibility: str,
+    output_visibility: str,
+    llm_providers: tuple[str, ...],
+    no_llm: bool,
+    allow_artifacts: bool,
+    trust_mode: str,
+    as_json: bool,
+):
+    """Create a room and print an invite link."""
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+
+    if rules_file:
+        rules = rules_file.read_text(encoding="utf-8")
+    policy = policy_file.read_text(encoding="utf-8") if policy_file else None
+    providers = [] if no_llm else list(llm_providers)
+    payload = {
+        "name": name,
+        "rules": rules,
+        "policy": policy,
+        "scope_agent_id": scope_agent_id,
+        "query_mode": "fixed" if query_agent else "uploadable",
+        "query_agent_id": query_agent,
+        "query_visibility": query_visibility,
+        "output_visibility": output_visibility,
+        "egress": {
+            "llm_providers": providers,
+            "allow_artifacts": allow_artifacts,
+        },
+        "trust": {"mode": trust_mode},
+    }
+    try:
+        resp = _hpost(
+            f"{service}/v1/rooms",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise click.ClickException(
+            f"{e.response.status_code}: {_api_error(e.response)}"
+        )
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo(f"Room: {data['room_id']}")
+    click.echo(f"Invite: {data['link']}")
+
+
+@rooms_cli.command("inspect")
+@click.argument("room")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def inspect_room(room: str, as_json: bool):
+    """Show a room's signed manifest and live attestation summary."""
+    service, room_id, headers, owner_pubkey = _parse_room_ref(room)
+    data = _fetch_verified_room(
+        service,
+        room_id,
+        headers,
+        owner_pubkey_b64=owner_pubkey,
+    )
+    _enforce_room_trust(data)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    manifest = data["room"]["manifest"]
+    click.echo(f"Room:   {manifest['room_id']}")
+    click.echo(f"Name:   {manifest.get('name') or '(unnamed)'}")
+    click.echo(f"Scope:  {manifest['scope']['agent_id']} ({manifest['scope']['visibility']})")
+    q = manifest["query"]
+    click.echo(f"Query:  {q['mode']} {q.get('agent_id') or ''} ({q['visibility']})")
+    click.echo(f"Output: {manifest['output']['visibility']}")
+    click.echo(
+        "LLM:    "
+        + (", ".join(manifest["egress"]["llm_providers"]) or "disabled")
+    )
+    click.echo(f"Hash:   {data['room']['manifest_hash']}")
+    click.echo(f"Trust:  {manifest['trust']['mode']}")
+    click.echo("Sig:    verified")
+
+
+@rooms_cli.command("trust")
+@click.argument("room")
+@click.option(
+    "--mode",
+    type=click.Choice(["operator_approved", "pinned", "owner_approved_composes", "skip"]),
+    default=None,
+    help="Set the room-level compose trust mode.",
+)
+@click.option(
+    "--compose",
+    "composes",
+    multiple=True,
+    help="Allowed compose hash. Repeat for multiple.",
+)
+@click.option(
+    "--approve-live",
+    is_flag=True,
+    help="Append the service's current live compose_hash.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+def trust_room(
+    room: str,
+    mode: str | None,
+    composes: tuple[str, ...],
+    approve_live: bool,
+    as_json: bool,
+):
+    """Update a room's compose trust without changing invite links."""
+    service, room_id, headers, _owner_pubkey = _parse_room_ref(room)
+    payload = {"append_live": approve_live}
+    if mode:
+        payload["mode"] = mode
+    if composes:
+        payload["allowed_composes"] = list(composes)
+    resp = _hpost(
+        f"{service}/v1/rooms/{room_id}/trust",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    trust = data["room"]["manifest"]["trust"]
+    click.echo(f"Room:    {room_id}")
+    click.echo(f"Mode:    {trust['mode']}")
+    allowed = trust.get("allowed_composes") or []
+    click.echo("Allowed: " + (", ".join(allowed) if allowed else "(none)"))
+    click.echo(f"Hash:    {data['room']['manifest_hash']}")
+
+
+@rooms_cli.command("ask")
+@click.argument("room")
+@click.argument("question")
+@click.option("--query-agent", default=None, help="Query agent id for uploadable rooms.")
+@click.option(
+    "--agent",
+    "agent_path",
+    type=click.Path(path_type=Path, exists=True),
+    default=None,
+    help="Upload and run a query agent directory or .tar.gz in this room.",
+)
+@click.option("--timeout", type=int, default=600, show_default=True)
+@click.option("--memory-mb", type=int, default=256, show_default=True)
+@click.option("--max-llm-calls", type=int, default=20, show_default=True)
+@click.option("--max-tokens", type=int, default=100_000, show_default=True)
+@click.option("--model", type=str, default=None, help="LLM model override.")
+@click.option("--provider", type=str, default=None, help="LLM provider override.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
+@click.option("--fetch", is_flag=True, help="Download visible artifacts.")
+@click.option(
+    "--no-strict-attestation",
+    "no_strict_attestation",
+    is_flag=True,
+    help="Print output even if run attestation is missing/invalid.",
+)
+def ask_room(
+    room: str,
+    question: str,
+    query_agent: str | None,
+    agent_path: Path | None,
+    timeout: int,
+    memory_mb: int,
+    max_llm_calls: int,
+    max_tokens: int,
+    model: str | None,
+    provider: str | None,
+    as_json: bool,
+    fetch: bool,
+    no_strict_attestation: bool,
+):
+    """Ask a question through a room invite."""
+    if query_agent and agent_path:
+        raise click.ClickException("use either --query-agent id or --agent path, not both")
+    service, room_id, headers, owner_pubkey = _parse_room_ref(room)
+    room_data = _fetch_verified_room(
+        service,
+        room_id,
+        headers,
+        owner_pubkey_b64=owner_pubkey,
+    )
+    _enforce_room_trust(room_data)
+    manifest_hash = room_data["room"]["manifest_hash"]
+    payload = {"query": question, "room_id": room_id}
+    if query_agent:
+        payload["query_agent_id"] = query_agent
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if max_llm_calls:
+        payload["max_llm_calls"] = max_llm_calls
+    if timeout:
+        payload["timeout_seconds"] = min(timeout, 3600)
+    if model:
+        payload["model"] = model
+    if provider:
+        payload["provider"] = provider
+
+    expected_pubkey = None
+    live_compose_hash = None
+    try:
+        ar = _hget(f"{service}/v1/attestation", timeout=15)
+        body = ar.json() if ar.status_code < 400 else {}
+        att = body.get("attestation") or {}
+        expected_pubkey = att.get("run_signer_pubkey_b64") or None
+        live_compose_hash = (att.get("compose_hash") or "").lower() or None
+    except httpx.RequestError:
+        pass
+
+    if agent_path is not None:
+        from .recipient import _archive_for_path, _upload_query_agent_and_poll
+
+        archive_bytes, archive_name, agent_name = _archive_for_path(agent_path, None)
+        _upload_query_agent_and_poll(
+            service=service,
+            headers=headers,
+            archive_bytes=archive_bytes,
+            archive_name=archive_name,
+            agent_name=agent_name,
+            description=f"hivemind room ask --agent {agent_path.name}",
+            prompt=question,
+            scope_id=None,
+            mediator_id=None,
+            memory_mb=memory_mb,
+            max_llm_calls=max_llm_calls,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            model=model,
+            provider=provider,
+            as_json=as_json,
+            fetch=fetch,
+            expected_pubkey_b64=expected_pubkey,
+            expected_compose_hash=live_compose_hash,
+            expected_room_id=room_id,
+            expected_room_manifest_hash=manifest_hash,
+            room_id=room_id,
+            strict_attestation=not no_strict_attestation,
+            fetch_headers=headers,
+        )
+        return
+
+    _query_tracked(
+        service,
+        headers,
+        payload,
+        expected_pubkey_b64=expected_pubkey,
+        expected_compose_hash=live_compose_hash,
+        expected_room_id=room_id,
+        expected_room_manifest_hash=manifest_hash,
+        strict_attestation=not no_strict_attestation,
+        as_json=as_json,
+        fetch=fetch,
+        fetch_headers=headers,
+        poll_seconds=timeout,
+    )

@@ -1,15 +1,18 @@
 # Hivemind-Core Architecture
 
 Privacy-preserving Postgres inside a TEE. Users write raw SQL. Reads go through
-sandboxed agents. Nobody — including the operator — sees individual rows.
+sandboxed agents. The intended operator boundary is: the host cannot read disk
+or RAM, and tenants can verify the live CVM before releasing data or agents.
 Only agent-mediated, scope-constrained, mediator-audited answers leave.
 
 Runs inside a dstack Confidential VM. Postgres is plaintext inside the CVM.
 Disk encryption (LUKS2) and memory encryption (TDX) are handled by hardware.
-Application-level encryption is narrow: only agent source files are sealed
+Application-level encryption is narrow: agent source files can be sealed
 under a per-tenant DEK wrapped by the owner's `hmk_` key, so capability
 tokens alone cannot decrypt them after a restart. App-defined tables stay
-plaintext under LUKS2. No record abstraction. Just Postgres.
+plaintext under LUKS2/TDX once inside the CVM. Room manifests make the
+rules attestable, but they do not turn arbitrary app tables into encrypted
+application-layer records.
 
 ---
 
@@ -43,6 +46,13 @@ DEL  /v1/tokens/{id}   Soft-revoke a token.
 GET  /v1/scope-attest  Recipient-side: which scope agent + attestation am I bound to?
 GET  /v1/agents/{id}/files{,/{path}}
                        Inspect a scope agent's source files (audit before use).
+
+POST /v1/rooms         Create a signed room manifest + invite token.
+GET  /v1/rooms/{id}    Fetch the signed room manifest.
+GET  /v1/rooms/{id}/attest
+                       Manifest + live CVM attestation + agent digests.
+POST /v1/rooms/{id}/runs
+                       Ask through the room contract.
 
 POST /v1/agents/upload Upload + build an agent image inside the CVM.
 POST /v1/query-agents/submit
@@ -195,6 +205,63 @@ Output: sanitized answer (or rejection)
 Mediator policy (default): strip names, PII, verbatim quotes, credentials,
 substance references, medical info, financial details.
 Fail closed: if mediator errors, output is blocked.
+
+---
+
+## Data Rooms
+
+A room is a tenant-signed manifest plus a normal `hmq_` invite token. The
+manifest is the contract B attests before asking anything:
+
+- scope agent id and whether its source is inspectable or sealed,
+- query mode: fixed pre-uploaded query agent or recipient-uploaded query agent,
+- query-agent visibility for recipient uploads (`inspectable` or `sealed`),
+- output visibility (`querier_only` or `owner_and_querier`),
+- egress allowlist (`llm_providers` plus `allow_artifacts`), and
+- trust mode for compose-hash upgrades.
+
+Owner UX:
+
+```bash
+hivemind room create <scope_agent_id> \
+  --query-agent <query_agent_id> \
+  --rules-file rules.md \
+  --llm-provider tinfoil
+```
+
+This calls `POST /v1/rooms`, stores the signed envelope in
+`_hivemind_rooms`, mints an `hmq_` token with `room_id`, and prints an
+`hmroom://...` link. Recipients can run:
+
+```bash
+hivemind room inspect 'hmroom://...'
+hivemind room ask 'hmroom://...' "What changed this month?"
+```
+
+The link carries the owner signing pubkey. The CLI verifies the room
+envelope signature against that pubkey before sending the room token, then
+verifies the final run attestation contains the same `room_id` and
+`room_manifest_hash`.
+
+Enforcement is server-side and applies even if the client ignores the CLI:
+
+- room-bound query tokens are forced to the room scope agent;
+- fixed rooms force the configured query agent;
+- uploadable rooms require the token's upload permission and apply the
+  room's query-agent visibility;
+- caller-supplied `policy` cannot override the manifest policy;
+- caller-supplied LLM providers must be in the manifest allowlist;
+- `llm_providers=[]` makes bridge LLM endpoints return 403;
+- `allow_artifacts=false` removes the artifact upload endpoint for the run;
+- `querier_only` redacts run output/artifacts from the owner for
+  recipient-initiated runs while keeping audit metadata visible.
+- `POST /v1/rooms/{id}/trust` re-signs the same room with updated compose
+  trust settings, so existing `hmroom://` links keep working while B still
+  verifies the new manifest against the original owner pubkey.
+
+The run attestation body now includes `room_id`, `room_manifest_hash`,
+`output_visibility`, `allowed_llm_providers`, and `artifacts_enabled`, so
+the answer is cryptographically tied back to the room contract.
 
 ---
 
@@ -460,9 +527,17 @@ Threat coverage:
 
 Caveats:
 
-- Only `_hivemind_agent_files.ciphertext` is sealed today. App-defined
-  tables remain plaintext under LUKS2 — adding them follows the same
-  pattern (per-row AAD scoping the column to a primary key).
+- Only `_hivemind_agent_files.ciphertext` is sealed today. Room manifests,
+  run output ACLs, and egress rules are application-level controls, but
+  app-defined tables remain plaintext inside the CVM/Postgres boundary.
+  A future sealed room-data store should follow the same pattern
+  (per-row AAD scoped to room id + primary key).
+- `inspection_mode=sealed` agent files are encrypted from HTTP inspection,
+  but the internal rebuild path can decrypt them inside any KMS-approved
+  compose. For the stricter "malicious approved update cannot read old
+  room data or private agent parts until a participant interacts" property,
+  room data and sealed agent parts need participant-presented key release,
+  not only compose-gated KMS release.
 - The seal does not protect against an attacker who can induce the
   owner to make an HTTP request after they've compromised the CVM
   process — process memory is the trust boundary above LUKS2/TDX.

@@ -5,6 +5,7 @@ from inspect import isawaitable
 from .config import Settings
 from .db import connect
 from .pipeline import Pipeline
+from .rooms import RoomStore
 from .sandbox.agents import AgentStore
 from .sandbox.artifact_store import ArtifactStore
 from .sandbox.backend import _create_runner
@@ -45,6 +46,7 @@ class Hivemind:
         self.agent_store = AgentStore(self.db, sealer=sealer, tenant_id=tenant_id)
         self.run_store = RunStore(self.db)
         self.artifact_store = ArtifactStore(self.db)
+        self.room_store = RoomStore(self.db)
         self.pipeline: Pipeline | None = None
         self._retention_task: asyncio.Task | None = None
         try:

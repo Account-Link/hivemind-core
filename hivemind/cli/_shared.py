@@ -44,6 +44,8 @@ def _verify_run_attestation(
     *,
     expected_pubkey_b64: str | None = None,
     expected_compose_hash: str | None = None,
+    expected_room_id: str | None = None,
+    expected_room_manifest_hash: str | None = None,
     expected_output: str | None = None,
 ) -> tuple[bool, str]:
     """Verify a run-row's ``attestation`` envelope.
@@ -89,6 +91,22 @@ def _verify_run_attestation(
             "compose_hash — different CVM than expected",
         )
 
+    if expected_room_id and body.get("room_id") != expected_room_id:
+        return (
+            False,
+            "signed body's room_id does not match the accepted room",
+        )
+
+    if (
+        expected_room_manifest_hash
+        and body.get("room_manifest_hash") != expected_room_manifest_hash
+    ):
+        return (
+            False,
+            "signed body's room_manifest_hash does not match the accepted "
+            "room manifest",
+        )
+
     if expected_output is not None:
         # Re-derive sha256 over the output we received and compare. The
         # body commits to the hash, not the bytes — keeps the signed
@@ -125,9 +143,12 @@ def _query_tracked(
     *,
     expected_pubkey_b64: str | None = None,
     expected_compose_hash: str | None = None,
+    expected_room_id: str | None = None,
+    expected_room_manifest_hash: str | None = None,
     strict_attestation: bool = True,
     as_json: bool = False,
     fetch: bool = False,
+    fetch_headers: dict | None = None,
     poll_seconds: int = 600,
 ) -> None:
     """Submit a query, poll the run row, verify the Phase 5 envelope.
@@ -191,7 +212,10 @@ def _query_tracked(
                 fetch=fetch,
                 expected_pubkey_b64=expected_pubkey_b64,
                 expected_compose_hash=expected_compose_hash,
+                expected_room_id=expected_room_id,
+                expected_room_manifest_hash=expected_room_manifest_hash,
                 strict_attestation=strict_attestation,
+                fetch_headers=fetch_headers or headers,
             )
             return
         if status == "failed":
@@ -239,7 +263,10 @@ def _emit_run_result(
     fetch: bool,
     expected_pubkey_b64: str | None = None,
     expected_compose_hash: str | None = None,
+    expected_room_id: str | None = None,
+    expected_room_manifest_hash: str | None = None,
     strict_attestation: bool = True,
+    fetch_headers: dict | None = None,
 ) -> None:
     # Server returns these as top-level columns from the runs table
     # (see hivemind/sandbox/run_store.py). The legacy ``result.output``
@@ -259,6 +286,8 @@ def _emit_run_result(
         data,
         expected_pubkey_b64=expected_pubkey_b64,
         expected_compose_hash=expected_compose_hash,
+        expected_room_id=expected_room_id,
+        expected_room_manifest_hash=expected_room_manifest_hash,
         expected_output=output,
     )
 
@@ -307,8 +336,10 @@ def _emit_run_result(
     if fetch and artifacts:
         out_dir = Path("hivemind-artifacts") / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        config = _load_config()
-        headers = _headers(config)
+        headers = fetch_headers
+        if headers is None:
+            config = _load_config()
+            headers = _headers(config)
         for a in artifacts:
             try:
                 fname = validate_artifact_filename(a["filename"])

@@ -140,6 +140,7 @@ class SandboxBackend:
         run_id: str | None = None,
         run_store=None,
         extra_volumes: dict[str, dict[str, str]] | None = None,
+        llm_egress_enabled: bool = True,
     ) -> str | tuple:
         """Run the agent container and return its stdout output."""
         agent = self.agent
@@ -181,6 +182,7 @@ class SandboxBackend:
             artifact_retention_seconds=artifact_retention_seconds,
             run_id=run_id,
             run_store=run_store,
+            llm_egress_enabled=llm_egress_enabled,
         )
 
         try:

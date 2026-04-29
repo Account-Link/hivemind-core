@@ -19,6 +19,7 @@ class StoreResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
+    room_id: str | None = None
     query_agent_id: str | None = None
     scope_agent_id: str | None = None
     mediator_agent_id: str | None = None

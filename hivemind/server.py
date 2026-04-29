@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -7,10 +8,12 @@ import shutil
 import tarfile
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +29,17 @@ from .models import (
     QueryRequest,
     StoreRequest,
     StoreResponse,
+)
+from .rooms import (
+    RoomCreateRequest,
+    RoomRunRequest,
+    RoomTrustUpdateRequest,
+    build_room_manifest,
+    inspection_mode_from_visibility,
+    room_constraints,
+    sign_manifest,
+    verify_room_envelope,
+    visibility_from_inspection_mode,
 )
 from .sandbox.settings import build_sandbox_settings
 from .tenants import Caller, Role, TenantRegistry
@@ -418,6 +432,176 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if caller.role == "owner":
             return True
         return bool(caller.token_id) and run.get("issuer_token_id") == caller.token_id
+
+    def _caller_can_access_run_payload(caller: Caller, run: dict) -> bool:
+        """Whether caller may see output text and artifacts for a run."""
+        if not _caller_can_access_run(caller, run):
+            return False
+        visibility = (run.get("output_visibility") or "owner_and_querier").strip()
+        # In a room, A can intentionally choose querier-only results for
+        # B-initiated runs. A still sees metadata/audit rows, but not the
+        # answer/artifacts. Owner-initiated runs remain visible to owner.
+        if (
+            caller.role == "owner"
+            and run.get("room_id")
+            and run.get("issuer_token_id")
+            and visibility == "querier_only"
+        ):
+            return False
+        return True
+
+    def _redact_run_payload_for_caller(caller: Caller, run: dict) -> dict:
+        if _caller_can_access_run_payload(caller, run):
+            return run
+        redacted = dict(run)
+        redacted["output"] = None
+        redacted["index_output"] = None
+        redacted["error"] = None
+        redacted["artifacts"] = []
+        redacted["payload_redacted"] = True
+        return redacted
+
+    async def _load_room_for_caller(
+        caller: Caller,
+        room_id: str | None,
+    ) -> dict:
+        rid = (room_id or "").strip()
+        if caller.role == "query":
+            bound = (caller.constraints.get("room_id") or "").strip()
+            if not bound:
+                raise HTTPException(400, "query token is not bound to a room")
+            if rid and rid != bound:
+                raise HTTPException(403, "query token is bound to a different room")
+            rid = bound
+        if not rid:
+            raise HTTPException(400, "room_id is required")
+        room = await asyncio.to_thread(caller.hive.room_store.get, rid)
+        if not room:
+            raise HTTPException(404, f"room '{rid}' not found")
+        ok, reason = verify_room_envelope(room.get("envelope") or {})
+        if not ok:
+            raise HTTPException(
+                409,
+                f"room '{rid}' has an invalid signed manifest: {reason}",
+            )
+        if room.get("revoked_at") is not None:
+            raise HTTPException(403, f"room '{rid}' is revoked")
+        return room
+
+    def _validate_room_provider(req_provider: str | None, room: dict) -> None:
+        allowed = [p.strip().lower() for p in room.get("allowed_llm_providers") or []]
+        requested = (req_provider or "").strip().lower()
+        if not allowed:
+            if requested:
+                raise HTTPException(
+                    400,
+                    "this room disallows external LLM egress; omit provider",
+                )
+            return
+        selected = requested or allowed[0]
+        if selected not in allowed:
+            raise HTTPException(
+                400,
+                f"provider '{selected}' is not allowed by this room "
+                f"(allowed_llm_providers={allowed})",
+            )
+
+    def _room_query_inspection_mode(room: dict) -> str:
+        manifest = room.get("manifest") or {}
+        query = manifest.get("query") or {}
+        return inspection_mode_from_visibility(query.get("visibility"))
+
+    def _room_link(request: Request, room_id: str, token: str, pubkey_b64: str) -> str:
+        base = str(request.base_url).rstrip("/")
+        host = request.url.netloc or "service"
+        return (
+            f"hmroom://{host}/{room_id}"
+            f"?service={quote(base, safe='')}"
+            f"&token={quote(token, safe='')}"
+            f"&owner_pubkey={quote(pubkey_b64, safe='')}"
+        )
+
+    def _apply_room_to_query_request(
+        req: QueryRequest,
+        room: dict,
+    ) -> QueryRequest:
+        manifest = room.get("manifest") or {}
+        query = manifest.get("query") or {}
+        mode = query.get("mode") or room.get("query_mode")
+        fixed_query_agent_id = (
+            query.get("agent_id")
+            or room.get("fixed_query_agent_id")
+            or ""
+        ).strip()
+        if mode == "fixed":
+            if not fixed_query_agent_id:
+                raise HTTPException(500, "room fixed query agent is missing")
+            query_agent_id = fixed_query_agent_id
+        else:
+            query_agent_id = (req.query_agent_id or "").strip()
+            if not query_agent_id:
+                raise HTTPException(
+                    400,
+                    "room requires a query_agent_id; upload a query agent "
+                    "or use a room with query.mode='fixed'",
+                )
+        room_policy = room.get("policy") or ""
+        requested_policy = (req.policy or "").strip()
+        if requested_policy and requested_policy != room_policy:
+            raise HTTPException(
+                400,
+                "room policy is fixed by the signed room manifest; "
+                "caller-supplied policy cannot override it",
+            )
+        _validate_room_provider(req.provider, room)
+        return req.model_copy(
+            update={
+                "room_id": room["room_id"],
+                "scope_agent_id": room["scope_agent_id"],
+                "query_agent_id": query_agent_id,
+                "policy": room_policy,
+            }
+        )
+
+    def _live_compose_hash() -> str:
+        from . import attestation as _att
+
+        bundle = _att.get_bundle()
+        if not bundle.get("ready"):
+            return ""
+        return (
+            (bundle.get("attestation") or {}).get("compose_hash") or ""
+        ).lower()
+
+    def _compose_trust_from_update(
+        current: dict,
+        req: RoomTrustUpdateRequest,
+    ) -> dict:
+        mode = req.mode or current.get("mode") or "operator_approved"
+        if req.allowed_composes is None:
+            allowed = [
+                str(c).strip().lower()
+                for c in (current.get("allowed_composes") or [])
+                if str(c).strip()
+            ]
+        else:
+            allowed = [
+                str(c).strip().lower()
+                for c in req.allowed_composes
+                if str(c).strip()
+            ]
+        if req.append_live:
+            live = _live_compose_hash()
+            if not live:
+                raise HTTPException(400, "live compose_hash is not available")
+            if live not in allowed:
+                allowed.append(live)
+        if mode in {"pinned", "owner_approved_composes"} and not allowed:
+            raise HTTPException(
+                400,
+                f"trust.mode='{mode}' requires allowed_composes or append_live=true",
+            )
+        return {"mode": mode, "allowed_composes": allowed}
 
     async def check_admin(request: Request):
         """Gate admin endpoints with the separate HIVEMIND_ADMIN_KEY."""
@@ -859,6 +1043,208 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "sealed": caller.sealed,
         }
 
+    # ── Rooms ──
+
+    @app.post("/v1/rooms")
+    async def create_room(
+        req: RoomCreateRequest,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        """Create a signed room manifest and a recipient invite token."""
+        hm = caller.hive
+        scope_cfg = await asyncio.to_thread(
+            hm.agent_store.get, req.scope_agent_id,
+        )
+        if not scope_cfg:
+            raise HTTPException(404, f"Scope agent '{req.scope_agent_id}' not found")
+        actual_scope_visibility = visibility_from_inspection_mode(
+            getattr(scope_cfg, "inspection_mode", "full")
+        )
+        if req.scope_visibility and req.scope_visibility != actual_scope_visibility:
+            raise HTTPException(
+                400,
+                "scope_visibility does not match the registered scope "
+                f"agent inspection_mode ({actual_scope_visibility})",
+            )
+        scope_visibility = actual_scope_visibility
+
+        query_visibility = req.query_visibility
+        if req.query_mode == "fixed":
+            query_cfg = await asyncio.to_thread(
+                hm.agent_store.get, req.query_agent_id,
+            )
+            if not query_cfg:
+                raise HTTPException(
+                    404, f"Query agent '{req.query_agent_id}' not found"
+                )
+            query_visibility = visibility_from_inspection_mode(
+                getattr(query_cfg, "inspection_mode", "full")
+            )
+
+        if (
+            req.trust.mode in {"pinned", "owner_approved_composes"}
+            and not req.trust.allowed_composes
+        ):
+            compose_hash = _live_compose_hash()
+            if not compose_hash:
+                raise HTTPException(
+                    400,
+                    "strict room trust mode requires a live compose_hash; "
+                    "pass trust.allowed_composes explicitly or use "
+                    "trust.mode='operator_approved'",
+                )
+            req.trust.allowed_composes = [compose_hash]
+
+        from cryptography.hazmat.primitives import serialization
+        from .tenant_signing import derive_signing_keypair
+
+        bearer = _bearer(request)
+        priv, pub = derive_signing_keypair(bearer, caller.tenant_id)
+        pub_b64 = base64.b64encode(
+            pub.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("ascii")
+
+        room_id = f"room_{uuid4().hex[:12]}"
+        manifest = build_room_manifest(
+            room_id=room_id,
+            tenant_id=caller.tenant_id,
+            created_at=time.time(),
+            req=req,
+            scope_visibility=scope_visibility,
+            query_visibility=query_visibility,
+            signer_pubkey_b64=pub_b64,
+        )
+        envelope = sign_manifest(manifest, priv)
+        room = await asyncio.to_thread(hm.room_store.create, envelope)
+
+        registry = _registry(request)
+        try:
+            cap = await asyncio.to_thread(
+                registry.mint_capability,
+                caller.tenant_id,
+                "query",
+                f"room:{req.name or room_id}",
+                room_constraints(envelope),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        return {
+            "room_id": room_id,
+            "room": room,
+            "token": cap["token"],
+            "token_id": cap["token_id"],
+            "link": _room_link(request, room_id, cap["token"], pub_b64),
+        }
+
+    @app.get("/v1/rooms")
+    async def list_rooms(
+        limit: int = 50,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        if caller.role == "query":
+            room = await _load_room_for_caller(
+                caller, caller.constraints.get("room_id")
+            )
+            return {"rooms": [room]}
+        rooms = await asyncio.to_thread(caller.hive.room_store.list, limit)
+        return {"rooms": rooms}
+
+    @app.get("/v1/rooms/{room_id}")
+    async def get_room(
+        room_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        room = await _load_room_for_caller(caller, room_id)
+        return room
+
+    @app.get("/v1/rooms/{room_id}/attest")
+    async def attest_room(
+        room_id: str,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        from . import attestation as _att
+
+        room = await _load_room_for_caller(caller, room_id)
+        scope = await _build_agent_attestation(caller, room["scope_agent_id"])
+        fixed_query = None
+        if room.get("fixed_query_agent_id"):
+            fixed_query = await _build_agent_attestation(
+                caller, room["fixed_query_agent_id"]
+            )
+        return {
+            "room": room,
+            "scope_agent": scope,
+            "query_agent": fixed_query,
+            "attestation": _att.get_bundle(),
+        }
+
+    @app.delete("/v1/rooms/{room_id}")
+    async def revoke_room(
+        room_id: str,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        ok = await asyncio.to_thread(caller.hive.room_store.revoke, room_id)
+        if not ok:
+            raise HTTPException(404, f"room '{room_id}' not found")
+        return {"status": "ok", "room_id": room_id}
+
+    @app.post("/v1/rooms/{room_id}/trust")
+    async def update_room_trust(
+        room_id: str,
+        req: RoomTrustUpdateRequest,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        """Re-sign a room manifest with updated compose trust settings.
+
+        The room id and invite tokens do not change. Recipients using an
+        old ``hmroom://`` link verify the new envelope against the same
+        owner pubkey embedded in the link.
+        """
+        room = await _load_room_for_caller(caller, room_id)
+        manifest = dict(room["manifest"])
+        manifest["trust"] = _compose_trust_from_update(
+            manifest.get("trust") or {},
+            req,
+        )
+        manifest["updated_at"] = time.time()
+
+        from .tenant_signing import derive_signing_keypair
+
+        bearer = _bearer(request)
+        priv, _pub = derive_signing_keypair(bearer, caller.tenant_id)
+        envelope = sign_manifest(manifest, priv)
+        updated = await asyncio.to_thread(caller.hive.room_store.update, envelope)
+        if not updated:
+            raise HTTPException(404, f"room '{room_id}' not found")
+        return {"room_id": room_id, "room": updated}
+
+    @app.post("/v1/rooms/{room_id}/runs")
+    async def submit_room_run(
+        room_id: str,
+        req: RoomRunRequest,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        room = await _load_room_for_caller(caller, room_id)
+        qreq = QueryRequest(
+            query=req.query,
+            room_id=room["room_id"],
+            query_agent_id=req.query_agent_id,
+            mediator_agent_id=req.mediator_agent_id,
+            max_tokens=req.max_tokens,
+            max_llm_calls=req.max_llm_calls,
+            timeout_seconds=req.timeout_seconds,
+            model=req.model,
+            provider=req.provider,
+        )
+        qreq = _apply_room_to_query_request(qreq, room)
+        return await _submit_query_run_for_request(qreq, caller, room)
+
     # ── Liveness (unauthed, no tenant scope) ──
 
     @app.get("/v1/healthz")
@@ -980,18 +1366,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # completed rows carry an Ed25519 signature over the run body.
     # Recipients poll status via ``GET /v1/agent-runs/{run_id}``.
 
-    @app.post("/v1/query/run/submit")
-    async def submit_query_run(
+    async def _submit_query_run_for_request(
         req: QueryRequest,
-        caller: Caller = Depends(requires_role("owner", "query")),
-    ):
-        """Submit a query for tracked async processing.
-
-        Returns a ``run_id``; the run executes via
-        ``run_query_agent_tracked`` so the completed row carries a
-        signed attestation envelope.
-        """
-        req = _force_scope_for_query_token(req, caller)
+        caller: Caller,
+        room: dict | None = None,
+    ) -> dict:
         hm = caller.hive
         query_agent_id = req.query_agent_id or hm.settings.default_query_agent
         scope_agent_id = _require_scope_agent_id(hm, req.scope_agent_id)
@@ -1006,6 +1385,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             hm.run_store.create, run_id, query_agent_id,
             scope_agent_id=scope_agent_id,
             issuer_token_id=(caller.token_id or None),
+            room_id=(room or {}).get("room_id"),
+            room_manifest_hash=(room or {}).get("manifest_hash"),
+            output_visibility=(room or {}).get(
+                "output_visibility", "owner_and_querier"
+            ),
+            artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
         )
 
         _spawn_bg(
@@ -1025,6 +1410,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 model=req.model,
                 provider=req.provider,
                 policy=req.policy,
+                room_id=(room or {}).get("room_id"),
+                room_manifest_hash=(room or {}).get("manifest_hash"),
+                output_visibility=(room or {}).get(
+                    "output_visibility", "owner_and_querier"
+                ),
+                allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
+                artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
             ),
         )
 
@@ -1032,8 +1424,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "run_id": run_id,
             "query_agent_id": query_agent_id,
             "scope_agent_id": scope_agent_id,
+            "room_id": (room or {}).get("room_id"),
             "status": "pending",
         }
+
+    @app.post("/v1/query/run/submit")
+    async def submit_query_run(
+        req: QueryRequest,
+        caller: Caller = Depends(requires_role("owner", "query")),
+    ):
+        """Submit a query for tracked async processing.
+
+        Returns a ``run_id``; the run executes via
+        ``run_query_agent_tracked`` so the completed row carries a
+        signed attestation envelope.
+        """
+        room: dict | None = None
+        room_id = (req.room_id or "").strip()
+        if caller.role == "query" and caller.constraints.get("room_id"):
+            room = await _load_room_for_caller(caller, room_id)
+            req = _apply_room_to_query_request(req, room)
+        elif room_id:
+            room = await _load_room_for_caller(caller, room_id)
+            req = _apply_room_to_query_request(req, room)
+        else:
+            req = _force_scope_for_query_token(req, caller)
+        return await _submit_query_run_for_request(req, caller, room)
 
     @app.post(
         "/v1/index",
@@ -1115,10 +1531,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     def _query_token_visible_agent(caller: Caller, agent_id: str) -> bool:
-        """Query-token holders can only see the scope agent they're bound to."""
+        """Query-token holders can only see room-advertised agents."""
         if caller.role != "query":
             return True
-        return agent_id == (caller.constraints.get("scope_agent_id") or "")
+        visible = {caller.constraints.get("scope_agent_id") or ""}
+        fixed = caller.constraints.get("fixed_query_agent_id") or ""
+        if fixed:
+            visible.add(fixed)
+        return agent_id in visible
 
     @app.get("/v1/agents")
     async def list_agents(
@@ -1127,8 +1547,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         agents = await asyncio.to_thread(caller.hive.agent_store.list_agents, type)
         if caller.role == "query":
-            bound = caller.constraints.get("scope_agent_id") or ""
-            agents = [a for a in agents if a.agent_id == bound]
+            visible = {caller.constraints.get("scope_agent_id") or ""}
+            fixed = caller.constraints.get("fixed_query_agent_id") or ""
+            if fixed:
+                visible.add(fixed)
+            agents = [a for a in agents if a.agent_id in visible]
         return [a.model_dump() for a in agents]
 
     @app.get("/v1/agents/{agent_id}")
@@ -1780,6 +2203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_llm_calls: Annotated[int, Form(ge=1)] = 20,
         max_tokens: Annotated[int, Form(ge=1)] = 100_000,
         timeout_seconds: Annotated[int, Form(ge=1)] = 120,
+        room_id: str | None = Form(None),
         scope_agent_id: str | None = Form(None),
         mediator_agent_id: str | None = Form(None),
         # LLM routing (optional). ``provider="tinfoil"`` requires the
@@ -1796,9 +2220,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         in a full room, full. B doesn't pick — A's scope-agent policy
         is the contract.
         """
+        room: dict | None = None
+        if caller.role == "query" and caller.constraints.get("room_id"):
+            room = await _load_room_for_caller(caller, room_id)
+        elif room_id:
+            room = await _load_room_for_caller(caller, room_id)
+
         # Query-token callers cannot pick their own scope agent — pin it
         # to the one the owner bound the token to.
-        if caller.role == "query":
+        if room is not None:
+            if room.get("query_mode") != "uploadable":
+                raise HTTPException(
+                    403,
+                    "this room uses a fixed query agent; uploads are disabled",
+                )
+            if not caller.constraints.get("can_upload_query_agent") and caller.role == "query":
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "this room invite may not upload query agents"
+                    ),
+                )
+            scope_agent_id = room["scope_agent_id"]
+            room_policy = room.get("policy") or ""
+            requested_policy = (policy or "").strip()
+            if requested_policy and requested_policy != room_policy:
+                raise HTTPException(
+                    400,
+                    "room policy is fixed by the signed room manifest; "
+                    "caller-supplied policy cannot override it",
+                )
+            policy = room_policy
+            _validate_room_provider(provider, room)
+            validated_mode = _validate_inspection_mode(
+                _room_query_inspection_mode(room)
+            )
+        elif caller.role == "query":
             # Phase 4: query tokens must opt-in to code execution.
             # Default-false; owner sets `can_upload_query_agent=true`
             # explicitly via `tokens issue --can-upload-query-agent` to
@@ -1817,21 +2274,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hm = caller.hive
         scope_agent_id = _require_scope_agent_id(hm, scope_agent_id)
 
-        # Inherit inspection_mode from the bound scope agent. The mode
-        # is part of A's pre-committed contract (visible via
-        # /v1/scope-attest); B's CLI shows it before upload and aborts
-        # if B doesn't accept. A scope agent's mode is non-overridable
-        # at upload time — that's the whole point of binding it to A's
-        # scope-agent attestation.
-        scope_cfg = await asyncio.to_thread(
-            hm.agent_store.get, scope_agent_id,
-        )
-        if not scope_cfg:
-            raise HTTPException(404, f"Scope agent '{scope_agent_id}' not found")
-        inherited_mode = (
-            getattr(scope_cfg, "inspection_mode", "full") or "full"
-        )
-        validated_mode = _validate_inspection_mode(inherited_mode)
+        if room is None:
+            # Legacy query tokens inherit inspection_mode from the bound
+            # scope agent. Room tokens use query.visibility from the
+            # signed room manifest instead.
+            scope_cfg = await asyncio.to_thread(
+                hm.agent_store.get, scope_agent_id,
+            )
+            if not scope_cfg:
+                raise HTTPException(404, f"Scope agent '{scope_agent_id}' not found")
+            inherited_mode = (
+                getattr(scope_cfg, "inspection_mode", "full") or "full"
+            )
+            validated_mode = _validate_inspection_mode(inherited_mode)
+        else:
+            await _ensure_scope_agent_exists(hm, scope_agent_id)
 
         try:
             content = await _read_upload_bytes_limited(
@@ -1854,6 +2311,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             hm.run_store.create, run_id, agent_id,
             scope_agent_id=scope_agent_id,
             issuer_token_id=(caller.token_id or None),
+            room_id=(room or {}).get("room_id"),
+            room_manifest_hash=(room or {}).get("manifest_hash"),
+            output_visibility=(room or {}).get(
+                "output_visibility", "owner_and_querier"
+            ),
+            artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
         )
 
         # Everything else runs in background
@@ -1879,12 +2342,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider=provider,
                 policy=policy,
                 inspection_mode=validated_mode,
+                room=room,
             ),
         )
 
         return {
             "run_id": run_id,
             "agent_id": agent_id,
+            "room_id": (room or {}).get("room_id"),
             "status": "pending",
             "inspection_mode": validated_mode,
         }
@@ -1909,6 +2374,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         provider: str | None = None,
         policy: str | None = None,
         inspection_mode: str = "full",
+        room: dict | None = None,
     ) -> None:
         """Background task: build image, register agent, run pipeline."""
         from .sandbox.backend import _create_runner
@@ -1997,6 +2463,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 model=model,
                 provider=provider,
                 policy=policy,
+                room_id=(room or {}).get("room_id"),
+                room_manifest_hash=(room or {}).get("manifest_hash"),
+                output_visibility=(room or {}).get(
+                    "output_visibility", "owner_and_querier"
+                ),
+                allowed_llm_providers=(room or {}).get("allowed_llm_providers"),
+                artifacts_enabled=bool((room or {}).get("allow_artifacts", True)),
             )
 
         except Exception as e:
@@ -2021,10 +2494,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run = await asyncio.to_thread(hm.run_store.get, run_id)
         if not run or not _caller_can_access_run(caller, run):
             raise HTTPException(404, "Run not found")
-        run["artifacts"] = await asyncio.to_thread(
-            hm.artifact_store.list_for_run, run_id
-        )
+        if _caller_can_access_run_payload(caller, run) and run.get(
+            "artifacts_enabled", True
+        ):
+            run["artifacts"] = await asyncio.to_thread(
+                hm.artifact_store.list_for_run, run_id
+            )
+        else:
+            run["artifacts"] = []
         run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
+        run = _redact_run_payload_for_caller(caller, run)
         return JSONResponse(
             content=run,
             headers={"Cache-Control": "no-cache, no-store"},
@@ -2059,16 +2538,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=400,
                     detail="token_id must be at least 6 hex chars",
                 )
-            return await asyncio.to_thread(
+            rows = await asyncio.to_thread(
                 caller.hive.run_store.list_by_token, tid, capped,
             )
+            return [_redact_run_payload_for_caller(caller, r) for r in rows]
         if caller.role == "query":
-            return await asyncio.to_thread(
+            rows = await asyncio.to_thread(
                 caller.hive.run_store.list_by_token, caller.token_id, capped,
             )
-        return await asyncio.to_thread(
+            return [_redact_run_payload_for_caller(caller, r) for r in rows]
+        rows = await asyncio.to_thread(
             caller.hive.run_store.list_recent, capped,
         )
+        return [_redact_run_payload_for_caller(caller, r) for r in rows]
 
     # ── Artifact fetch (Postgres-backed; no S3) ──
 
@@ -2088,7 +2570,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         external object storage.
         """
         run = await asyncio.to_thread(hm.run_store.get, run_id)
-        if not run or not _caller_can_access_run(caller, run):
+        if (
+            not run
+            or not _caller_can_access_run_payload(caller, run)
+            or not run.get("artifacts_enabled", True)
+        ):
             raise HTTPException(404, "Artifact not found or expired")
         from .sandbox.models import validate_artifact_filename
 

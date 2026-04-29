@@ -110,6 +110,8 @@ _INTERNAL_DDL: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS _hivemind_query_runs (
         run_id TEXT PRIMARY KEY,
         agent_id TEXT NOT NULL,
+        room_id TEXT,
+        room_manifest_hash TEXT,
         scope_agent_id TEXT,
         index_agent_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
@@ -130,8 +132,14 @@ _INTERNAL_DDL: tuple[str, ...] = (
         output TEXT,
         index_output TEXT,
         attestation JSONB,
-        issuer_token_id TEXT
+        issuer_token_id TEXT,
+        output_visibility TEXT NOT NULL DEFAULT 'owner_and_querier',
+        artifacts_enabled BOOLEAN NOT NULL DEFAULT TRUE
     )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_query_runs_room_idx
+    ON _hivemind_query_runs (room_id, created_at DESC)
     """,
     """
     CREATE TABLE IF NOT EXISTS _hivemind_query_artifacts (
@@ -148,6 +156,40 @@ _INTERNAL_DDL: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS _hivemind_query_artifacts_created_idx
     ON _hivemind_query_artifacts (created_at)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS _hivemind_rooms (
+        room_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        envelope TEXT NOT NULL,
+        manifest_hash TEXT NOT NULL,
+        scope_agent_id TEXT NOT NULL,
+        fixed_query_agent_id TEXT,
+        query_mode TEXT NOT NULL,
+        output_visibility TEXT NOT NULL,
+        allowed_llm_providers TEXT NOT NULL DEFAULT '[]',
+        allow_artifacts BOOLEAN NOT NULL DEFAULT FALSE,
+        room_policy TEXT NOT NULL DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL,
+        revoked_at DOUBLE PRECISION
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS _hivemind_rooms_created_idx
+    ON _hivemind_rooms (created_at DESC)
+    """,
+)
+
+_INTERNAL_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS room_id TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS room_manifest_hash TEXT",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS output_visibility TEXT "
+    "NOT NULL DEFAULT 'owner_and_querier'",
+    "ALTER TABLE _hivemind_query_runs "
+    "ADD COLUMN IF NOT EXISTS artifacts_enabled BOOLEAN "
+    "NOT NULL DEFAULT TRUE",
 )
 
 
@@ -196,6 +238,8 @@ class Database:
         with self._lock:
             with self._conn.cursor() as cur:
                 for ddl in _INTERNAL_DDL:
+                    cur.execute(ddl)
+                for ddl in _INTERNAL_MIGRATIONS:
                     cur.execute(ddl)
             self._conn.commit()
 
@@ -271,6 +315,8 @@ class HttpDatabase:
     def _bootstrap(self) -> None:
         """Create internal tables via the proxy."""
         for ddl in _INTERNAL_DDL:
+            self.execute_commit(ddl)
+        for ddl in _INTERNAL_MIGRATIONS:
             self.execute_commit(ddl)
 
     def _check(self, resp) -> dict:

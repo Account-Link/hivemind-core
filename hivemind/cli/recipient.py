@@ -77,7 +77,11 @@ def _upload_query_agent_and_poll(
     fetch: bool,
     expected_pubkey_b64: str | None = None,
     expected_compose_hash: str | None = None,
+    expected_room_id: str | None = None,
+    expected_room_manifest_hash: str | None = None,
+    room_id: str | None = None,
     strict_attestation: bool = True,
+    fetch_headers: dict | None = None,
 ) -> None:
     """Upload an archive to /v1/query-agents/submit and poll until done.
 
@@ -96,6 +100,8 @@ def _upload_query_agent_and_poll(
     }
     if scope_id:
         form_data["scope_agent_id"] = scope_id
+    if room_id:
+        form_data["room_id"] = room_id
     if mediator_id:
         form_data["mediator_agent_id"] = mediator_id
     if model:
@@ -166,7 +172,10 @@ def _upload_query_agent_and_poll(
                 fetch=fetch,
                 expected_pubkey_b64=expected_pubkey_b64,
                 expected_compose_hash=expected_compose_hash,
+                expected_room_id=expected_room_id,
+                expected_room_manifest_hash=expected_room_manifest_hash,
                 strict_attestation=strict_attestation,
+                fetch_headers=fetch_headers or headers,
             )
             return
         if status == "failed":

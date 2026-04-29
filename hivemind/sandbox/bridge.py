@@ -254,6 +254,7 @@ class BridgeServer:
         artifact_retention_seconds: int = 86400,
         run_id: str | None = None,
         run_store=None,
+        llm_egress_enabled: bool = True,
     ):
         self.session_token = session_token
         self.tools = {t.name: t for t in tools}
@@ -269,6 +270,7 @@ class BridgeServer:
         self.artifact_retention_seconds = artifact_retention_seconds
         self.run_id = run_id
         self.run_store = run_store
+        self.llm_egress_enabled = bool(llm_egress_enabled)
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
         self._sock: socket.socket | None = None
@@ -364,6 +366,13 @@ class BridgeServer:
                     f"Scope session can only access query agent '{allowed}'",
                 )
 
+        def _enforce_llm_egress() -> None:
+            if not bridge.llm_egress_enabled:
+                raise HTTPException(
+                    403,
+                    "LLM egress is disabled by this room's manifest",
+                )
+
         @app.get("/health")
         async def health():
             return {"status": "ok", "budget": bridge.budget.summary()}
@@ -374,6 +383,7 @@ class BridgeServer:
 
         @app.post("/llm/chat", dependencies=[Depends(_check_token)])
         async def llm_chat(req: BridgeLLMRequest) -> BridgeLLMResponse:
+            _enforce_llm_egress()
             async with bridge._llm_lock:
                 kwargs: dict = {
                     "messages": req.messages,
@@ -398,6 +408,7 @@ class BridgeServer:
             Standard OpenAI SDKs route here via OPENAI_BASE_URL env var.
             Same budget enforcement and tape recording as /llm/chat.
             """
+            _enforce_llm_egress()
             async with bridge._llm_lock:
                 max_tokens = req.max_tokens or 4096
                 kwargs: dict = {
@@ -468,6 +479,7 @@ class BridgeServer:
             Streaming requests are handled by making a non-streaming call
             and wrapping the result in SSE format.
             """
+            _enforce_llm_egress()
             async with bridge._llm_lock:
                 kwargs = _anthropic_to_internal(req)
                 result = await bridge._handle_llm_call(kwargs)

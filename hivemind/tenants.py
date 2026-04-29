@@ -63,7 +63,9 @@ class Caller:
       - owner: ``{}``
       - query: ``{"scope_agent_id": <id>}`` — every query through this
         token is forced to use this scope agent (enforced in
-        /v1/query/run/submit).
+        /v1/query/run/submit). New room invites add ``room_id`` and
+        room policy snapshots; the tenant DB room manifest remains the
+        source of truth.
     """
 
     tenant_id: str
@@ -368,10 +370,34 @@ class TenantRegistry:
             raise ValueError(
                 "can_upload_query_agent must be a boolean"
             )
-        constraints = {
+        normalized = {
             "scope_agent_id": sid,
             "can_upload_query_agent": bool(raw_upload),
         }
+        # Room invites are still query tokens. Preserve the room
+        # enforcement snapshot for cheap whoami/debug output while the
+        # server re-loads the signed room manifest before every run.
+        room_id = (constraints.get("room_id") or "").strip()
+        if room_id:
+            normalized["room_id"] = room_id
+        for key in (
+            "room_manifest_hash",
+            "query_mode",
+            "fixed_query_agent_id",
+            "query_inspection_mode",
+            "output_visibility",
+            "policy",
+        ):
+            value = constraints.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[key] = value.strip()
+        for key in ("allowed_llm_providers",):
+            value = constraints.get(key)
+            if isinstance(value, list):
+                normalized[key] = [str(v).strip() for v in value if str(v).strip()]
+        if "allow_artifacts" in constraints:
+            normalized["allow_artifacts"] = bool(constraints.get("allow_artifacts"))
+        constraints = normalized
 
         rows = self._control_db.execute(
             "SELECT id FROM _tenants WHERE id = %s", [tenant_id]

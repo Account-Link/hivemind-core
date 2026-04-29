@@ -19,8 +19,9 @@ _COLUMNS = (
     "query_started_at, query_ended_at, "
     "mediator_started_at, mediator_ended_at, "
     "index_started_at, index_ended_at, index_output, "
-    "scope_agent_id, index_agent_id, "
-    "output, attestation, issuer_token_id"
+    "room_id, room_manifest_hash, scope_agent_id, index_agent_id, "
+    "output, attestation, issuer_token_id, "
+    "output_visibility, artifacts_enabled"
 )
 
 
@@ -38,6 +39,10 @@ class RunStore:
         scope_agent_id: str | None = None,
         index_agent_id: str | None = None,
         issuer_token_id: str | None = None,
+        room_id: str | None = None,
+        room_manifest_hash: str | None = None,
+        output_visibility: str = "owner_and_querier",
+        artifacts_enabled: bool = True,
     ) -> dict:
         """Create a new run record with status=pending.
 
@@ -49,20 +54,36 @@ class RunStore:
         now = time.time()
         self.db.execute_commit(
             "INSERT INTO _hivemind_query_runs "
-            "(run_id, agent_id, scope_agent_id, index_agent_id, "
-            "issuer_token_id, status, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "(run_id, agent_id, room_id, room_manifest_hash, "
+            "scope_agent_id, index_agent_id, issuer_token_id, "
+            "output_visibility, artifacts_enabled, status, "
+            "created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
-                run_id, agent_id, scope_agent_id, index_agent_id,
-                issuer_token_id, "pending", now, now,
+                run_id,
+                agent_id,
+                room_id,
+                room_manifest_hash,
+                scope_agent_id,
+                index_agent_id,
+                issuer_token_id,
+                output_visibility,
+                bool(artifacts_enabled),
+                "pending",
+                now,
+                now,
             ],
         )
         return {
             "run_id": run_id,
             "agent_id": agent_id,
+            "room_id": room_id,
+            "room_manifest_hash": room_manifest_hash,
             "scope_agent_id": scope_agent_id,
             "index_agent_id": index_agent_id,
             "issuer_token_id": issuer_token_id,
+            "output_visibility": output_visibility,
+            "artifacts_enabled": bool(artifacts_enabled),
             "status": "pending",
             "error": None,
             "created_at": now,

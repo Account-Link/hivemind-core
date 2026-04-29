@@ -124,6 +124,34 @@ See **[Capability Tokens](#capability-tokens-delegated-query)** for the
 full delegation model (`hmq_` prefix, what the holder can do, how the
 recipient pins binding via `agents attest`).
 
+### Data rooms
+
+Rooms wrap delegated access in one signed manifest: scope agent, fixed vs
+uploadable query agent, output visibility, LLM egress allowlist, artifact
+egress, policy text, and compose-trust mode. The CLI keeps it to one link.
+
+```bash
+# Fixed query agent, Tinfoil-only egress, querier-only output by default
+hivemind room create <scope_agent_id> --query-agent <query_agent_id> \
+  --rules-file rules.md
+
+# Recipient side
+hivemind room inspect 'hmroom://...'
+hivemind room ask 'hmroom://...' "What changed this month?"
+hivemind room ask 'hmroom://...' "What changed this month?" --agent ./my-query-agent
+
+# Owner approves the current live compose for a strict room without
+# changing downstream links
+hivemind room trust <room_id> --mode owner_approved_composes --approve-live
+```
+
+Server-side enforcement applies to raw API calls too: room tokens cannot
+override the scope agent, room policy, fixed query agent, or LLM provider
+allowlist. `--no-llm` disables bridge LLM endpoints for the room; omitting
+`--allow-artifacts` disables artifact upload egress. `hmroom://` links carry
+the owner signing pubkey; `room inspect` and `room ask` verify the signed
+manifest and bind the final run attestation to the accepted manifest hash.
+
 ### Operator commands (`hivemind admin …`)
 
 Admin-key holders manage tenants and on-chain hash approval:
