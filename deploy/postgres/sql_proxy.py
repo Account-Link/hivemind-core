@@ -63,6 +63,29 @@ PROXY_PORT = int(os.environ.get("SQL_PROXY_PORT", "8080"))
 PROXY_KEY = os.environ.get("SQL_PROXY_KEY", "")
 ADMIN_KEY = os.environ.get("SQL_PROXY_ADMIN_KEY", "")
 
+# Per-statement runtime cap, in milliseconds. Pinned at the connection level
+# so a runaway query (`SELECT pg_sleep(3600)`, accidental cross-join) cannot
+# starve the per-DB connection-pool slot. Postgres aborts the statement at
+# this deadline; the caller surfaces it as a normal SQL error. Mirror the
+# value in hivemind/db.py — both connections live behind the same trust
+# boundary and there is no reason for them to drift.
+_STATEMENT_TIMEOUT_MS = int(os.environ.get("SQL_PROXY_STATEMENT_TIMEOUT_MS", "30000"))
+
+
+def _dsn_with_statement_timeout(dsn: str) -> str:
+    """Append ``-c statement_timeout`` to the DSN's options field."""
+    try:
+        parts = pg_conninfo.conninfo_to_dict(dsn)
+    except Exception:
+        return dsn
+    extra = f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}"
+    existing = parts.get("options", "")
+    parts["options"] = (existing + " " + extra).strip() if existing else extra
+    try:
+        return pg_conninfo.make_conninfo(**parts)
+    except Exception:
+        return dsn
+
 # Tenant DB naming: lowercase letters, digits, underscores; must start with
 # a letter; 1–63 chars (Postgres identifier limit).
 _DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -170,7 +193,11 @@ def _get_conn(db_name: str | None) -> psycopg.Connection:
     with _pool_lock:
         conn = _pool.get(dsn)
         if conn is None or conn.closed:
-            conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+            conn = psycopg.connect(
+                _dsn_with_statement_timeout(dsn),
+                row_factory=dict_row,
+                autocommit=False,
+            )
             _pool[dsn] = conn
         return conn
 
@@ -181,7 +208,9 @@ def _get_admin_conn() -> psycopg.Connection:
     with _pool_lock:
         if _admin_conn is None or _admin_conn.closed:
             _admin_conn = psycopg.connect(
-                DB_DSN, row_factory=dict_row, autocommit=True
+                _dsn_with_statement_timeout(DB_DSN),
+                row_factory=dict_row,
+                autocommit=True,
             )
         return _admin_conn
 
@@ -444,7 +473,7 @@ def _superuser_conn_to(db_name: str) -> psycopg.Connection:
     parsed = pg_conninfo.conninfo_to_dict(DB_DSN)
     parsed["dbname"] = db_name
     return psycopg.connect(
-        pg_conninfo.make_conninfo(**parsed),
+        _dsn_with_statement_timeout(pg_conninfo.make_conninfo(**parsed)),
         row_factory=dict_row,
         autocommit=True,
     )

@@ -14,12 +14,41 @@ import logging
 import threading
 
 import psycopg
+from psycopg import conninfo as _conninfo
 from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
 # Internal tables managed by hivemind — hidden from get_schema by default
 _INTERNAL_PREFIX = "_hivemind_"
+
+# Hard cap on per-statement runtime, in milliseconds. Pinned at the connection
+# level so a runaway query (`SELECT pg_sleep(3600)`, accidental cross-join,
+# etc.) cannot indefinitely hold the single shared connection's RLock and
+# starve every other request to this tenant. Postgres aborts the statement
+# after this; the application surfaces it as a normal SQL error.
+_STATEMENT_TIMEOUT_MS = 30_000
+
+
+def _dsn_with_statement_timeout(dsn: str) -> str:
+    """Append ``-c statement_timeout`` to the DSN's ``options`` field.
+
+    Preserves any pre-existing options the operator set. If parsing fails
+    (e.g. for a non-standard DSN form), returns the original DSN unchanged
+    rather than refusing the connection — the cap is defense-in-depth, not
+    an authentication boundary.
+    """
+    try:
+        parts = _conninfo.conninfo_to_dict(dsn)
+    except Exception:
+        return dsn
+    extra = f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}"
+    existing = parts.get("options", "")
+    parts["options"] = (existing + " " + extra).strip() if existing else extra
+    try:
+        return _conninfo.make_conninfo(**parts)
+    except Exception:
+        return dsn
 
 
 # Single source of truth for hivemind's internal schema. Both Database and
@@ -138,7 +167,6 @@ def connect(
         return HttpDatabase(dsn, proxy_key=proxy_key, tenant_db=tenant_db)
     if tenant_db:
         # Direct psycopg: rewrite DSN's dbname to the tenant database.
-        from psycopg import conninfo as _conninfo
         parsed = _conninfo.conninfo_to_dict(dsn)
         parsed["dbname"] = tenant_db
         dsn = _conninfo.make_conninfo(**parsed)
@@ -155,7 +183,11 @@ class Database:
         # shared connection with InFailedSqlTransaction (which would 500 every
         # subsequent request). All writes in this codebase are single-statement
         # so we lose nothing by dropping implicit transactions.
-        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        self._conn = psycopg.connect(
+            _dsn_with_statement_timeout(dsn),
+            row_factory=dict_row,
+            autocommit=True,
+        )
         self._lock = threading.RLock()
         self._bootstrap()
 

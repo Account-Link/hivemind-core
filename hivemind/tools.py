@@ -52,11 +52,70 @@ class AccessLevel(enum.Enum):
     NONE = "none"
 
 
+# Postgres functions that look like SELECTable expressions but mutate session
+# state, hold the connection open, or reach outside the database. SCOPED /
+# FULL_READ tools must reject them — otherwise an LLM-supplied SQL string can:
+#   - `SELECT set_config('search_path', 'attacker_schema', false)` mutates the
+#     connection's search_path and shadows tables for subsequent queries
+#     (the connection is shared across requests for a tenant);
+#   - `SELECT pg_sleep(N)` parks the single shared connection for N seconds;
+#   - `dblink`/`lo_*`/`pg_read_file` reach outside the row layer entirely.
+# Names are matched case-insensitively against the function's leaf name; we
+# do not try to be schema-aware because a bare `set_config(...)` resolves to
+# `pg_catalog.set_config` regardless of search_path.
+_FORBIDDEN_SQL_FUNCS = frozenset({
+    "set_config",
+    "set_role",
+    "current_setting",  # not directly dangerous, but pairs with set_config
+    "pg_sleep",
+    "pg_sleep_for",
+    "pg_sleep_until",
+    "dblink",
+    "dblink_exec",
+    "dblink_connect",
+    "dblink_disconnect",
+    "lo_export",
+    "lo_import",
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_ls_dir",
+    "pg_stat_file",
+    "copy_to_program",
+    "copy_from_program",
+})
+
+
+def _references_forbidden_funcs(stmt) -> bool:
+    """Walk a sqlglot expression tree for any forbidden function call.
+
+    Postgres-specific function names (``pg_sleep``, ``set_config``) parse as
+    ``Anonymous`` nodes since sqlglot does not have a built-in expression
+    class for each one. Builtins it does recognize (e.g. ``CURRENT_SETTING``)
+    surface as their own ``Func`` subclasses with a ``sql_name``.
+    """
+    import sqlglot
+
+    for node in stmt.walk():
+        if isinstance(node, sqlglot.exp.Anonymous):
+            name = (node.name or "").lower()
+            if name in _FORBIDDEN_SQL_FUNCS:
+                return True
+        elif isinstance(node, sqlglot.exp.Func):
+            try:
+                name = (node.sql_name() or "").lower()
+            except Exception:
+                name = (node.key or "").lower()
+            if name in _FORBIDDEN_SQL_FUNCS:
+                return True
+    return False
+
+
 def _is_select_only(sql: str) -> bool:
     """Check if SQL is a read-only statement using sqlglot AST parsing.
 
     Walks the full AST including CTEs and subqueries to reject DML hidden
-    inside otherwise-SELECT statements.
+    inside otherwise-SELECT statements, and rejects calls to
+    ``_FORBIDDEN_SQL_FUNCS`` (session-state mutation, sleep, fs/network reach).
 
     Uses the postgres dialect so PostgreSQL-specific operators (``~``, ``~*``,
     ``!~``, ``!~*``, ``::`` casts, array/JSON operators, etc.) parse cleanly.
@@ -91,6 +150,8 @@ def _is_select_only(sql: str) -> bool:
         for node in stmt.walk():
             if isinstance(node, _DANGEROUS):
                 return False
+        if _references_forbidden_funcs(stmt):
+            return False
 
     return True
 

@@ -115,6 +115,50 @@ class TestIsSelectOnly:
         assert _is_select_only("INSERT INTO t (x) VALUES (%s)") is False
 
 
+class TestIsSelectOnlyForbiddenFuncs:
+    """H1/H2 regression: SELECT calls that mutate session state, sleep, or
+    reach outside the row layer must fail _is_select_only. The connection is
+    shared across requests for a tenant; one ``SELECT set_config('search_path',
+    'evil', false)`` reroutes every subsequent table lookup."""
+
+    def test_set_config_blocked(self):
+        assert _is_select_only(
+            "SELECT set_config('search_path', 'public_shadow', false)"
+        ) is False
+
+    def test_set_role_blocked(self):
+        assert _is_select_only("SELECT set_role('admin')") is False
+
+    def test_pg_sleep_blocked(self):
+        assert _is_select_only("SELECT pg_sleep(3600)") is False
+
+    def test_pg_sleep_inside_where_blocked(self):
+        assert _is_select_only(
+            "SELECT id FROM users WHERE pg_sleep(10) IS NULL"
+        ) is False
+
+    def test_pg_sleep_inside_cte_blocked(self):
+        assert _is_select_only(
+            "WITH s AS (SELECT pg_sleep(1)) SELECT * FROM users"
+        ) is False
+
+    def test_dblink_blocked(self):
+        assert _is_select_only(
+            "SELECT * FROM dblink('host=evil', 'SELECT 1') AS t(c int)"
+        ) is False
+
+    def test_pg_read_file_blocked(self):
+        assert _is_select_only("SELECT pg_read_file('/etc/passwd')") is False
+
+    def test_lo_export_blocked(self):
+        assert _is_select_only("SELECT lo_export(1, '/tmp/x')") is False
+
+    def test_current_setting_blocked(self):
+        # Pairs with set_config — leaking session state is reconnaissance
+        # for a chained search_path attack. Block it together.
+        assert _is_select_only("SELECT current_setting('foo')") is False
+
+
 class TestScopedRequiresScopeFn:
     """M2 contract: SCOPED tools must refuse construction without a scope_fn.
     The earlier behavior (silent passthrough when scope_fn is None) was a
