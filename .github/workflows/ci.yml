@@ -34,10 +34,10 @@ jobs:
       HIVEMIND_TEST_DATABASE_URL: postgresql://hivemind:dev@localhost:5432/postgres
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v8
         with:
           version: latest
 
