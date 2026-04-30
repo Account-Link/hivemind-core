@@ -3,6 +3,19 @@ name: Build & Push Images
 on:
   push:
     branches: [main]
+    # Keep auto-deploys tied to runtime/build inputs. CI still runs on
+    # every push, but docs/eval/autoresearch-only changes should not
+    # create a new image tag, compose_hash, or owner_approved room churn.
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/build-images.yml"
+      - ".github/workflows/deploy.yml"
+      - "agents/**"
+      - "deploy/**"
+      - "hivemind/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "LICENSE"
   workflow_dispatch:
     inputs:
       version:

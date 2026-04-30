@@ -20,6 +20,6 @@ build/
 
 tests/
 docs/
-bench/
+eval/
 autoresearch/
 deploy/contracts/
