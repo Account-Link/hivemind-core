@@ -500,9 +500,9 @@ and settlement status. The ledger is append-only. Current entry kinds are
 `credit_grant`, `usage_hold`, `usage_release`, and `usage_charge`.
 
 Credit enforcement is deployment-configurable with
-`HIVEMIND_BILLING_ENFORCE_CREDITS`. When false, the service meters and charges
-known payers but does not reject missing or negative balances. When true,
-query-token runs require a payer credential and enough available credit for the
+`HIVEMIND_BILLING_ENFORCE_CREDITS`. Query-token runs always require a payer
+credential. When enforcement is false, known payer balances may go negative.
+When enforcement is true, the payer also needs enough available credit for the
 preflight hold.
 
 ## Egress Boundaries

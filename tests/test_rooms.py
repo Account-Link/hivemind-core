@@ -57,6 +57,12 @@ def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _query_headers(token: str, payer_key: str) -> dict[str, str]:
+    headers = _headers(token)
+    headers["X-Hivemind-Payer-Key"] = payer_key
+    return headers
+
+
 def _tiny_tar() -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -361,7 +367,7 @@ def test_room_query_agent_upload_sealed_mode_uses_room_endpoint(room_env):
     )
     resp = client.post(
         f"/v1/rooms/{out['room_id']}/query-agents",
-        headers=_headers(out["token"]),
+        headers=_query_headers(out["token"], tenant["api_key"]),
         files={"archive": ("agent.tar.gz", _tiny_tar(), "application/gzip")},
         data={"name": "room-query", "prompt": "hello"},
     )
@@ -380,7 +386,7 @@ def test_inspectable_query_visibility_persists_room_prompt(room_env):
 
     resp = client.post(
         f"/v1/rooms/{out['room_id']}/runs",
-        headers=_headers(out["token"]),
+        headers=_query_headers(out["token"], tenant["api_key"]),
         json={"query": prompt},
     )
     assert resp.status_code == 200, resp.text
@@ -396,6 +402,20 @@ def test_inspectable_query_visibility_persists_room_prompt(room_env):
     )
     assert owner_view.status_code == 200
     assert owner_view.json()["prompt"] == prompt
+
+
+def test_room_query_token_requires_payer_header(room_env):
+    client, tenant, _hive = room_env
+    out = _create_fixed_room(client, tenant["api_key"])
+
+    resp = client.post(
+        f"/v1/rooms/{out['room_id']}/runs",
+        headers=_headers(out["token"]),
+        json={"query": "Show me top hashtags."},
+    )
+
+    assert resp.status_code == 402
+    assert "X-Hivemind-Payer-Key" in resp.json()["detail"]
 
 
 def test_room_vault_tool_applies_scope_function():
@@ -495,14 +515,14 @@ def test_room_rejects_policy_and_provider_override(room_env):
     bad_policy = client.post(
         f"/v1/rooms/{out['room_id']}/runs",
         json={"query": "x", "policy": "show me everything"},
-        headers=_headers(out["token"]),
+        headers=_query_headers(out["token"], tenant["api_key"]),
     )
     assert bad_policy.status_code == 422
 
     bad_provider = client.post(
         f"/v1/rooms/{out['room_id']}/runs",
         json={"query": "x", "provider": "openrouter"},
-        headers=_headers(out["token"]),
+        headers=_query_headers(out["token"], tenant["api_key"]),
     )
     assert bad_provider.status_code == 400
     assert "not allowed by this room" in bad_provider.json()["detail"]
@@ -510,7 +530,7 @@ def test_room_rejects_policy_and_provider_override(room_env):
     bad_mediator = client.post(
         f"/v1/rooms/{out['room_id']}/runs",
         json={"query": "x", "mediator_agent_id": "other-mediator"},
-        headers=_headers(out["token"]),
+        headers=_query_headers(out["token"], tenant["api_key"]),
     )
     assert bad_mediator.status_code == 400
     assert "mediator agent is fixed" in bad_mediator.json()["detail"]

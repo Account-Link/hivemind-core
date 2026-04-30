@@ -374,10 +374,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict:
         """Resolve who pays for this run.
 
-        Query-token calls can attach ``X-Hivemind-Payer-Key: hmk_...`` so
-        the data owner is not charged for the participant's LLM spend. Owner
-        calls default to the owner tenant. When credit enforcement is enabled,
-        query-token calls without a payer key are rejected before work starts.
+        Query-token calls attach ``X-Hivemind-Payer-Key: hmk_...`` so the data
+        owner is not charged for the participant's LLM spend. Owner calls
+        default to the owner tenant. Query-token calls without a payer key are
+        rejected before work starts; the credit-enforcement setting controls
+        whether a known payer must have enough positive balance, not whether a
+        payer is required.
         """
         payer_key = (request.headers.get("X-Hivemind-Payer-Key") or "").strip()
         if payer_key:
@@ -398,17 +400,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "payer_token_id": "",
                 "billable_role": billable_role,
             }
-        if settings.billing_enforce_credits:
-            raise HTTPException(
-                402,
-                "query-token runs require X-Hivemind-Payer-Key when "
-                "HIVEMIND_BILLING_ENFORCE_CREDITS is enabled",
-            )
-        return {
-            "payer_tenant_id": None,
-            "payer_token_id": caller.token_id or "",
-            "billable_role": billable_role,
-        }
+        raise HTTPException(
+            402,
+            "query-token runs require X-Hivemind-Payer-Key so usage can be "
+            "charged to the querying tenant",
+        )
 
     def _billing_provider_for_room(req_provider: str | None, room: dict | None) -> str:
         if room is None:
