@@ -236,6 +236,16 @@ def test_admin_create_uses_admin_profile_without_trust_check(
         "--api-key hmk_liz"
     )
 
+    result_duplicate = CliRunner().invoke(
+        _cli_mod.cli,
+        ["admin", "tenants", "create", "liz", "--allow-duplicate-name"],
+    )
+    assert result_duplicate.exit_code == 0, result_duplicate.output
+    assert captured["json"] == {
+        "name": "liz",
+        "allow_duplicate_name": True,
+    }
+
 
 def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):
     _stub_attestation(

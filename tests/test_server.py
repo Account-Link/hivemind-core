@@ -142,6 +142,21 @@ class TestAdminSchema:
         assert "schema" in data
         assert isinstance(data["schema"], list)
 
+
+class TestAdminTenants:
+    @pytest.mark.asyncio
+    async def test_create_rejects_duplicate_name(self, server_env):
+        client, _api_key = server_env
+        resp = await client.post(
+            "/v1/admin/tenants",
+            headers={"Authorization": "Bearer admin-test-key"},
+            json={"name": "server-tests"},
+        )
+
+        assert resp.status_code == 409
+        assert "already exists" in resp.json()["detail"]
+
+
 class TestAgentCRUD:
     @pytest.mark.asyncio
     async def test_list_agents(self, server_env):

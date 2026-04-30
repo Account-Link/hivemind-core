@@ -53,6 +53,21 @@ _QUERY_TOKEN_PREFIX = "hmq_"  # query-only: submit prompts via the active scope 
 Role = Literal["owner", "query"]
 
 
+class DuplicateTenantNameError(ValueError):
+    """Raised when tenant creation would reuse an existing display name."""
+
+    def __init__(self, name: str, existing: list[dict]):
+        self.name = name
+        self.existing = existing
+        ids = ", ".join(str(row.get("id")) for row in existing)
+        suffix = f" ({ids})" if ids else ""
+        super().__init__(
+            f"tenant name '{name}' already exists{suffix}; "
+            "pass allow_duplicate_name=true only if you really want another "
+            "tenant with the same name"
+        )
+
+
 @dataclass(frozen=True)
 class Caller:
     """Resolved bearer-token identity.
@@ -489,10 +504,34 @@ class TenantRegistry:
 
     # ── Admin operations ────────────────────────────────────────────
 
-    def provision(self, name: str) -> dict:
+    def _find_tenants_by_name(self, name: str) -> list[dict]:
+        rows = self._control_db.execute(
+            "SELECT id, name, db_name, created_at, suspended "
+            "FROM _tenants WHERE lower(name) = lower(%s) "
+            "ORDER BY created_at DESC",
+            [name.strip()],
+        )
+        return [dict(r) for r in rows]
+
+    def _reject_duplicate_name_unless_allowed(
+        self, name: str, allow_duplicate_name: bool,
+    ) -> None:
+        if allow_duplicate_name:
+            return
+        existing = self._find_tenants_by_name(name)
+        if existing:
+            raise DuplicateTenantNameError(name, existing)
+
+    def provision(
+        self, name: str, *, allow_duplicate_name: bool = False,
+    ) -> dict:
         """Create tenant: new DB, new API key. Returns key once."""
         if not name or not name.strip():
             raise ValueError("tenant name required")
+        clean_name = name.strip()
+        self._reject_duplicate_name_unless_allowed(
+            clean_name, allow_duplicate_name,
+        )
         if self._pg_admin is None:
             raise RuntimeError(
                 "tenant provisioning requires admin_key + sql_proxy_admin_key"
@@ -510,7 +549,7 @@ class TenantRegistry:
                 "INSERT INTO _tenants "
                 "(id, name, api_key_hash, db_name, created_at, suspended) "
                 "VALUES (%s, %s, %s, %s, %s, FALSE)",
-                [tenant_id, name.strip(), api_key_hash, db_name, time.time()],
+                [tenant_id, clean_name, api_key_hash, db_name, time.time()],
             )
         except Exception:
             try:
@@ -525,7 +564,7 @@ class TenantRegistry:
             "tenant_id": tenant_id,
             "api_key": api_key,
             "db_name": db_name,
-            "name": name.strip(),
+            "name": clean_name,
         }
 
     def register_existing(
@@ -534,6 +573,7 @@ class TenantRegistry:
         db_name: str,
         api_key: str | None = None,
         tenant_id: str | None = None,
+        allow_duplicate_name: bool = False,
     ) -> dict:
         """Adopt an existing Postgres database as a tenant.
 
@@ -547,6 +587,10 @@ class TenantRegistry:
         """
         if not name or not name.strip():
             raise ValueError("tenant name required")
+        clean_name = name.strip()
+        self._reject_duplicate_name_unless_allowed(
+            clean_name, allow_duplicate_name,
+        )
         if not db_name:
             raise ValueError("db_name required")
 
@@ -570,14 +614,14 @@ class TenantRegistry:
             "INSERT INTO _tenants "
             "(id, name, api_key_hash, db_name, created_at, suspended) "
             "VALUES (%s, %s, %s, %s, %s, FALSE)",
-            [tenant_id, name.strip(), api_key_hash, db_name, time.time()],
+            [tenant_id, clean_name, api_key_hash, db_name, time.time()],
         )
 
         return {
             "tenant_id": tenant_id,
             "api_key": api_key,
             "db_name": db_name,
-            "name": name.strip(),
+            "name": clean_name,
         }
 
     def rotate_key(self, tenant_id: str) -> dict:

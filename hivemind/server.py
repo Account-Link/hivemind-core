@@ -44,7 +44,7 @@ from .rooms import (
 )
 from .room_vault import RoomVaultSealed
 from .sandbox.settings import build_sandbox_settings
-from .tenants import Caller, Role, TenantRegistry
+from .tenants import Caller, DuplicateTenantNameError, Role, TenantRegistry
 from .version import APP_VERSION
 
 logger = logging.getLogger(__name__)
@@ -668,11 +668,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/v1/admin/tenants", dependencies=[Depends(check_admin)])
     async def admin_create_tenant(payload: dict, request: Request):
         name = (payload or {}).get("name", "")
+        allow_duplicate_name = bool(
+            (payload or {}).get("allow_duplicate_name", False)
+        )
         if not isinstance(name, str) or not name.strip():
             raise HTTPException(400, "'name' required")
         registry = _registry(request)
         try:
-            result = await asyncio.to_thread(registry.provision, name)
+            result = await asyncio.to_thread(
+                registry.provision,
+                name,
+                allow_duplicate_name=allow_duplicate_name,
+            )
+        except DuplicateTenantNameError as e:
+            raise HTTPException(409, str(e))
         except RuntimeError as e:
             raise HTTPException(503, str(e))
         except ValueError as e:
@@ -696,11 +705,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db_name = (payload or {}).get("db_name", "")
         api_key = (payload or {}).get("api_key") or None
         tenant_id = (payload or {}).get("tenant_id") or None
+        allow_duplicate_name = bool(
+            (payload or {}).get("allow_duplicate_name", False)
+        )
         registry = _registry(request)
         try:
             result = await asyncio.to_thread(
-                registry.register_existing, name, db_name, api_key, tenant_id
+                registry.register_existing,
+                name,
+                db_name,
+                api_key,
+                tenant_id,
+                allow_duplicate_name=allow_duplicate_name,
             )
+        except DuplicateTenantNameError as e:
+            raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
         return result

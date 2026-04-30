@@ -64,16 +64,30 @@ def _tenant_init_command(*, service: str, profile: str, api_key: str) -> str:
     help="Admin bearer token. Defaults to HIVEMIND_ADMIN_KEY or "
     "the active profile's api_key when role=admin.",
 )
+@click.option(
+    "--allow-duplicate-name",
+    is_flag=True,
+    help="Create even if another tenant already has this display name.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON only")
-def admin_create_tenant(name: str, service: str | None, admin_key: str, as_json: bool):
+def admin_create_tenant(
+    name: str,
+    service: str | None,
+    admin_key: str,
+    allow_duplicate_name: bool,
+    as_json: bool,
+):
     """Provision a new tenant. Prints the key and tenant setup command."""
     admin_key = _resolve_admin_key(admin_key)
     url = _resolve_admin_service(service)
+    payload = {"name": name}
+    if allow_duplicate_name:
+        payload["allow_duplicate_name"] = True
     try:
         resp = _hpost(
             f"{url}/v1/admin/tenants",
             headers=_admin_headers(admin_key),
-            json={"name": name},
+            json=payload,
             timeout=60,
         )
     except httpx.RequestError as e:

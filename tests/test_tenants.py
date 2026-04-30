@@ -21,6 +21,7 @@ import pytest
 
 from hivemind.config import Settings
 from hivemind.tenants import (
+    DuplicateTenantNameError,
     TenantRegistry,
     _hash_api_key,
     _is_missing_database_error,
@@ -123,6 +124,21 @@ def test_provision_creates_isolated_database(registry):
             "SELECT datname FROM pg_database"
         ).fetchall()]
     assert result["db_name"] in dbs
+
+
+def test_provision_rejects_duplicate_name_by_default(registry):
+    first = registry.provision("Liz")
+    registry._test_created_dbs.append(first["db_name"])
+
+    with pytest.raises(DuplicateTenantNameError) as exc:
+        registry.provision(" liz ")
+
+    assert first["tenant_id"] in str(exc.value)
+
+    second = registry.provision("liz", allow_duplicate_name=True)
+    registry._test_created_dbs.append(second["db_name"])
+    assert second["tenant_id"] != first["tenant_id"]
+    assert second["name"] == "liz"
 
 
 def test_api_key_stored_only_as_hash(registry):
