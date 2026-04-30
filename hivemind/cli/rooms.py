@@ -489,7 +489,13 @@ def create_room(
 @click.argument("room")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 def inspect_room(room: str, as_json: bool):
-    """Show a room's signed manifest and live attestation summary."""
+    """Show a room's signed manifest and live attestation summary.
+
+    Use --json to print the full room spec; the signed manifest is at
+    .room.manifest, for example:
+
+        hivemind room inspect "$ROOM" --json | jq '.room.manifest'
+    """
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
     data = _fetch_verified_room(
         service,
@@ -679,10 +685,31 @@ def trust_room(
     default=None,
     help="Upload and run a query agent directory or .tar.gz in this room.",
 )
-@click.option("--timeout", type=int, default=600, show_default=True)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    show_default=True,
+    help=(
+        "Seconds to give the run and local poll. CLI sends at most 3600; "
+        "hosted services may clamp lower, e.g. 900s."
+    ),
+)
 @click.option("--memory-mb", type=int, default=256, show_default=True)
-@click.option("--max-llm-calls", type=int, default=20, show_default=True)
-@click.option("--max-tokens", type=int, default=100_000, show_default=True)
+@click.option(
+    "--max-llm-calls",
+    type=int,
+    default=20,
+    show_default=True,
+    help="LLM call budget for scope/query/mediator; hosted cap is usually 100.",
+)
+@click.option(
+    "--max-tokens",
+    type=int,
+    default=100_000,
+    show_default=True,
+    help="Token budget for scope/query/mediator; hosted cap is usually 1000000.",
+)
 @click.option("--model", type=str, default=None, help="LLM model override.")
 @click.option("--provider", type=str, default=None, help="LLM provider override.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
@@ -708,7 +735,12 @@ def ask_room(
     fetch: bool,
     no_strict_attestation: bool,
 ):
-    """Ask a question through a room invite."""
+    """Ask a question through a room invite.
+
+    Defaults are tuned for short runs: --timeout 600, --max-llm-calls 20,
+    --max-tokens 100000. Dynamic scope/query/mediator rooms may need larger
+    budgets such as --timeout 900 --max-tokens 1000000 --max-llm-calls 60.
+    """
     if query_agent and agent_path:
         raise click.ClickException("use either --query-agent id or --agent path, not both")
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)

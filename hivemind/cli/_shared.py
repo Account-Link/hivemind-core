@@ -633,7 +633,7 @@ def _resolve_admin_service(service: str | None) -> str:
     else:
         # Fall back to the regular init config (admins often manage locally).
         try:
-            url = _load_config()["service"]
+            url = _load_config(check_trust=False)["service"]
         except SystemExit:
             url = _DEFAULT_SERVICE
     # Admin commands don't go through ``_require_trust``, so pin the

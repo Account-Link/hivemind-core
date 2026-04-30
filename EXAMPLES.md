@@ -29,8 +29,13 @@ hivemind room data room_...
 
 ```bash
 hivemind room inspect 'hmroom://...'
+hivemind room inspect 'hmroom://...' --json | jq '.room.manifest'
 hivemind room ask 'hmroom://...' "What changed this month?"
 ```
+
+`room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
+`--max-tokens 100000`, and `--memory-mb 256`. Use explicit larger budgets for
+dynamic scope/query/mediator rooms.
 
 With a participant-owned query agent:
 

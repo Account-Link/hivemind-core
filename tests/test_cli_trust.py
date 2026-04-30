@@ -13,6 +13,8 @@ from click.testing import CliRunner
 
 from hivemind import cli as _cli_mod
 from hivemind import trust as _trust
+from hivemind.cli import _trust as _cli_trust
+from hivemind.cli import admin as _admin_cli
 from hivemind.cli import rooms as _rooms_cli
 
 _ROOM_LINK = (
@@ -152,6 +154,70 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["payload"]["model"] == "kimi-k2-6"
     assert "room_id" not in captured["payload"]
     assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
+
+
+def test_room_help_documents_spec_and_budget_defaults():
+    runner = CliRunner()
+
+    inspect = runner.invoke(_cli_mod.cli, ["room", "inspect", "--help"])
+    assert inspect.exit_code == 0
+    assert "jq '.room.manifest'" in inspect.output
+
+    ask = runner.invoke(_cli_mod.cli, ["room", "ask", "--help"])
+    assert ask.exit_code == 0
+    assert "--timeout 600" in ask.output
+    assert "--max-llm-calls 20" in ask.output
+    assert "--max-tokens 100000" in ask.output
+    assert "hosted cap" in ask.output
+
+
+def test_admin_create_uses_admin_profile_without_trust_check(
+    _sandbox, monkeypatch
+):
+    """Admin commands use the admin key directly; they must not require
+    tenant-style attestation before sending the admin request."""
+
+    profiles_dir = _cli_mod._PROFILES_DIR
+    (profiles_dir / "admin.yaml").write_text(
+        "service: https://cvm.example\napi_key: admin-key\nrole: admin\n"
+    )
+    _cli_mod._ACTIVE_POINTER.write_text("admin\n")
+
+    def fail_trust(_config):
+        raise AssertionError("admin create should not call _require_trust")
+
+    monkeypatch.setattr(_cli_trust, "_require_trust", fail_trust)
+
+    captured: dict = {}
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "tenant_id": "t_liz",
+                "name": "liz",
+                "db_name": "tenant_liz",
+                "api_key": "hmk_liz",
+            }
+
+    def fake_hpost(url, **kwargs):
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers")
+        captured["json"] = kwargs.get("json")
+        return Resp()
+
+    monkeypatch.setattr(_admin_cli, "_hpost", fake_hpost)
+
+    result = CliRunner().invoke(
+        _cli_mod.cli,
+        ["admin", "tenants", "create", "liz"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == "https://cvm.example/v1/admin/tenants"
+    assert captured["headers"]["Authorization"] == "Bearer admin-key"
+    assert captured["json"] == {"name": "liz"}
 
 
 def test_trust_check_aborts_on_tofu_when_user_declines(_sandbox, monkeypatch):

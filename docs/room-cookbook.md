@@ -71,6 +71,14 @@ produce a per-question scope function under the signed room rules. Because
 query visibility is `inspectable`, prompts for room runs are stored in run
 history.
 
+Inspect the signed room spec:
+
+```bash
+ROOM='hmroom://...'
+hivemind room inspect "$ROOM"
+hivemind room inspect "$ROOM" --json | jq '.room.manifest'
+```
+
 Ask through the invite:
 
 ```bash
@@ -94,6 +102,12 @@ The copied room link can be shared as a shell variable:
 ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
 hivemind -y room ask "$ROOM" --provider openrouter --model anthropic/claude-sonnet-4.5 "..."
 ```
+
+`room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
+`--max-tokens 100000`, and `--memory-mb 256`. For the watch-history dynamic
+room, keep the explicit larger values above. The hosted Phala deployment also
+clamps requests server-side; current caps are 900s runtime, 100 LLM calls, and
+1000000 tokens.
 
 ## Participant Uploads Query Agent
 
