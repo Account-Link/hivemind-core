@@ -166,7 +166,7 @@ def test_room_ask_omits_room_id_from_path_scoped_run_body(
     assert captured["kwargs"]["submit_path"] == "/v1/rooms/room_test/runs"
 
 
-def test_room_ask_uses_named_profile_as_payer(_sandbox, monkeypatch):
+def test_room_ask_uses_named_profile_api_key_for_billing(_sandbox, monkeypatch):
     captured: dict = {}
     (_cli_mod._PROFILES_DIR / "default.yaml").write_text(
         "service: https://cvm.example\napi_key: hmk_default\n"
@@ -231,70 +231,6 @@ def test_room_ask_uses_named_profile_as_payer(_sandbox, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["headers"]["Authorization"] == "Bearer hmq_test"
     assert captured["headers"]["X-Hivemind-Payer-Key"] == "hmk_liz"
-
-
-@pytest.mark.parametrize(
-    "envvar",
-    ["HIVEMIND_PAYER_API_KEY", "HIVEMIND_PAYER_KEY", "X_HIVEMIND_PAYER_KEY"],
-)
-def test_room_ask_accepts_payer_key_env_aliases(_sandbox, monkeypatch, envvar):
-    captured: dict = {}
-    monkeypatch.setenv(envvar, "hmk_env")
-
-    monkeypatch.setattr(
-        _rooms_cli,
-        "_fetch_verified_room",
-        lambda *a, **kw: {
-            "room": {
-                "manifest_hash": "mh",
-                "manifest": {
-                    "trust": {
-                        "mode": "operator_updates",
-                        "allowed_composes": [],
-                    }
-                },
-            },
-            "attestation": {"attestation": {"compose_hash": "0xabc"}},
-        },
-    )
-    monkeypatch.setattr(_rooms_cli, "_enforce_room_trust", lambda data: None)
-    monkeypatch.setattr(
-        _rooms_cli,
-        "_hget",
-        lambda *a, **kw: type(
-            "Resp",
-            (),
-            {
-                "status_code": 200,
-                "json": lambda self: {
-                    "attestation": {
-                        "run_signer_pubkey_b64": "pub",
-                        "compose_hash": "0xabc",
-                    }
-                },
-            },
-        )(),
-    )
-
-    def fake_query_tracked(service, headers, payload, **kwargs):
-        captured["headers"] = headers
-
-    monkeypatch.setattr(_rooms_cli, "_query_tracked", fake_query_tracked)
-
-    result = CliRunner().invoke(
-        _cli_mod.cli,
-        [
-            "room",
-            "ask",
-            _ROOM_LINK,
-            "Show me top hashtags.",
-        ],
-        input="y\n",
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["headers"]["Authorization"] == "Bearer hmq_test"
-    assert captured["headers"]["X-Hivemind-Payer-Key"] == "hmk_env"
 
 
 def test_room_accept_records_manifest_before_ask(_sandbox, monkeypatch):
@@ -378,8 +314,8 @@ def test_room_ask_requires_billable_profile_for_invite_links(_sandbox):
     )
 
     assert result.exit_code != 0
-    assert "billed to the querying tenant" in result.output
-    assert "hivemind --profile NAME init --api-key hmk_" in result.output
+    assert "active tenant API key" in result.output
+    assert "hivemind --profile NAME init --service URL --api-key hmk_" in result.output
 
 
 def test_room_help_documents_spec_and_budget_defaults():

@@ -415,7 +415,7 @@ def test_room_query_token_requires_payer_header(room_env):
     )
 
     assert resp.status_code == 402
-    assert "X-Hivemind-Payer-Key" in resp.json()["detail"]
+    assert "tenant API key" in resp.json()["detail"]
 
 
 def test_room_vault_tool_applies_scope_function():

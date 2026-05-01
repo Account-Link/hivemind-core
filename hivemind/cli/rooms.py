@@ -51,38 +51,7 @@ def _parse_room_ref(
     return cfg["service"], ref.strip(), _headers(cfg), None
 
 
-def _payer_key_from_options(
-    payer_profile: str | None,
-    payer_api_key: str | None,
-) -> str | None:
-    if payer_profile and payer_api_key:
-        raise click.ClickException("use either --payer-profile or --payer-key")
-    if payer_api_key:
-        key = payer_api_key.strip()
-        if not key.startswith("hmk_"):
-            raise click.ClickException("--payer-key must be an hmk_ tenant key")
-        return key
-    if not payer_profile:
-        return None
-    path = _config_path(payer_profile)
-    if not path.exists():
-        raise click.ClickException(
-            f"payer profile '{payer_profile}' not found at {path}"
-        )
-    try:
-        with open(path) as f:
-            config = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise click.ClickException(f"corrupt payer profile {path}: {e}")
-    key = str(config.get("api_key") or "").strip()
-    if not key.startswith("hmk_"):
-        raise click.ClickException(
-            f"payer profile '{payer_profile}' does not contain an hmk_ api_key"
-        )
-    return key
-
-
-def _active_profile_payer_key() -> str | None:
+def _active_profile_api_key() -> str | None:
     path = _config_path()
     if not path.exists():
         return None
@@ -980,22 +949,6 @@ def trust_room(
 )
 @click.option("--model", type=str, default=None, help="LLM model override.")
 @click.option("--provider", type=str, default=None, help="LLM provider override.")
-@click.option(
-    "--payer-profile",
-    default=None,
-    help="Tenant profile to charge instead of the active hmk_ profile.",
-)
-@click.option(
-    "--payer-api-key",
-    "--payer-key",
-    envvar=[
-        "HIVEMIND_PAYER_API_KEY",
-        "HIVEMIND_PAYER_KEY",
-        "X_HIVEMIND_PAYER_KEY",
-    ],
-    default=None,
-    help="hmk_ tenant key to charge instead of the active profile.",
-)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 @click.option("--fetch", is_flag=True, help="Download visible artifacts.")
 @click.option(
@@ -1015,8 +968,6 @@ def ask_room(
     max_tokens: int,
     model: str | None,
     provider: str | None,
-    payer_profile: str | None,
-    payer_api_key: str | None,
     as_json: bool,
     fetch: bool,
     no_strict_attestation: bool,
@@ -1026,26 +977,24 @@ def ask_room(
     Defaults are tuned for short runs: --timeout 600, --max-llm-calls 20,
     --max-tokens 100000. Dynamic scope/query/mediator rooms may need larger
     budgets such as --timeout 900 --max-tokens 1000000 --max-llm-calls 60.
-    Invite-token room asks are billed to the active hmk_ tenant profile unless
-    --payer-profile or --payer-key is supplied.
+    Invite-token room asks are billed to the active hmk_ tenant profile.
     """
     if query_agent and agent_path:
         raise click.ClickException("use either --query-agent id or --agent path, not both")
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
-    payer_key = _payer_key_from_options(payer_profile, payer_api_key)
-    if not payer_key and owner_pubkey is not None:
-        payer_key = _active_profile_payer_key()
-        if not payer_key:
+    profile_api_key = None
+    if owner_pubkey is not None:
+        profile_api_key = _active_profile_api_key()
+        if not profile_api_key:
             raise click.ClickException(
-                "room invite asks are billed to the querying tenant. "
-                "Use an active tenant profile with an hmk_ api_key "
-                "(`hivemind --profile NAME init --api-key hmk_...` and "
-                "`hivemind profile use NAME`), or pass --payer-profile/"
-                "--payer-key."
+                "room invite asks require an active tenant API key. "
+                "Run `hivemind --profile NAME init --service URL "
+                "--api-key hmk_...`, then `hivemind profile use NAME`, "
+                "or pass `--profile NAME` before `room ask`."
             )
-    if payer_key:
+    if profile_api_key:
         headers = dict(headers)
-        headers["X-Hivemind-Payer-Key"] = payer_key
+        headers["X-Hivemind-Payer-Key"] = profile_api_key
     room_data = _fetch_verified_room(
         service,
         room_id,

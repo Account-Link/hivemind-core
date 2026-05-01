@@ -43,7 +43,8 @@ at 900s, LLM calls at 100, and tokens at 1000000.
 For invite-token room asks, the CLI bills the active `hmk_` tenant profile
 automatically. The room token still controls what data can be read; the active
 tenant credential controls whose credits pay for the scope/query/mediator run.
-Use `--payer-profile` or `--payer-key` only to charge a different tenant.
+To use a different tenant, switch profiles or pass `--profile NAME` before the
+command.
 
 Create a fixed-query room and share the printed invite:
 
@@ -248,10 +249,9 @@ For dynamic scope/query/mediator rooms, use larger explicit budgets when the
 scope agent needs to inspect, simulate, and verify the query agent.
 
 If the service has billing enabled, invite-token room asks are charged to the
-active `hmk_` tenant profile. Pass `--payer-profile <tenant-profile>` or set
-`HIVEMIND_PAYER_API_KEY=hmk_...` only when a different tenant should pay
-(`HIVEMIND_PAYER_KEY` and `X_HIVEMIND_PAYER_KEY` are accepted aliases). The
-data owner does not pay for participant queries unless the owner is the caller.
+active `hmk_` tenant profile. Use `hivemind profile use NAME` or pass
+`--profile NAME` before the command to choose which tenant API key pays. The data
+owner does not pay for participant queries unless the owner is the caller.
 
 ## Trust Policy
 

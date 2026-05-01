@@ -402,8 +402,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             }
         raise HTTPException(
             402,
-            "query-token runs require X-Hivemind-Payer-Key so usage can be "
-            "charged to the querying tenant",
+            "room invite queries require a tenant API key so usage can be "
+            "charged to the querying tenant. In the CLI, run "
+            "`hivemind --profile NAME init --service URL --api-key hmk_...` "
+            "and then retry with `hivemind --profile NAME room ask ...`.",
         )
 
     def _billing_provider_for_room(req_provider: str | None, room: dict | None) -> str:

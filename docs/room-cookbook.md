@@ -143,30 +143,25 @@ hivemind room ask 'hmroom://...' "What changed this month?" \
   --agent ./participant-query-agent
 ```
 
-## Billing And Payer Credentials
+## Billing And API Keys
 
 Room invite tokens (`hmq_...`) authorize access to one room, but they are not
 tenant billing credentials. When you query with the CLI, it attaches the
-active tenant profile's `hmk_` key as the payer automatically:
+active tenant profile's `hmk_` API key for billing automatically:
 
 ```bash
 hivemind profile use liz
 hivemind room ask "$ROOM" "What changed this month?"
 ```
 
-Use an explicit payer only when a different tenant should pay:
+Use a different profile when a different tenant should pay:
 
 ```bash
-hivemind room ask "$ROOM" --payer-profile liz-billing "What changed this month?"
-hivemind room ask "$ROOM" --payer-key hmk_... "What changed this month?"
-HIVEMIND_PAYER_API_KEY=hmk_... hivemind room ask "$ROOM" "What changed this month?"
+hivemind --profile liz-billing room ask "$ROOM" "What changed this month?"
 ```
 
-The payer key is sent as `X-Hivemind-Payer-Key`; it does not change the room
-authorization. Raw API clients using `hmq_` invite tokens must send the same
-header so the service knows which tenant to charge. The CLI also accepts
-`HIVEMIND_PAYER_KEY` and `X_HIVEMIND_PAYER_KEY` as aliases for
-`HIVEMIND_PAYER_API_KEY`. Admin billing commands:
+The active profile does not change room authorization; the `hmroom://...` invite
+still controls what data can be read. Admin billing commands:
 
 ```bash
 hivemind admin billing grant t_... 25.00 --note "initial credit"
