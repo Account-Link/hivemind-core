@@ -13,7 +13,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock LICENSE ./
+COPY pyproject.toml uv.lock LICENSE README.md ./
 RUN pip install --no-cache-dir --root-user-action=ignore "uv==0.9.2" \
     && uv export --quiet --frozen --format requirements-txt --no-dev --no-hashes \
         --no-emit-project --output-file /tmp/requirements.txt \
