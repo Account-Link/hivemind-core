@@ -288,12 +288,16 @@ jobs:
       #
       # Skipped on postgres-only deploys (hivemind-pg has its own
       # compose_hash but isn't gated by this contract).
-      - name: Install foundry (for cast)
+      - name: Install cast
         if: always() && github.event.inputs.target != 'postgres'
-        # foundry-rs/foundry-toolchain v1.8.0, resolved 2026-04-29.
-        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d
-        with:
-          version: stable
+        run: |
+          set -euo pipefail
+          # Avoid foundryup/foundry-toolchain here: both query the GitHub
+          # releases API and can fail with secondary-rate-limit 403s even
+          # after the CVM deploy has already succeeded. The npm binary package
+          # is just the prebuilt cast executable and is enough for approval.
+          npm install -g @foundry-rs/cast-linux-amd64@1.7.0
+          cast --version
 
       - name: Approve compose_hash on-chain
         if: always() && github.event.inputs.target != 'postgres'
