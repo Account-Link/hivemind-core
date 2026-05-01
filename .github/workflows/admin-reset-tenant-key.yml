@@ -78,10 +78,12 @@ jobs:
           set -euo pipefail
           cd ~/hivemind-core
 
-          echo "── fetch + checkout main ────────────────────────"
-          git fetch --prune origin
-          git checkout --detach origin/main
-          echo "HEAD: $(git rev-parse --short HEAD)"
+          echo "── fetch reset script from main ─────────────────"
+          git fetch --prune origin main
+          RESET_SCRIPT=$(mktemp)
+          trap 'rm -f "$RESET_SCRIPT"' EXIT
+          git show origin/main:scripts/admin_reset_tenant_key.py > "$RESET_SCRIPT"
+          echo "script HEAD: $(git rev-parse --short origin/main)"
 
           echo "── source proxy keys + base URL from .env ───────"
           set -a
@@ -128,7 +130,7 @@ jobs:
           HIVEMIND_BASE_URL="${BASE_URL}" \
           SQL_PROXY_KEY="${SQL_PROXY_KEY}" \
             uv run --with httpx --python 3.12 python \
-            scripts/admin_reset_tenant_key.py "${ARGS[@]}"
+            "$RESET_SCRIPT" "${ARGS[@]}"
           chmod 600 "$OUT_FILE"
           echo "new key stored on relay: $OUT_FILE"
           REMOTE
