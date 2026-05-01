@@ -128,8 +128,8 @@ def main() -> int:
             die(f"provision B: {r.status_code} {r.text}")
         b = r.json()
         key_a, key_b = a["api_key"], b["api_key"]
-        print(f"[smoke] A tenant_id={a.get('tenant_id')} key={key_a[:12]}...")
-        print(f"[smoke] B tenant_id={b.get('tenant_id')} key={key_b[:12]}...")
+        print(f"[smoke] A tenant_id={a.get('tenant_id')} key=<redacted>")
+        print(f"[smoke] B tenant_id={b.get('tenant_id')} key=<redacted>")
 
         try:
             # 2. A creates a table and inserts a row
