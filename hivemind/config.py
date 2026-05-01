@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # is opt-in so existing deployments can turn metering on before requiring
     # tenant balances.
     billing_enforce_credits: bool = False
+    # Public tenant signup. Disabled by default so an operator has to
+    # explicitly opt in before unauthenticated callers can mint hmk_ keys.
+    # When enabled, POST /v1/signup provisions a tenant with $0 balance.
+    # Credit codes are separate and can be redeemed after signup.
+    self_serve_signup_enabled: bool = False
 
     # Artifact retention — how long query-agent artifact uploads and run
     # output/error text are kept before the periodic sweeper purges them.

@@ -161,11 +161,23 @@ hivemind --profile liz-billing room ask "$ROOM" "What changed this month?"
 ```
 
 The active profile does not change room authorization; the `hmroom://...` invite
-still controls what data can be read. Admin billing commands:
+still controls what data can be read. On services with self-serve signup
+enabled, a participant can create their own payer profile:
 
 ```bash
+hivemind --profile liz signup liz --service https://hivemind.teleport.computer
+hivemind --profile liz redeem-credit 'hmcc_...'
+```
+
+Admin billing commands:
+
+```bash
+hivemind admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
+hivemind admin credit-codes list
 hivemind admin billing grant t_... 25.00 --note "initial credit"
+hivemind admin billing accounts
 hivemind admin billing balance t_...
+hivemind admin billing ledger
 hivemind admin billing prices
 ```
 

@@ -7,6 +7,59 @@ Use an owner key (`hmk_...`) to create rooms, upload room agents, add room data,
 and update room trust. Use an invite token from an `hmroom://` link to inspect,
 open, and run inside that room.
 
+## Signup And Billing
+
+### `POST /v1/signup`
+
+Disabled unless the operator sets `HIVEMIND_SELF_SERVE_SIGNUP_ENABLED=true`.
+Creates a tenant owner key with `$0.00` starting balance. Signup does not use
+credit codes; users redeem credit codes separately after signup.
+
+```json
+{
+  "name": "alice"
+}
+```
+
+Response includes the plaintext `hmk_...` key once:
+
+```json
+{
+  "tenant_id": "t_...",
+  "name": "alice",
+  "api_key": "hmk_...",
+  "starter_credit_micro_usd": 0,
+  "balance_micro_usd": 0
+}
+```
+
+### `GET /v1/billing`
+
+Owner-only. Returns the authenticated tenant's current balance and recent
+ledger entries.
+
+### `POST /v1/billing/credit-codes/redeem`
+
+Owner-only. Redeems an admin-minted credit code into an existing tenant.
+Credit codes are not signup codes and are never required to create the tenant.
+
+```json
+{
+  "credit_code": "hmcc_..."
+}
+```
+
+### Admin Billing
+
+`POST /v1/admin/credit-codes` creates a tracked credit code and returns the
+plaintext code once. `GET /v1/admin/credit-codes` lists code status without
+the plaintext code. `GET /v1/admin/billing` shows every tenant's current
+balance, total credited, and total spent. `GET /v1/admin/billing/ledger` shows
+recent ledger entries across tenants.
+
+Credit enforcement uses the existing `HIVEMIND_BILLING_ENFORCE_CREDITS=true`
+switch, so operators should configure model prices before enabling it.
+
 ## Rooms
 
 ### `POST /v1/rooms`

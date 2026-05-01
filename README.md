@@ -71,6 +71,34 @@ hivemind init --service https://hivemind.example --api-key hmk_...
 hivemind trust attest --reproduce
 ```
 
+If the hosted service has self-serve signup enabled, users can create their
+own tenant key with a `$0.00` starting balance. Admin-issued credit codes can
+be redeemed later when you want to add prepaid credit:
+
+```bash
+hivemind --profile alice signup alice --service https://hivemind.example
+hivemind redeem-credit 'hmcc_...'
+```
+
+Admins mint credit codes with tracked max uses and expiry:
+
+```bash
+hivemind admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
+hivemind admin credit-codes list
+hivemind admin billing accounts
+hivemind admin billing ledger
+```
+
+Operator switches:
+
+```bash
+HIVEMIND_SELF_SERVE_SIGNUP_ENABLED=true
+HIVEMIND_BILLING_ENFORCE_CREDITS=true
+```
+
+Credit codes are not signup codes: signup is open when enabled, and credit is
+added only through `hivemind redeem-credit` or the credit-code redemption API.
+
 For local development:
 
 ```bash
@@ -312,8 +340,16 @@ GET /v1/runs/{run_id}/artifacts/{filename}
 GET /v1/attestation
 
 Billing/admin
+POST /v1/signup
+GET  /v1/billing
+POST /v1/billing/credit-codes/redeem
+GET  /v1/admin/billing
+GET  /v1/admin/billing/ledger
 GET  /v1/admin/billing/{tenant_id}
 POST /v1/admin/billing/{tenant_id}/credits
+GET  /v1/admin/credit-codes
+POST /v1/admin/credit-codes
+POST /v1/admin/credit-codes/{code_id}/revoke
 GET  /v1/admin/billing/prices
 POST /v1/admin/billing/prices
 ```

@@ -85,6 +85,88 @@ def init(service: str, api_key: str):
         )
 
 
+@click.command()
+@click.argument("name")
+@click.option(
+    "--service",
+    default=_DEFAULT_SERVICE,
+    show_default=True,
+    help="Hivemind service URL",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def signup(name: str, service: str, as_json: bool):
+    """Create a self-serve tenant and save its API key to this profile."""
+    service = service.rstrip("/")
+    _warm_pin_from_trust(service)
+    payload = {"name": name}
+    try:
+        resp = _hpost(
+            f"{service}/v1/signup",
+            json=payload,
+            timeout=60,
+        )
+    except httpx.ConnectError:
+        click.echo(f"Error: Cannot reach {service}", err=True)
+        raise SystemExit(1)
+    except httpx.TimeoutException:
+        click.echo(f"Error: Connection timed out reaching {service}", err=True)
+        raise SystemExit(1)
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(1)
+
+    data = resp.json()
+    _save_config({"service": service, "api_key": data["api_key"], "role": "tenant"})
+    profile = _profile_name()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo(f"Initialized profile '{profile}' at {_config_path()}")
+    click.echo(f"Tenant: {data['tenant_id']} ({data['name']})")
+    click.echo(
+        f"Starter balance: {data.get('balance_micro_usd', 0) / 1_000_000:.2f} USD"
+    )
+    click.echo("")
+    click.echo("API key (saved locally; store it now if you need another copy):")
+    click.echo(f"  {data['api_key']}")
+
+
+@click.command("redeem-credit")
+@click.argument("credit_code")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
+def redeem_credit(credit_code: str, as_json: bool):
+    """Redeem an admin-issued credit code into the active tenant."""
+    config = _load_config()
+    service = config["service"]
+    headers = _headers(config)
+    if "Authorization" not in headers:
+        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        raise SystemExit(1)
+    try:
+        resp = _hpost(
+            f"{service}/v1/billing/credit-codes/redeem",
+            headers=headers,
+            json={"credit_code": credit_code},
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {_api_error(resp)}", err=True)
+        raise SystemExit(3)
+    data = resp.json()
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo(f"Redeemed credit code {data.get('code_id')}")
+    click.echo(f"Credit: {data.get('credit_micro_usd', 0) / 1_000_000:.2f} USD")
+    click.echo(f"Balance: {data.get('balance_micro_usd', 0) / 1_000_000:.2f} USD")
+
+
 @click.command("rotate-key")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout")
 @click.confirmation_option(

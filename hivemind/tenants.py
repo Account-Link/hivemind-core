@@ -24,12 +24,10 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
-import secrets
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Literal
 
 from .admin_proxy import make_admin
@@ -37,21 +35,53 @@ from .config import Settings
 from .core import Hivemind
 from .db import connect as _db_connect
 from .seal import TenantSealer
+from .tenant_billing import BillingRegistryMixin
+from .tenant_credit_codes import CreditCodeRegistryMixin
+from .tenant_keys import (
+    API_KEY_PREFIX as _API_KEY_PREFIX,
+    CREDIT_CODE_ID_PREFIX as _CREDIT_CODE_ID_PREFIX,
+    CREDIT_CODE_PREFIX as _CREDIT_CODE_PREFIX,
+    QUERY_TOKEN_PREFIX as _QUERY_TOKEN_PREFIX,
+    TENANT_ID_PREFIX as _TENANT_ID_PREFIX,
+    charge_for_tokens as _charge_for_tokens,
+    hash_api_key as _hash_api_key,
+    new_api_key as _new_api_key,
+    new_capability_token as _new_capability_token,
+    new_credit_code as _new_credit_code,
+    new_credit_code_id as _new_credit_code_id,
+    new_tenant_id as _new_tenant_id,
+    token_id as _token_id,
+    usd_per_mtok_to_micro as _usd_per_mtok_to_micro,
+    usd_to_micro_usd as _usd_to_micro_usd,
+    usd_to_micro_usd_nonnegative as _usd_to_micro_usd_nonnegative,
+)
 from .tenant_seal import ensure_unsealed
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "Caller",
+    "DuplicateTenantNameError",
+    "Role",
+    "TenantRegistry",
+    "_API_KEY_PREFIX",
+    "_CREDIT_CODE_ID_PREFIX",
+    "_CREDIT_CODE_PREFIX",
+    "_QUERY_TOKEN_PREFIX",
+    "_TENANT_ID_PREFIX",
+    "_charge_for_tokens",
+    "_hash_api_key",
+    "_new_api_key",
+    "_new_capability_token",
+    "_new_credit_code",
+    "_new_credit_code_id",
+    "_new_tenant_id",
+    "_token_id",
+    "_usd_per_mtok_to_micro",
+    "_usd_to_micro_usd",
+    "_usd_to_micro_usd_nonnegative",
+]
 
-_TENANT_ID_PREFIX = "t_"
-_API_KEY_PREFIX = "hmk_"
-
-# Capability-token prefix. Owner tokens stay on hmk_ for backward compat;
-# the prefix lets the resolver pick the right table without trying both
-# lookups on every request.
-_QUERY_TOKEN_PREFIX = "hmq_"  # query-only: submit prompts via the active scope agent
-
-_MICRO_USD = Decimal("1000000")
-_TOKENS_PER_MTOK = 1_000_000
 
 # Initial pricing snapshots. Operators can override these in the control DB.
 # Values are micro-USD per million tokens, derived from OpenRouter's public
@@ -111,70 +141,6 @@ class Caller:
     sealed: bool = False  # capability-token landed on a cold-cache tenant
 
 
-def _new_tenant_id() -> str:
-    return _TENANT_ID_PREFIX + secrets.token_hex(6)
-
-
-def _new_api_key() -> str:
-    return _API_KEY_PREFIX + secrets.token_urlsafe(32)
-
-
-def _new_capability_token(prefix: str) -> str:
-    """Mint a fresh capability token with the given prefix (hmq_)."""
-    return prefix + secrets.token_urlsafe(32)
-
-
-def _hash_api_key(key: str) -> str:
-    # SHA-256 is fine here — the key has >=256 bits of entropy, so brute
-    # force is infeasible even without slow hashing. Return hex so the
-    # value survives JSON serialization across the sql-proxy boundary.
-    return hashlib.sha256(key.encode()).hexdigest()
-
-
-def _token_id(token_hash_hex: str) -> str:
-    """Short, user-visible id for a capability token (first 12 hex chars
-    of its sha256). Stable, collision-resistant for in-tenant listings,
-    and never reveals the token itself."""
-    return token_hash_hex[:12]
-
-
-def _usd_to_micro_usd(value: Any) -> int:
-    try:
-        dec = Decimal(str(value))
-    except (InvalidOperation, ValueError) as e:
-        raise ValueError(f"invalid USD amount: {value!r}") from e
-    if dec <= 0:
-        raise ValueError("USD amount must be positive")
-    return int((dec * _MICRO_USD).to_integral_value(rounding=ROUND_HALF_UP))
-
-
-def _usd_per_mtok_to_micro(value: Any) -> int:
-    try:
-        dec = Decimal(str(value))
-    except (InvalidOperation, ValueError) as e:
-        raise ValueError(f"invalid price amount: {value!r}") from e
-    if dec < 0:
-        raise ValueError("price must be non-negative")
-    return int((dec * _MICRO_USD).to_integral_value(rounding=ROUND_HALF_UP))
-
-
-def _charge_for_tokens(
-    prompt_tokens: int,
-    completion_tokens: int,
-    prompt_microusd_per_mtok: int,
-    completion_microusd_per_mtok: int,
-) -> int:
-    prompt = max(0, int(prompt_tokens or 0))
-    completion = max(0, int(completion_tokens or 0))
-    numerator = (
-        prompt * max(0, int(prompt_microusd_per_mtok or 0))
-        + completion * max(0, int(completion_microusd_per_mtok or 0))
-    )
-    if numerator <= 0:
-        return 0
-    return (numerator + _TOKENS_PER_MTOK - 1) // _TOKENS_PER_MTOK
-
-
 def _is_missing_database_error(exc: Exception, db_name: str) -> bool:
     """Return true only for a missing database, not any missing object.
 
@@ -196,7 +162,7 @@ def _is_missing_database_error(exc: Exception, db_name: str) -> bool:
     )
 
 
-class TenantRegistry:
+class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
     """Bearer-token → Hivemind resolver with LRU cache."""
 
     def __init__(self, settings: Settings):
@@ -388,6 +354,46 @@ class TenantRegistry:
             "CREATE INDEX IF NOT EXISTS _billing_ledger_tenant_idx "
             "ON _billing_ledger (tenant_id, created_at DESC)"
         )
+        # Admin-minted credit codes. Plaintext codes are returned once
+        # during creation; the control DB stores only a hash. A code can be
+        # redeemed by an existing tenant until max_redemptions is reached,
+        # it expires, or the admin revokes it.
+        self._control_db.execute_commit(
+            """
+            CREATE TABLE IF NOT EXISTS _credit_codes (
+                code_id        TEXT PRIMARY KEY,
+                code_hash        TEXT NOT NULL UNIQUE,
+                label            TEXT NOT NULL DEFAULT '',
+                credit_micro_usd BIGINT NOT NULL DEFAULT 0,
+                max_redemptions  INTEGER NOT NULL DEFAULT 1,
+                redeemed_count   INTEGER NOT NULL DEFAULT 0,
+                created_at       DOUBLE PRECISION NOT NULL,
+                expires_at       DOUBLE PRECISION,
+                revoked_at       DOUBLE PRECISION
+            )
+            """
+        )
+        self._control_db.execute_commit(
+            "CREATE INDEX IF NOT EXISTS _credit_codes_created_idx "
+            "ON _credit_codes (created_at DESC)"
+        )
+        self._control_db.execute_commit(
+            """
+            CREATE TABLE IF NOT EXISTS _credit_code_redemptions (
+                redemption_id TEXT PRIMARY KEY,
+                code_id     TEXT NOT NULL REFERENCES _credit_codes(code_id)
+                              ON DELETE CASCADE,
+                tenant_id     TEXT NOT NULL REFERENCES _tenants(id)
+                              ON DELETE CASCADE,
+                redeemed_at   DOUBLE PRECISION NOT NULL,
+                UNIQUE (code_id, tenant_id)
+            )
+            """
+        )
+        self._control_db.execute_commit(
+            "CREATE INDEX IF NOT EXISTS _credit_code_redemptions_tenant_idx "
+            "ON _credit_code_redemptions (tenant_id, redeemed_at DESC)"
+        )
         self._control_db.execute_commit(
             """
             CREATE TABLE IF NOT EXISTS _billing_model_prices (
@@ -477,348 +483,6 @@ class TenantRegistry:
             [time.time(), tenant_id, pin_id],
         )
         return bool(rowcount)
-
-    # ── Billing operations ──────────────────────────────────────────
-
-    def resolve_payer_key(self, api_key: str) -> dict | None:
-        """Resolve an ``hmk_`` key for payer attribution without thawing.
-
-        This deliberately does not return a Hivemind instance and does not
-        touch tenant seals. It only proves that the query caller also controls
-        the payer tenant's owner key.
-        """
-        if not api_key or not api_key.startswith(_API_KEY_PREFIX):
-            return None
-        api_key_hash = _hash_api_key(api_key)
-        rows = self._control_db.execute(
-            "SELECT id, suspended FROM _tenants WHERE api_key_hash = %s",
-            [api_key_hash],
-        )
-        if not rows or rows[0]["suspended"]:
-            return None
-        return {
-            "tenant_id": rows[0]["id"],
-            "payer_token_id": _token_id(api_key_hash),
-        }
-
-    def billing_balance_micro_usd(self, tenant_id: str) -> int:
-        rows = self._control_db.execute(
-            "SELECT COALESCE(SUM(amount_micro_usd), 0) AS balance "
-            "FROM _billing_ledger WHERE tenant_id = %s",
-            [tenant_id],
-        )
-        return int(rows[0]["balance"] or 0) if rows else 0
-
-    def billing_account(self, tenant_id: str, *, limit: int = 25) -> dict:
-        tenant = self.get_by_id(tenant_id)
-        if tenant is None:
-            raise KeyError(f"tenant '{tenant_id}' not found")
-        return {
-            "tenant_id": tenant_id,
-            "balance_micro_usd": self.billing_balance_micro_usd(tenant_id),
-            "ledger": self.billing_ledger(tenant_id, limit=limit),
-        }
-
-    def billing_ledger(self, tenant_id: str, *, limit: int = 50) -> list[dict]:
-        rows = self._control_db.execute(
-            "SELECT entry_id, tenant_id, created_at, kind, run_id, "
-            "amount_micro_usd, metadata FROM _billing_ledger "
-            "WHERE tenant_id = %s ORDER BY created_at DESC LIMIT %s",
-            [tenant_id, min(max(1, int(limit)), 500)],
-        )
-        out: list[dict] = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["metadata"] = (
-                    _json.loads(item.get("metadata") or "{}")
-                )
-            except (TypeError, ValueError):
-                item["metadata"] = {}
-            out.append(item)
-        return out
-
-    def billing_grant_credit(
-        self,
-        tenant_id: str,
-        amount_usd: Any,
-        *,
-        note: str = "",
-        actor: str = "admin",
-    ) -> dict:
-        rows = self._control_db.execute(
-            "SELECT id FROM _tenants WHERE id = %s", [tenant_id]
-        )
-        if not rows:
-            raise KeyError(f"tenant '{tenant_id}' not found")
-        amount = _usd_to_micro_usd(amount_usd)
-        entry = self._insert_billing_entry(
-            tenant_id,
-            kind="credit_grant",
-            amount_micro_usd=amount,
-            metadata={"note": note, "actor": actor},
-        )
-        entry["balance_micro_usd"] = self.billing_balance_micro_usd(tenant_id)
-        return entry
-
-    def billing_list_prices(self) -> list[dict]:
-        rows = self._control_db.execute(
-            "SELECT provider, model, prompt_microusd_per_mtok, "
-            "completion_microusd_per_mtok, updated_at, source "
-            "FROM _billing_model_prices ORDER BY provider, model"
-        )
-        return [dict(r) for r in rows]
-
-    def billing_set_price(
-        self,
-        provider: str,
-        model: str,
-        *,
-        prompt_usd_per_million: Any,
-        completion_usd_per_million: Any,
-        source: str = "admin",
-    ) -> dict:
-        provider = (provider or "").strip().lower()
-        model = (model or "").strip()
-        if not provider or not model:
-            raise ValueError("provider and model are required")
-        prompt_price = _usd_per_mtok_to_micro(prompt_usd_per_million)
-        completion_price = _usd_per_mtok_to_micro(completion_usd_per_million)
-        now = time.time()
-        self._control_db.execute_commit(
-            "INSERT INTO _billing_model_prices "
-            "(provider, model, prompt_microusd_per_mtok, "
-            "completion_microusd_per_mtok, updated_at, source) "
-            "VALUES (%s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (provider, model) DO UPDATE SET "
-            "prompt_microusd_per_mtok = EXCLUDED.prompt_microusd_per_mtok, "
-            "completion_microusd_per_mtok = "
-            "EXCLUDED.completion_microusd_per_mtok, "
-            "updated_at = EXCLUDED.updated_at, source = EXCLUDED.source",
-            [provider, model, prompt_price, completion_price, now, source],
-        )
-        return {
-            "provider": provider,
-            "model": model,
-            "prompt_microusd_per_mtok": prompt_price,
-            "completion_microusd_per_mtok": completion_price,
-            "updated_at": now,
-            "source": source,
-        }
-
-    def billing_get_price(self, provider: str, model: str) -> dict | None:
-        provider = (provider or "").strip().lower()
-        model = (model or "").strip()
-        if not provider or not model:
-            return None
-        rows = self._control_db.execute(
-            "SELECT provider, model, prompt_microusd_per_mtok, "
-            "completion_microusd_per_mtok, updated_at, source "
-            "FROM _billing_model_prices WHERE provider = %s AND model = %s",
-            [provider, model],
-        )
-        return dict(rows[0]) if rows else None
-
-    def billing_hold_for_run(
-        self,
-        *,
-        tenant_id: str | None,
-        payer_token_id: str | None,
-        run_id: str,
-        provider: str | None,
-        models: list[str],
-        max_tokens: int,
-        billable_role: str,
-        enforce: bool,
-    ) -> dict:
-        """Create a preflight hold for the maximum requested token budget."""
-        if not tenant_id:
-            return {"hold_micro_usd": 0, "status": "unbilled"}
-        provider_key = (provider or "").strip().lower()
-        clean_models = [m.strip() for m in models if str(m).strip()]
-        if not provider_key or not clean_models or max_tokens <= 0:
-            return {"hold_micro_usd": 0, "status": "not_billable"}
-
-        missing: list[str] = []
-        max_rate = 0
-        for model in clean_models:
-            price = self.billing_get_price(provider_key, model)
-            if not price:
-                missing.append(model)
-                continue
-            max_rate = max(
-                max_rate,
-                int(price["prompt_microusd_per_mtok"] or 0),
-                int(price["completion_microusd_per_mtok"] or 0),
-            )
-        if missing:
-            if enforce:
-                raise ValueError(
-                    "billing price is not configured for "
-                    + ", ".join(f"{provider_key}/{m}" for m in missing)
-                )
-            return {
-                "hold_micro_usd": 0,
-                "status": "pricing_missing",
-                "missing_prices": missing,
-            }
-        hold = _charge_for_tokens(max_tokens, 0, max_rate, 0)
-        if hold <= 0:
-            return {"hold_micro_usd": 0, "status": "not_billable"}
-        balance = self.billing_balance_micro_usd(tenant_id)
-        if enforce and balance < hold:
-            raise ValueError(
-                "insufficient billing credit: "
-                f"balance_micro_usd={balance}, required_hold_micro_usd={hold}"
-            )
-        self._insert_billing_entry(
-            tenant_id,
-            kind="usage_hold",
-            run_id=run_id,
-            amount_micro_usd=-hold,
-            metadata={
-                "payer_token_id": payer_token_id or "",
-                "provider": provider_key,
-                "models": clean_models,
-                "max_tokens": int(max_tokens),
-                "billable_role": billable_role,
-            },
-        )
-        return {"hold_micro_usd": hold, "status": "held"}
-
-    def settle_run(
-        self,
-        *,
-        payer_tenant_id: str | None,
-        payer_token_id: str | None,
-        run_id: str,
-        usage: dict,
-        hold_micro_usd: int = 0,
-        billable_role: str = "query",
-        default_provider: str | None = None,
-        default_model: str | None = None,
-    ) -> dict:
-        """Release any hold and charge exact metered usage for a run."""
-        now = time.time()
-        if not payer_tenant_id:
-            return {
-                "billing_status": "unbilled",
-                "cost_micro_usd": 0,
-                "settled_at": now,
-            }
-        cost, missing = self._cost_for_usage(
-            usage,
-            default_provider=default_provider,
-            default_model=default_model,
-        )
-        hold = max(0, int(hold_micro_usd or 0))
-        metadata = {
-            "payer_token_id": payer_token_id or "",
-            "billable_role": billable_role,
-            "usage": usage,
-            "missing_prices": missing,
-        }
-        if hold:
-            self._insert_billing_entry(
-                payer_tenant_id,
-                kind="usage_release",
-                run_id=run_id,
-                amount_micro_usd=hold,
-                metadata=metadata,
-            )
-        if cost:
-            self._insert_billing_entry(
-                payer_tenant_id,
-                kind="usage_charge",
-                run_id=run_id,
-                amount_micro_usd=-cost,
-                metadata=metadata,
-            )
-        status = "settled" if not missing else "pricing_missing"
-        return {
-            "billing_status": status,
-            "cost_micro_usd": cost,
-            "settled_at": now,
-            "missing_prices": missing,
-        }
-
-    def _insert_billing_entry(
-        self,
-        tenant_id: str,
-        *,
-        kind: str,
-        amount_micro_usd: int,
-        run_id: str | None = None,
-        metadata: dict | None = None,
-    ) -> dict:
-        entry_id = "ble_" + secrets.token_hex(12)
-        now = time.time()
-        metadata_json = _json.dumps(
-            metadata or {}, sort_keys=True, separators=(",", ":")
-        )
-        self._control_db.execute_commit(
-            "INSERT INTO _billing_ledger "
-            "(entry_id, tenant_id, created_at, kind, run_id, "
-            "amount_micro_usd, metadata) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            [
-                entry_id,
-                tenant_id,
-                now,
-                kind,
-                run_id,
-                int(amount_micro_usd),
-                metadata_json,
-            ],
-        )
-        return {
-            "entry_id": entry_id,
-            "tenant_id": tenant_id,
-            "created_at": now,
-            "kind": kind,
-            "run_id": run_id,
-            "amount_micro_usd": int(amount_micro_usd),
-            "metadata": metadata or {},
-        }
-
-    def _cost_for_usage(
-        self,
-        usage: dict,
-        *,
-        default_provider: str | None,
-        default_model: str | None,
-    ) -> tuple[int, list[str]]:
-        stages = usage.get("stages") if isinstance(usage, dict) else None
-        items: list[dict]
-        if isinstance(stages, dict) and stages:
-            items = [
-                v for v in stages.values()
-                if isinstance(v, dict)
-            ]
-        else:
-            items = [usage] if isinstance(usage, dict) else []
-        total = 0
-        missing: list[str] = []
-        for item in items:
-            provider = (item.get("provider") or default_provider or "").strip().lower()
-            model = (item.get("model") or default_model or "").strip()
-            prompt = int(item.get("prompt_tokens") or 0)
-            completion = int(item.get("completion_tokens") or 0)
-            if not provider or not model or (prompt + completion) <= 0:
-                continue
-            price = self.billing_get_price(provider, model)
-            if not price:
-                key = f"{provider}/{model}"
-                if key not in missing:
-                    missing.append(key)
-                continue
-            total += _charge_for_tokens(
-                prompt,
-                completion,
-                int(price["prompt_microusd_per_mtok"] or 0),
-                int(price["completion_microusd_per_mtok"] or 0),
-            )
-        return total, missing
 
     # ── Capability-token operations ─────────────────────────────────
 

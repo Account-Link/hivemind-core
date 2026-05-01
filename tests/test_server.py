@@ -81,6 +81,55 @@ async def server_env(test_dsn):
             _drop_db(test_dsn, db_name)
 
 
+async def _self_serve_test_env(test_dsn, **settings_overrides):
+    control_db = _unique_db("hm_selfserve")
+    settings_kwargs = dict(
+        database_url=test_dsn,
+        control_database=control_db,
+        admin_key="admin-test-key",
+        sql_proxy_admin_key="",
+        autoload_default_agents=False,
+        artifact_sweep_interval_seconds=9999,
+        self_serve_signup_enabled=True,
+    )
+    settings_kwargs.update(settings_overrides)
+    settings = Settings(**settings_kwargs)
+
+    registry = TenantRegistry(settings)
+    created_dbs = [control_db]
+
+    app = create_app(settings)
+    app.state.registry = registry
+    app.state.background_tasks = set()
+    transport = httpx.ASGITransport(app=app)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            yield client, registry
+    finally:
+        try:
+            for tenant in registry.list_tenants():
+                created_dbs.append(tenant["db_name"])
+        except Exception:
+            pass
+        try:
+            registry.close()
+        except Exception:
+            pass
+        for db_name in created_dbs:
+            _drop_db(test_dsn, db_name)
+
+
+@pytest_asyncio.fixture
+async def self_serve_env(test_dsn):
+    """FastAPI client with public signup enabled and no free credit."""
+    async for env in _self_serve_test_env(test_dsn):
+        yield env
+
+
 class TestHealth:
     @pytest.mark.asyncio
     async def test_health_returns_200(self, server_env):
@@ -155,6 +204,174 @@ class TestAdminTenants:
 
         assert resp.status_code == 409
         assert "already exists" in resp.json()["detail"]
+
+
+class TestSelfServeSignup:
+    @pytest.mark.asyncio
+    async def test_signup_disabled_by_default(self, server_env):
+        client, _api_key = server_env
+        resp = await client.post("/v1/signup", json={"name": "new-user"})
+
+        assert resp.status_code == 503
+        assert "disabled" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_signup_creates_tenant_without_free_credit_by_default(
+        self,
+        self_serve_env,
+    ):
+        client, registry = self_serve_env
+
+        resp = await client.post("/v1/signup", json={"name": "alice"})
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["tenant_id"].startswith("t_")
+        assert data["name"] == "alice"
+        assert data["api_key"].startswith("hmk_")
+        assert "db_name" not in data
+        assert data["starter_credit_micro_usd"] == 0
+        assert data["balance_micro_usd"] == 0
+        assert registry.resolve(data["api_key"]) is not None
+
+        billing = await client.get(
+            "/v1/billing",
+            headers=_owner_headers(data["api_key"]),
+        )
+        assert billing.status_code == 200, billing.text
+        account = billing.json()
+        assert account["tenant_id"] == data["tenant_id"]
+        assert account["balance_micro_usd"] == 0
+        assert account["ledger"] == []
+
+        with_code = await client.post(
+            "/v1/signup",
+            json={"name": "bob", "credit_code": "hmcc_unused"},
+        )
+        assert with_code.status_code == 400
+        assert "after signup" in with_code.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_credit_code_recharges_existing_self_serve_user(
+        self,
+        self_serve_env,
+    ):
+        client, registry = self_serve_env
+
+        signup = await client.post("/v1/signup", json={"name": "alice"})
+        assert signup.status_code == 200, signup.text
+        data = signup.json()
+        assert data["balance_micro_usd"] == 0
+
+        create = await client.post(
+            "/v1/admin/credit-codes",
+            headers={"Authorization": "Bearer admin-test-key"},
+            json={
+                "credit_usd": "3.00",
+                "max_redemptions": 1,
+                "label": "starter",
+            },
+        )
+        assert create.status_code == 200, create.text
+        code = create.json()
+        assert code["code"].startswith("hmcc_")
+        assert registry.resolve(data["api_key"]) is not None
+
+        wrong = await client.post(
+            "/v1/billing/credit-codes/redeem",
+            headers=_owner_headers(data["api_key"]),
+            json={"credit_code": "wrong"},
+        )
+        assert wrong.status_code == 403
+
+        first_redeem = await client.post(
+            "/v1/billing/credit-codes/redeem",
+            headers=_owner_headers(data["api_key"]),
+            json={"credit_code": code["code"]},
+        )
+        assert first_redeem.status_code == 200, first_redeem.text
+        assert first_redeem.json()["credit_micro_usd"] == 3_000_000
+        assert first_redeem.json()["balance_micro_usd"] == 3_000_000
+
+        exhausted = await client.post(
+            "/v1/billing/credit-codes/redeem",
+            headers=_owner_headers(data["api_key"]),
+            json={"credit_code": code["code"]},
+        )
+        assert exhausted.status_code == 403
+
+        billing = await client.get(
+            "/v1/billing",
+            headers=_owner_headers(data["api_key"]),
+        )
+        assert billing.status_code == 200, billing.text
+        account = billing.json()
+        assert account["ledger"][0]["kind"] == "credit_grant"
+        assert account["ledger"][0]["metadata"]["actor"] == "credit_code"
+        assert account["ledger"][0]["metadata"]["code_id"] == code["code_id"]
+
+        recharge_create = await client.post(
+            "/v1/admin/credit-codes",
+            headers={"Authorization": "Bearer admin-test-key"},
+            json={
+                "credit_usd": "2.00",
+                "max_redemptions": 1,
+                "label": "recharge",
+            },
+        )
+        assert recharge_create.status_code == 200, recharge_create.text
+        recharge = await client.post(
+            "/v1/billing/credit-codes/redeem",
+            headers=_owner_headers(data["api_key"]),
+            json={"credit_code": recharge_create.json()["code"]},
+        )
+        assert recharge.status_code == 200, recharge.text
+        assert recharge.json()["credit_micro_usd"] == 2_000_000
+        assert recharge.json()["balance_micro_usd"] == 5_000_000
+
+        accounts = await client.get(
+            "/v1/admin/billing",
+            headers={"Authorization": "Bearer admin-test-key"},
+        )
+        assert accounts.status_code == 200, accounts.text
+        summary = accounts.json()["accounts"][0]
+        assert summary["tenant_id"] == data["tenant_id"]
+        assert summary["balance_micro_usd"] == 5_000_000
+        assert summary["total_credit_micro_usd"] == 5_000_000
+        assert summary["total_spent_micro_usd"] == 0
+
+        ledger = await client.get(
+            "/v1/admin/billing/ledger",
+            headers={"Authorization": "Bearer admin-test-key"},
+        )
+        assert ledger.status_code == 200, ledger.text
+        assert len(ledger.json()["ledger"]) == 2
+
+        codes = await client.get(
+            "/v1/admin/credit-codes",
+            headers={"Authorization": "Bearer admin-test-key"},
+        )
+        assert codes.status_code == 200, codes.text
+        assert "code" not in codes.json()["credit_codes"][0]
+
+    @pytest.mark.asyncio
+    async def test_signup_allows_duplicate_display_names(self, self_serve_env):
+        client, _registry = self_serve_env
+
+        first = await client.post("/v1/signup", json={"name": "same-name"})
+        second = await client.post("/v1/signup", json={"name": "same-name"})
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert first.json()["tenant_id"] != second.json()["tenant_id"]
+
+    @pytest.mark.asyncio
+    async def test_owner_billing_requires_auth(self, self_serve_env):
+        client, _registry = self_serve_env
+
+        resp = await client.get("/v1/billing")
+
+        assert resp.status_code == 401
 
 
 class TestAdminBilling:
