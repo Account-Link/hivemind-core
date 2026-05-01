@@ -64,6 +64,21 @@ def _active_profile_api_key() -> str | None:
     return key if key.startswith("hmk_") else None
 
 
+def _thaw_active_profile_tenant(service: str) -> bool:
+    api_key = _active_profile_api_key()
+    if not api_key:
+        return False
+    try:
+        resp = _hget(
+            f"{service.rstrip('/')}/v1/health",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30,
+        )
+    except httpx.HTTPError:
+        return False
+    return resp.status_code < 400
+
+
 def _fetch_verified_room(
     service: str,
     room_id: str,
@@ -82,7 +97,21 @@ def _fetch_verified_room(
         timeout=30,
     )
     if resp.status_code >= 400:
-        raise click.ClickException(f"{resp.status_code}: {_api_error(resp)}")
+        detail = _api_error(resp)
+        if (
+            owner_pubkey_b64
+            and resp.status_code == 503
+            and "Tenant is sealed" in detail
+            and _thaw_active_profile_tenant(service)
+        ):
+            resp = _hget(
+                f"{service}/v1/rooms/{room_id}/attest",
+                headers=headers,
+                timeout=30,
+            )
+            detail = _api_error(resp) if resp.status_code >= 400 else ""
+        if resp.status_code >= 400:
+            raise click.ClickException(f"{resp.status_code}: {detail}")
     data = resp.json()
     envelope = ((data.get("room") or {}).get("envelope") or {})
     ok, reason = verify_room_envelope(

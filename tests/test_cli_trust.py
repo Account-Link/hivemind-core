@@ -233,6 +233,91 @@ def test_room_ask_uses_named_profile_api_key_for_billing(_sandbox, monkeypatch):
     assert captured["headers"]["X-Hivemind-Api-Key"] == "hmk_liz"
 
 
+def test_room_inspect_thaws_active_profile_when_room_tenant_is_sealed(
+    _sandbox, monkeypatch
+):
+    (_cli_mod._PROFILES_DIR / "default.yaml").write_text(
+        "service: https://cvm.example\napi_key: hmk_test\n"
+    )
+    _trust.record_approval("https://cvm.example", "0xabc", app_id="appid")
+    _stub_attestation(
+        monkeypatch,
+        {"ready": True, "attestation": {
+            "compose_hash": "0xabc", "app_id": "appid",
+        }},
+    )
+    monkeypatch.setattr(
+        _rooms_cli,
+        "verify_room_envelope",
+        lambda *a, **kw: (True, ""),
+    )
+
+    class Resp:
+        def __init__(self, status_code: int, payload: dict):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    room_attestation = {
+        "room": {
+            "manifest_hash": "mh",
+            "envelope": {},
+            "manifest": {
+                "room_id": "room_test",
+                "name": "test room",
+                "scope": {
+                    "agent_id": "scope_123",
+                    "visibility": "inspectable",
+                },
+                "query": {
+                    "mode": "fixed",
+                    "agent_id": "query_123",
+                    "visibility": "inspectable",
+                },
+                "mediator": {},
+                "output": {"visibility": "querier_only"},
+                "egress": {"llm_providers": ["openrouter"]},
+                "trust": {
+                    "mode": "operator_updates",
+                    "allowed_composes": [],
+                },
+            },
+        },
+        "attestation": {"attestation": {"compose_hash": "0xabc"}},
+    }
+    calls: list[tuple[str, dict]] = []
+    sealed_once = {"done": False}
+
+    def fake_hget(url, **kwargs):
+        calls.append((url, kwargs.get("headers") or {}))
+        if url == "https://cvm.example/v1/health":
+            return Resp(200, {"status": "ok"})
+        if url == "https://cvm.example/v1/rooms/room_test/attest":
+            if not sealed_once["done"]:
+                sealed_once["done"] = True
+                return Resp(503, {"detail": "Tenant is sealed: restart"})
+            return Resp(200, room_attestation)
+        raise AssertionError(f"unexpected URL {url}")
+
+    monkeypatch.setattr(_rooms_cli, "_hget", fake_hget)
+
+    result = CliRunner().invoke(_cli_mod.cli, ["room", "inspect", _ROOM_LINK])
+
+    assert result.exit_code == 0, result.output
+    assert [url for url, _headers in calls] == [
+        "https://cvm.example/v1/rooms/room_test/attest",
+        "https://cvm.example/v1/health",
+        "https://cvm.example/v1/rooms/room_test/attest",
+    ]
+    assert calls[0][1]["Authorization"] == "Bearer hmq_test"
+    assert calls[1][1]["Authorization"] == "Bearer hmk_test"
+    assert calls[2][1]["Authorization"] == "Bearer hmq_test"
+    assert "Sig:    verified" in result.output
+
+
 def test_room_accept_records_manifest_before_ask(_sandbox, monkeypatch):
     captured: dict = {}
     (_cli_mod._PROFILES_DIR / "default.yaml").write_text(
