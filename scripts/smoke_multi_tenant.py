@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Multi-tenant isolation smoke test against a live hivemind-core.
 
-Creates two tenants via the admin API, writes into tenant A's DB,
-verifies tenant B cannot see A's data (different row count and/or
-unseen tables), and cleans both tenants up.
+Creates two tenants via the admin API, verifies credit-code redemption, writes
+into tenant A's DB through the hidden maintenance store primitive, verifies
+tenant B cannot see A's data (different row count and/or unseen tables), and
+cleans both tenants up.
 
 Exits 0 on full isolation, non-zero with a diagnostic summary otherwise.
 
@@ -28,6 +29,9 @@ import uuid
 from urllib.parse import urlparse
 
 import httpx
+
+
+STORE_PATH = "/v1/_internal/store"
 
 
 def _hostname(url: str | None) -> str:
@@ -80,6 +84,10 @@ def die(msg: str, code: int = 1) -> None:
 
 def _post(c: httpx.Client, path: str, *, key: str, json: dict) -> httpx.Response:
     return c.post(path, headers={"Authorization": f"Bearer {key}"}, json=json)
+
+
+def _get(c: httpx.Client, path: str, *, key: str) -> httpx.Response:
+    return c.get(path, headers={"Authorization": f"Bearer {key}"})
 
 
 def _delete(c: httpx.Client, path: str, *, key: str) -> httpx.Response:
@@ -144,30 +152,62 @@ def main() -> int:
         print(f"[smoke] B tenant_id={b.get('tenant_id')} key=<redacted>")
 
         try:
+            # 2. Admin mints a credit code and tenant A redeems it.
+            r = _post(
+                c,
+                "/v1/admin/credit-codes",
+                key=admin,
+                json={
+                    "credit_usd": "0.01",
+                    "max_redemptions": 1,
+                    "label": f"smoke-{tag}",
+                },
+            )
+            if r.status_code != 200:
+                die(f"credit code create: {r.status_code} {r.text}")
+            credit_code = r.json()["code"]
+            r = _post(
+                c,
+                "/v1/billing/credit-codes/redeem",
+                key=key_a,
+                json={"credit_code": credit_code},
+            )
+            if r.status_code != 200:
+                die(f"credit code redeem: {r.status_code} {r.text}")
+            redeemed = r.json()
+            if redeemed.get("credit_micro_usd") != 10_000:
+                die(f"unexpected redeemed credit: {redeemed}")
+            r = _get(c, "/v1/billing", key=key_a)
+            if r.status_code != 200:
+                die(f"A billing: {r.status_code} {r.text}")
+            if r.json().get("balance_micro_usd") != 10_000:
+                die(f"A billing balance wrong after credit: {r.text}")
+            print("[smoke] credit code redeem OK")
+
             # 2. A creates a table and inserts a row
             sql_create = (
                 "CREATE TABLE smoke_secrets ("
                 "id serial primary key, val text not null)"
             )
-            r = _post(c, "/v1/store", key=key_a,
+            r = _post(c, STORE_PATH, key=key_a,
                       json={"sql": sql_create, "params": []})
             if r.status_code != 200:
                 die(f"A create table: {r.status_code} {r.text}")
-            r = _post(c, "/v1/store", key=key_a,
+            r = _post(c, STORE_PATH, key=key_a,
                       json={"sql": "INSERT INTO smoke_secrets(val) VALUES (%s)",
                             "params": ["secret-of-A"]})
             if r.status_code != 200:
                 die(f"A insert: {r.status_code} {r.text}")
 
             # 3. A reads back — baseline sanity
-            r = _post(c, "/v1/store", key=key_a,
+            r = _post(c, STORE_PATH, key=key_a,
                       json={"sql": "SELECT val FROM smoke_secrets", "params": []})
             if r.status_code != 200 or "secret-of-A" not in r.text:
                 die(f"A self-read broken: {r.status_code} {r.text}")
             print("[smoke] A self-read OK")
 
             # 4. B tries to read A's table — MUST fail
-            r = _post(c, "/v1/store", key=key_b,
+            r = _post(c, STORE_PATH, key=key_b,
                       json={"sql": "SELECT val FROM smoke_secrets",
                             "params": []})
             # Expected: 400/500 "relation does not exist" — the table
@@ -189,18 +229,18 @@ def main() -> int:
 
             # 5. B creates its own table with the same name and verifies
             #    independence
-            r = _post(c, "/v1/store", key=key_b,
+            r = _post(c, STORE_PATH, key=key_b,
                       json={"sql": sql_create, "params": []})
             if r.status_code != 200:
                 die(f"B create (same name): {r.status_code} {r.text}")
-            r = _post(c, "/v1/store", key=key_b,
+            r = _post(c, STORE_PATH, key=key_b,
                       json={"sql": "INSERT INTO smoke_secrets(val) VALUES (%s)",
                             "params": ["secret-of-B"]})
             if r.status_code != 200:
                 die(f"B insert: {r.status_code} {r.text}")
 
             # 6. Cross-verify: A still only sees its own row
-            r = _post(c, "/v1/store", key=key_a,
+            r = _post(c, STORE_PATH, key=key_a,
                       json={"sql": "SELECT val FROM smoke_secrets", "params": []})
             body = r.json()
             rows = body.get("rows") or []
@@ -211,7 +251,7 @@ def main() -> int:
                 die(f"unexpected rows in A: {vals}")
             print("[smoke] A still only sees 'secret-of-A'")
 
-            r = _post(c, "/v1/store", key=key_b,
+            r = _post(c, STORE_PATH, key=key_b,
                       json={"sql": "SELECT val FROM smoke_secrets", "params": []})
             body = r.json()
             vals = {row.get("val") for row in (body.get("rows") or [])}
@@ -222,7 +262,7 @@ def main() -> int:
             print("[smoke] B still only sees 'secret-of-B'")
 
             # 7. Wrong key is rejected
-            r = _post(c, "/v1/store", key="wrong-key",
+            r = _post(c, STORE_PATH, key="wrong-key",
                       json={"sql": "SELECT 1", "params": []})
             if r.status_code != 401:
                 die(f"wrong key accepted: {r.status_code} {r.text}")
