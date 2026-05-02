@@ -20,8 +20,6 @@ from .api.admin_runs import register_admin_run_routes
 from .api.billing import register_admin_billing_routes, register_owner_billing_routes
 from .api.runs import register_run_routes
 from .api.room_helpers import (
-    apply_room_to_query_request as _apply_room_to_query_request,
-    load_room_for_caller as _load_room_for_caller,
     room_prompt_for_run as _room_prompt_for_run,
     room_wrap_id as _room_wrap_id,
 )
