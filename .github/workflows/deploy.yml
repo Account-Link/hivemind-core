@@ -169,6 +169,7 @@ jobs:
             'echo "relay: $(hostname) $(whoami)"; phala --version; phala status | head -10'
 
       - name: Deploy via relay
+        timeout-minutes: 24
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}

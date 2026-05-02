@@ -23,7 +23,8 @@ set -euo pipefail
 #
 # Env:
 #   IMAGE_TAG        override tag pin baked into compose (optional)
-#   HEALTH_TIMEOUT   seconds to wait for healthy (default 300)
+#   HEALTH_TIMEOUT   seconds to wait for healthy (default 600)
+#   PHALA_*_TIMEOUT  seconds for bounded Phala CLI operations
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -34,6 +35,11 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 # (CAA + TXT propagation), (c) wait for gateway routes to become live.
 # Observed ~5–8 minutes end-to-end on dstack-pha-prod9.
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
+PHALA_DEPLOY_TIMEOUT="${PHALA_DEPLOY_TIMEOUT:-420}"
+PHALA_ENV_UPDATE_TIMEOUT="${PHALA_ENV_UPDATE_TIMEOUT:-90}"
+PHALA_RESTART_TIMEOUT="${PHALA_RESTART_TIMEOUT:-420}"
+PHALA_QUERY_TIMEOUT="${PHALA_QUERY_TIMEOUT:-45}"
+PHALA_START_TIMEOUT="${PHALA_START_TIMEOUT:-120}"
 
 # CVM names are env-overridable so a fresh-cluster first-deploy can
 # use a temporary name (e.g. `hivemind-core-prod10`) without colliding
@@ -65,11 +71,19 @@ retry_env_update() {
     local name="$1"
     local env_file="$2"
     local output=""
+    local status=0
 
     for i in $(seq 1 18); do
-        if output=$(phala envs update --cvm-id "${name}" -e "${env_file}" 2>&1); then
+        if output=$(timeout --foreground "${PHALA_ENV_UPDATE_TIMEOUT}" \
+                phala envs update --cvm-id "${name}" -e "${env_file}" 2>&1); then
             [ -n "${output}" ] && printf "%s\n" "${output}"
             return 0
+        fi
+        status=$?
+        if [ "${status}" -eq 124 ]; then
+            warn "env re-seal command timed out after ${PHALA_ENV_UPDATE_TIMEOUT}s; retry ${i}/18 in 20s"
+            sleep 20
+            continue
         fi
         if printf "%s\n" "${output}" | grep -qi "Another operation is already in progress"; then
             warn "env re-seal blocked by another CVM operation; retry ${i}/18 in 20s"
@@ -154,9 +168,10 @@ deploy_and_seal() {
     # on-chain approval step can run, even on a successful deploy.
     if [ -n "${NODE_ID}" ]; then
         log "creating ${name} on node-id=${NODE_ID} (compose=${compose})"
-        if ! phala deploy -n "${name}" --node-id "${NODE_ID}" \
+        if ! timeout --foreground "${PHALA_DEPLOY_TIMEOUT}" \
+                phala deploy -n "${name}" --node-id "${NODE_ID}" \
                 -c "${compose}" -e "${env_file}" --wait; then
-            warn "phala deploy --wait returned non-zero (likely the CLI's 300s readiness timeout); continuing — wait_healthy is the real correctness check"
+            warn "phala deploy --wait returned non-zero or timed out after ${PHALA_DEPLOY_TIMEOUT}s; continuing — wait_healthy is the real correctness check"
         fi
         # In create-mode `phala deploy` already seals every variable from
         # the -e file into the new CVM's encrypted env channel — running
@@ -170,15 +185,18 @@ deploy_and_seal() {
     fi
 
     log "updating ${name} in place (compose=${compose})"
-    if ! phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait; then
-        warn "phala deploy --wait returned non-zero (likely the CLI's 300s readiness timeout); continuing — wait_healthy is the real correctness check"
+    if ! timeout --foreground "${PHALA_DEPLOY_TIMEOUT}" \
+            phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait; then
+        warn "phala deploy --wait returned non-zero or timed out after ${PHALA_DEPLOY_TIMEOUT}s; continuing — wait_healthy is the real correctness check"
         local s
-        s=$(phala cvms get --cvm-id "${name}" --json 2>/dev/null \
+        s=$(timeout --foreground "${PHALA_QUERY_TIMEOUT}" \
+            phala cvms get --cvm-id "${name}" --json 2>/dev/null \
             | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))') || s=""
         log "post-deploy status: ${s}"
         if [ "${s}" = "stopped" ]; then
             warn "CVM left in stopped state — issuing explicit start"
-            phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
+            timeout --foreground "${PHALA_START_TIMEOUT}" \
+                phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
                 || warn "phala cvms start also returned non-zero; wait_healthy will verify"
         fi
     fi
@@ -197,15 +215,18 @@ deploy_and_seal() {
     # Without this guard the workflow exited before the on-chain
     # approval step could run, even though the deploy itself succeeded.
     log "restarting ${name} to pick up re-sealed envs"
-    if ! phala cvms restart --cvm-id "${name}" >/dev/null 2>&1; then
-        warn "phala cvms restart timed out (CLI 300s limit); checking state"
+    if ! timeout --foreground "${PHALA_RESTART_TIMEOUT}" \
+            phala cvms restart --cvm-id "${name}" >/dev/null 2>&1; then
+        warn "phala cvms restart returned non-zero or timed out after ${PHALA_RESTART_TIMEOUT}s; checking state"
         local s
-        s=$(phala cvms get --cvm-id "${name}" --json 2>/dev/null \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))')
+        s=$(timeout --foreground "${PHALA_QUERY_TIMEOUT}" \
+            phala cvms get --cvm-id "${name}" --json 2>/dev/null \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))') || s=""
         log "post-restart status: ${s}"
         if [ "${s}" = "stopped" ]; then
             warn "CVM left in stopped state — issuing explicit start"
-            phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
+            timeout --foreground "${PHALA_START_TIMEOUT}" \
+                phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
                 || warn "phala cvms start also returned non-zero; wait_healthy will verify"
         fi
     fi
