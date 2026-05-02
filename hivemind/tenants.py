@@ -890,6 +890,52 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
             "capabilities_revoked": capabilities_revoked,
         }
 
+    def admin_rename_tenant(
+        self,
+        tenant_id: str,
+        new_name: str,
+        *,
+        allow_duplicate_name: bool = False,
+    ) -> dict:
+        """Update the human-readable name on the _tenants row.
+
+        Tenant id, db_name, api_key, room ownership and capability tokens are
+        unchanged. Only the display name is rewritten.
+        """
+        clean_name = (new_name or "").strip()
+        if not clean_name:
+            raise ValueError("tenant name required")
+        rows = self._control_db.execute(
+            "SELECT id, name, db_name, created_at, suspended "
+            "FROM _tenants WHERE id = %s",
+            [tenant_id],
+        )
+        if not rows:
+            raise KeyError(f"tenant '{tenant_id}' not found")
+        existing = dict(rows[0])
+        if existing["name"] == clean_name:
+            return existing
+        if not allow_duplicate_name:
+            collisions = [
+                r for r in self._find_tenants_by_name(clean_name)
+                if r["id"] != tenant_id
+            ]
+            if collisions:
+                raise DuplicateTenantNameError(clean_name, collisions)
+        rowcount = self._control_db.execute_commit(
+            "UPDATE _tenants SET name = %s WHERE id = %s",
+            [clean_name, tenant_id],
+        )
+        if rowcount != 1:
+            raise RuntimeError(f"rename rowcount={rowcount} (expected 1)")
+        return {
+            "id": tenant_id,
+            "name": clean_name,
+            "db_name": existing.get("db_name") or "",
+            "created_at": existing.get("created_at"),
+            "suspended": existing.get("suspended"),
+        }
+
     def delete(self, tenant_id: str) -> None:
         """Drop tenant DB, evict from cache, remove control row."""
         rows = self._control_db.execute(

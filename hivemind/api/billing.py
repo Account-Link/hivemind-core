@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
+from ..config import Settings
 from ..tenants import Caller, TenantRegistry
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,7 @@ def register_owner_billing_routes(
 def register_admin_billing_routes(
     app: FastAPI,
     check_admin: Callable,
+    settings: Settings | None = None,
 ) -> None:
     """Register admin billing and credit-code routes."""
 
@@ -214,7 +216,12 @@ def register_admin_billing_routes(
     async def admin_billing_accounts(request: Request):
         registry = _registry(request)
         accounts = await asyncio.to_thread(registry.billing_accounts)
-        return {"accounts": accounts}
+        return {
+            "accounts": accounts,
+            "enforce_credits": bool(
+                settings.billing_enforce_credits
+            ) if settings is not None else False,
+        }
 
     @app.get("/v1/admin/billing/ledger", dependencies=[Depends(check_admin)])
     async def admin_billing_ledger(

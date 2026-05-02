@@ -16,6 +16,7 @@ from .api.agent_helpers import (
     spawn_bg as _spawn_bg,
     tenant_image_tag as _server_tenant_image_tag,
 )
+from .api.admin_runs import register_admin_run_routes
 from .api.billing import register_admin_billing_routes, register_owner_billing_routes
 from .api.runs import register_run_routes
 from .api.room_helpers import (
@@ -394,7 +395,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_signup_routes(app, settings)
     register_admin_tenant_routes(app, settings, check_admin)
-    register_admin_billing_routes(app, check_admin)
+    register_admin_billing_routes(app, check_admin, settings)
+    register_admin_run_routes(app, check_admin)
     register_owner_billing_routes(app, requires_role)
     register_tenant_owner_routes(app, _bearer, requires_role, get_tenant_hive)
     register_system_routes(app, settings, check_admin, requires_role)

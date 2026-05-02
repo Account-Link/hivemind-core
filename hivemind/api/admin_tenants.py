@@ -48,6 +48,13 @@ class AdminResetTenantKeyRequest(BaseModel):
     revoke_capabilities: bool = False
 
 
+class AdminRenameTenantRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: Any = ""
+    allow_duplicate_name: bool = False
+
+
 def _registry(request: Request) -> TenantRegistry:
     return request.app.state.registry
 
@@ -178,6 +185,32 @@ def register_admin_tenant_routes(
             )
         except KeyError as e:
             raise HTTPException(404, str(e))
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post(
+        "/v1/admin/tenants/{tenant_id}/rename",
+        dependencies=[Depends(check_admin)],
+    )
+    async def admin_rename_tenant(
+        tenant_id: str,
+        payload: AdminRenameTenantRequest,
+        request: Request,
+    ):
+        registry = _registry(request)
+        try:
+            return await asyncio.to_thread(
+                registry.admin_rename_tenant,
+                tenant_id,
+                str(payload.name or ""),
+                allow_duplicate_name=bool(payload.allow_duplicate_name),
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except DuplicateTenantNameError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         except RuntimeError as e:
             raise HTTPException(400, str(e))
 
