@@ -1,6 +1,6 @@
-# hivemind-core
+# Hivemind
 
-hivemind-core runs **attested recall agreements** between mutually
+Hivemind runs **attested recall agreements** between mutually
 distrusting parties. An owner defines the room rules and contributes private
 data plus a scope agent; a participant verifies those rules and the running
 enclave before asking through a fixed query agent or bringing their own. Only
@@ -14,28 +14,31 @@ local development.
 For regular CLI users, install the CLI into uv's isolated tool environment:
 
 ```bash
-uv tool install hivemind-core
-hivemind --version
+uv tool install hmctl
+hmctl --version
 ```
 
-Until the first PyPI release is published, install from the Git source:
+The package installs two equivalent commands: `hmctl` for the short public CLI
+name, and `hivemind` for existing scripts.
+
+Until the first `hmctl` PyPI release is published, install from the Git source:
 
 ```bash
 uv tool install --upgrade git+https://github.com/Account-Link/hivemind-core.git
-hivemind --version
+hmctl --version
 ```
 
 To upgrade later:
 
 ```bash
-uv tool upgrade hivemind-core
+uv tool upgrade hmctl
 ```
 
 For repo development, use an editable install from the checkout:
 
 ```bash
 uv tool install --editable .
-hivemind --help
+hmctl --help
 ```
 
 ## Quick Use
@@ -43,15 +46,15 @@ hivemind --help
 Join an existing room:
 
 ```bash
-hivemind profile use my-tenant
+hmctl profile use my-tenant
 ROOM='hmroom://...'
 
-hivemind room inspect "$ROOM"
-hivemind doctor "$ROOM"
-hivemind room inspect "$ROOM" --json | jq '.room.manifest'
-hivemind room accept "$ROOM"
-hivemind balance
-hivemind -y room ask "$ROOM" "What changed this month?"
+hmctl room inspect "$ROOM"
+hmctl doctor "$ROOM"
+hmctl room inspect "$ROOM" --json | jq '.room.manifest'
+hmctl room accept "$ROOM"
+hmctl balance
+hmctl -y room ask "$ROOM" "What changed this month?"
 ```
 
 `room inspect` shows the signed room spec and live attestation summary; use
@@ -74,7 +77,7 @@ command.
 Create a fixed-query room and share the printed invite:
 
 ```bash
-hivemind room create ./scope-agent \
+hmctl room create ./scope-agent \
   --name example-room \
   --query-agent ./query-agent \
   --mediator-agent ./mediator-agent \
@@ -92,8 +95,8 @@ interpret YAML.
 Connect a local profile to a deployed service:
 
 ```bash
-hivemind init --service https://hivemind.example --api-key hmk_...
-hivemind trust attest --reproduce
+hmctl init --service https://hivemind.example --api-key hmk_...
+hmctl trust attest --reproduce
 ```
 
 If the hosted service has self-serve signup enabled, users can create their
@@ -101,18 +104,18 @@ own tenant key with a `$0.00` starting balance. Admin-issued credit codes can
 be redeemed later when you want to add prepaid credit:
 
 ```bash
-hivemind --profile alice signup alice --service https://hivemind.example
-hivemind redeem-credit 'hmcc_...'
+hmctl --profile alice signup alice --service https://hivemind.example
+hmctl redeem-credit 'hmcc_...'
 ```
 
 Admins mint credit codes with tracked max uses and expiry:
 
 ```bash
-hivemind admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
-hivemind admin credit-codes list
-hivemind admin billing accounts
-hivemind admin billing ledger
-hivemind admin tenants reset-key t_... --clear-seal --revoke-capabilities
+hmctl admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
+hmctl admin credit-codes list
+hmctl admin billing accounts
+hmctl admin billing ledger
+hmctl admin tenants reset-key t_... --clear-seal --revoke-capabilities
 ```
 
 Operator switches:
@@ -123,13 +126,13 @@ HIVEMIND_BILLING_ENFORCE_CREDITS=true
 ```
 
 Credit codes are not signup codes: signup is open when enabled, and credit is
-added only through `hivemind redeem-credit` or the credit-code redemption API.
+added only through `hmctl redeem-credit` or the credit-code redemption API.
 
 For local development:
 
 ```bash
 ./scripts/quickstart.sh
-hivemind init --service http://localhost:8100 --api-key hmk_...
+hmctl init --service http://localhost:8100 --api-key hmk_...
 ```
 
 For copy-paste room setups, see the [room cookbook](docs/room-cookbook.md).
@@ -196,7 +199,7 @@ an owner or participant presents a valid room credential again.
 ## Why This Exists
 
 Clean rooms are usually data-first and administrator-driven. Agent frameworks
-usually assume one trust domain. hivemind-core is for the gap between them:
+usually assume one trust domain. Hivemind is for the gap between them:
 two parties want an agent-mediated answer, neither party wants to reveal raw
 material to the other, and both need to verify the computation before any
 private input is read.
@@ -233,12 +236,12 @@ participant's task through scoped tools. Examples live in:
 Canonical flow: create a signed room, add private data, and share the invite.
 
 ```bash
-hivemind room create ./scope-agent \
+hmctl room create ./scope-agent \
   --mediator-agent ./mediator-agent \
   --rules-file rules.md
 
-hivemind room add-data <room_id> --file dataset.md --meta source=dataset
-hivemind room data <room_id>
+hmctl room add-data <room_id> --file dataset.md --meta source=dataset
+hmctl room data <room_id>
 ```
 
 The create command prints one `hmroom://...` invite link. That link contains
@@ -248,13 +251,13 @@ Common room variants:
 
 ```bash
 # Owner pre-loads the query logic; participant only supplies the question.
-hivemind room create ./scope-agent \
+hmctl room create ./scope-agent \
   --query-agent ./query-agent \
   --mediator-agent ./mediator-agent \
   --rules-file rules.md
 
 # Participant can upload their own query agent for this room.
-hivemind room create ./scope-agent \
+hmctl room create ./scope-agent \
   --mediator-agent ./mediator-agent \
   --query-visibility sealed \
   --rules-file rules.md
@@ -278,16 +281,16 @@ Canonical flow: inspect the agreement, ask the question, and verify the
 attested output.
 
 ```bash
-hivemind room inspect 'hmroom://...'
-hivemind room inspect 'hmroom://...' --json | jq '.room.manifest'
-hivemind room accept 'hmroom://...'
-hivemind room ask 'hmroom://...' "What changed this month?"
+hmctl room inspect 'hmroom://...'
+hmctl room inspect 'hmroom://...' --json | jq '.room.manifest'
+hmctl room accept 'hmroom://...'
+hmctl room ask 'hmroom://...' "What changed this month?"
 ```
 
 Bring a query agent to an uploadable room:
 
 ```bash
-hivemind room ask 'hmroom://...' "What changed this month?" \
+hmctl room ask 'hmroom://...' "What changed this month?" \
   --agent ./my-query-agent
 ```
 
@@ -303,7 +306,7 @@ For dynamic scope/query/mediator rooms, use larger explicit budgets when the
 scope agent needs to inspect, simulate, and verify the query agent.
 
 If the service has billing enabled, invite-token room asks are charged to the
-active `hmk_` tenant profile. Use `hivemind profile use NAME` or pass
+active `hmk_` tenant profile. Use `hmctl profile use NAME` or pass
 `--profile NAME` before the command to choose which tenant API key pays. The data
 owner does not pay for participant queries unless the owner is the caller.
 
@@ -320,11 +323,11 @@ Rooms have one deployment trust policy:
 Update a room trust allowlist without changing the invite link:
 
 ```bash
-hivemind room trust <room_id> --mode owner_approved --approve-live
+hmctl room trust <room_id> --mode owner_approved --approve-live
 ```
 
 Production HTTPS clients require DCAP quote verification and TLS pinning by
-default. `hivemind trust attest --reproduce` walks the source chain from the
+default. `hmctl trust attest --reproduce` walks the source chain from the
 attested compose hash to the registered compose source and any deterministic
 deploy render hints. The global `--dangerously-skip-attestations` flag is an
 explicit bypass for tenants or operators who choose not to perform client-side

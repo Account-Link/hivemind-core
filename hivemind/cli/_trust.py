@@ -195,7 +195,7 @@ def _dcap_augment(bundle: dict, *, service: str = "") -> dict:
         if require:
             click.echo(
                 "Error: strict attestation requires the dcap-qvl verifier, "
-                "but it is not installed. Install hivemind-core with current "
+                "but it is not installed. Install hmctl with current "
                 "dependencies, or pass --allow-degraded-attestation only for "
                 "debugging.",
                 err=True,

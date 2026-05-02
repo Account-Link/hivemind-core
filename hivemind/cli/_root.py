@@ -8,7 +8,7 @@ from ..version import APP_VERSION
 
 
 @click.group()
-@click.version_option(version=APP_VERSION, prog_name="hivemind")
+@click.version_option(version=APP_VERSION)
 @click.option(
     "-y",
     "--yes",

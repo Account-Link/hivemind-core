@@ -1,6 +1,6 @@
 [project]
-name = "hivemind-core"
-version = "0.3.4"
+name = "hmctl"
+version = "0.3.5"
 description = "Attested recall agreements for mutually distrusting parties and their agents"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -46,6 +46,7 @@ dev = [
 ]
 
 [project.scripts]
+hmctl = "hivemind.cli:cli"
 hivemind = "hivemind.cli:cli"
 
 [project.urls]

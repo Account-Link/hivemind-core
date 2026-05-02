@@ -3,8 +3,8 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, version as package_version
 
 
-_PACKAGE_NAME = "hivemind-core"
-_FALLBACK_VERSION = "0.3.4"
+_PACKAGE_NAME = "hmctl"
+_FALLBACK_VERSION = "0.3.5"
 
 
 def resolve_version() -> str:
