@@ -1,10 +1,26 @@
 # Hivemind
 
+[![CI](https://github.com/teleport-computer/hivemind-core/actions/workflows/ci.yml/badge.svg)](https://github.com/teleport-computer/hivemind-core/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/hmctl.svg)](https://pypi.org/project/hmctl/)
+[![Python](https://img.shields.io/pypi/pyversions/hmctl.svg)](https://pypi.org/project/hmctl/)
+[![License](https://img.shields.io/pypi/l/hmctl.svg)](LICENSE)
+
 Hivemind runs **attested recall agreements** between mutually
 distrusting parties. An owner defines the room rules and contributes private
 data plus a scope agent; a participant verifies those rules and the running
 enclave before asking through a fixed query agent or bringing their own. Only
 the room-approved output leaves the enclave.
+
+Use `hmctl` to create verifiable rooms, share scoped data access, run sealed
+query agents, and bill tenant usage without making the data owner trust the
+querying party.
+
+What you can do:
+
+- create signed room invites with inspectable or sealed agents;
+- verify live dstack CVM attestation before presenting data or prompts;
+- let participants bring their own query agent while preserving room rules;
+- meter usage, grant tenant credit, and enforce prepaid balances.
 
 ## Install
 
@@ -137,6 +153,15 @@ hmctl init --service http://localhost:8100 --api-key hmk_...
 ```
 
 For copy-paste room setups, see the [room cookbook](docs/room-cookbook.md).
+
+## Project Docs
+
+- [API reference](API.md)
+- [Architecture](ARCHITECTURE.md)
+- [Examples](EXAMPLES.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
 ## Evaluation
 
