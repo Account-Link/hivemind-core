@@ -195,7 +195,12 @@ def register_room_routes(
         room_id: str,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
-        room = await load_room_for_caller(caller, room_id)
+        # GET is read-only — return revoked rooms with the revoked_at
+        # flag set so UIs can render "this room was revoked" instead of
+        # showing a 403 dead end.
+        room = await load_room_for_caller(
+            caller, room_id, allow_revoked=True,
+        )
         return room
 
     @app.get("/v1/rooms/{room_id}/attest")

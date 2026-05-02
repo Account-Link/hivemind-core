@@ -201,10 +201,25 @@ def register_tenant_owner_routes(
 
     @app.get("/v1/whoami")
     async def whoami(
+        request: Request,
         caller: Caller = Depends(requires_role("owner", "query")),
     ):
+        # Expose the tenant display name so UIs can render "Welcome back,
+        # watch-history" instead of "Welcome back, t_…". Looked up from the
+        # control plane registry (same source of truth admin endpoints use).
+        tenant_name = ""
+        try:
+            registry = request.app.state.registry
+            row = await asyncio.to_thread(
+                registry.get_by_id, caller.tenant_id,
+            )
+            if row:
+                tenant_name = row.get("name") or ""
+        except Exception:
+            tenant_name = ""
         return {
             "tenant_id": caller.tenant_id,
+            "name": tenant_name,
             "role": caller.role,
             "constraints": caller.constraints,
             "token_id": caller.token_id,

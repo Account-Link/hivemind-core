@@ -19,7 +19,17 @@ from ..tenants import Caller
 async def load_room_for_caller(
     caller: Caller,
     room_id: str | None,
+    *,
+    allow_revoked: bool = False,
 ) -> dict:
+    """Resolve a room for the caller.
+
+    By default rejects revoked rooms with 403 because operational endpoints
+    (data add, runs, etc.) cannot proceed against a revoked room. The
+    read-only GET ``/v1/rooms/{id}`` passes ``allow_revoked=True`` so the
+    UI can render the manifest of a revoked room (e.g. so the owner can
+    see what they revoked, or confirm before purging from the list).
+    """
     rid = (room_id or "").strip()
     if caller.role == "query":
         bound = (caller.constraints.get("room_id") or "").strip()
@@ -39,7 +49,7 @@ async def load_room_for_caller(
             409,
             f"room '{rid}' has an invalid signed manifest: {reason}",
         )
-    if room.get("revoked_at") is not None:
+    if not allow_revoked and room.get("revoked_at") is not None:
         raise HTTPException(403, f"room '{rid}' is revoked")
     return room
 
