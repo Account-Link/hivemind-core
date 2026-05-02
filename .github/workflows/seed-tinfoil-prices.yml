@@ -1,0 +1,108 @@
+name: Seed Tinfoil model prices
+
+# Adds a baseline set of tinfoil/<model> rows to the billing price table
+# so runs that route through Tinfoil are no longer rejected with
+# `pricing_missing` (in enforce mode) or absorbed silently (without).
+#
+# Reads HIVEMIND_ADMIN_KEY from the relay's deploy/phala/.env, then POSTs
+# to https://hivemind.teleport.computer/v1/admin/billing/prices for each
+# (provider, model, prompt_usd_per_million, completion_usd_per_million).
+#
+# Idempotent — the server upserts on (provider, model). Re-running just
+# refreshes the rates.
+#
+# Override the rates by passing custom JSON in `prices_json`. Default
+# rates were inferred from the operator's Tinfoil bill (kimi-k2-6, 36
+# requests, 289,612 in / 26,627 out, $0.57 ⇒ ~$1.50 / $5.00 per Mtok).
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service URL (no trailing slash)"
+        required: false
+        default: "https://hivemind.teleport.computer"
+      prices_json:
+        description: "Optional JSON array of {provider,model,prompt,completion} to override defaults"
+        required: false
+        default: ""
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run seed via relay
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          SERVICE: ${{ github.event.inputs.service }}
+          PRICES_JSON: ${{ github.event.inputs.prices_json }}
+        run: |
+          set -euo pipefail
+          q() { printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"; }
+
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "SERVICE=$(q "$SERVICE") PRICES_JSON=$(q "$PRICES_JSON") bash -s" <<'REMOTE'
+          set -euo pipefail
+          ENV_FILE=~/hivemind-core/deploy/phala/.env
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "::error::no .env at $ENV_FILE — cannot read HIVEMIND_ADMIN_KEY"
+            exit 1
+          fi
+          # shellcheck disable=SC1090
+          ADMIN_KEY=$(grep -E '^HIVEMIND_ADMIN_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+          if [ -z "$ADMIN_KEY" ]; then
+            echo "::error::HIVEMIND_ADMIN_KEY missing in $ENV_FILE"
+            exit 1
+          fi
+
+          # Default seed list: tinfoil/<model> with the rates inferred
+          # from the operator's actual upstream bill. Adjust as Tinfoil's
+          # rates change.
+          DEFAULTS='[
+            {"provider":"tinfoil","model":"kimi-k2-6","prompt":1.50,"completion":5.00},
+            {"provider":"tinfoil","model":"kimi-k2","prompt":0.60,"completion":2.50},
+            {"provider":"tinfoil","model":"kimi-k2-thinking","prompt":0.60,"completion":2.50},
+            {"provider":"tinfoil","model":"llama-3.3-70b","prompt":0.40,"completion":0.40},
+            {"provider":"tinfoil","model":"deepseek-v3.1","prompt":0.27,"completion":1.10}
+          ]'
+
+          PAYLOAD="${PRICES_JSON:-$DEFAULTS}"
+          echo "$PAYLOAD" | jq -c '.[]' | while read -r row; do
+            provider=$(echo "$row" | jq -r '.provider')
+            model=$(echo "$row" | jq -r '.model')
+            prompt=$(echo "$row" | jq -r '.prompt')
+            completion=$(echo "$row" | jq -r '.completion')
+            echo "→ ${provider}/${model}  prompt=\$${prompt}/1M  completion=\$${completion}/1M"
+            curl -fsS -X POST "${SERVICE%/}/v1/admin/billing/prices" \
+              -H "Authorization: Bearer ${ADMIN_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "{\"provider\":\"${provider}\",\"model\":\"${model}\",\"prompt_usd_per_million\":${prompt},\"completion_usd_per_million\":${completion}}" \
+              | jq -c '{provider, model, prompt_microusd_per_mtok, completion_microusd_per_mtok}' \
+              || echo "::warning::seed failed for ${provider}/${model}"
+            echo
+          done
+
+          echo "── verifying ──"
+          curl -fsS "${SERVICE%/}/v1/admin/billing/prices" \
+            -H "Authorization: Bearer ${ADMIN_KEY}" \
+            | jq '.prices[] | select(.provider == "tinfoil")' \
+            | head -60
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
