@@ -1,0 +1,56 @@
+name: Inspect billing enforce-credits flag (relay)
+
+# Reads the relay's deploy/phala/.env and prints whether
+# HIVEMIND_BILLING_ENFORCE_CREDITS is overridden there. Read-only.
+# The compose default is `true`; this exists because operators sometimes
+# pin it explicitly in the .env and we want to confirm without SSHing
+# in by hand.
+#
+# No secrets are printed beyond the boolean itself.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Grep relay .env for enforce-credits
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            "${EC2_USER}@${EC2_HOST}" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          ENV_FILE=~/hivemind-core/deploy/phala/.env
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "RESULT: NO_ENV_FILE at $ENV_FILE"
+            exit 0
+          fi
+          line=$(grep -E '^HIVEMIND_BILLING_ENFORCE_CREDITS=' "$ENV_FILE" || true)
+          if [ -z "$line" ]; then
+            echo "RESULT: NOT_OVERRIDDEN — using compose default (true)"
+            exit 0
+          fi
+          # Echo only the value, not anything else from the env file.
+          val="${line#HIVEMIND_BILLING_ENFORCE_CREDITS=}"
+          echo "RESULT: OVERRIDDEN_TO=${val}"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
