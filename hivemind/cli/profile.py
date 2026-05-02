@@ -102,6 +102,51 @@ def profile_delete(name: str):
     )
 
 
+@profile_cli.command("rename")
+@click.argument("old_name")
+@click.argument("new_name")
+def profile_rename(old_name: str, new_name: str):
+    """Rename a local profile.
+
+    Moves ``~/.hivemind/profiles/<old_name>.yaml`` to
+    ``~/.hivemind/profiles/<new_name>.yaml`` and rewrites the active-profile
+    pointer if it was pointing at ``old_name``. The API key, service URL,
+    and any server-side state are unchanged — this is purely a local
+    label rename.
+    """
+    from . import _ACTIVE_POINTER  # parent-owned (test-patchable)
+
+    src = _config_path(old_name)
+    dst = _config_path(new_name)
+    if not src.exists():
+        click.echo(f"Error: profile not found at {src}", err=True)
+        raise SystemExit(1)
+    if dst.exists():
+        click.echo(
+            f"Error: a profile named '{new_name}' already exists at {dst}. "
+            "Delete it first with 'hmctl profile delete' or pick another name.",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not new_name or "/" in new_name or new_name.startswith("."):
+        click.echo(
+            f"Error: '{new_name}' is not a valid profile name "
+            "(no slashes, no leading dot, must be non-empty).",
+            err=True,
+        )
+        raise SystemExit(1)
+    src.rename(dst)
+    pointer_was_set = (
+        _ACTIVE_POINTER.exists()
+        and _ACTIVE_POINTER.read_text().strip() == old_name
+    )
+    if pointer_was_set:
+        _set_active_profile(new_name)
+    click.echo(f"Renamed {src} → {dst}")
+    if pointer_was_set:
+        click.echo(f"Active-profile pointer updated to '{new_name}'.")
+
+
 @profile_cli.command("use")
 @click.argument("name")
 def profile_use(name: str):
