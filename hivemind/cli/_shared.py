@@ -256,7 +256,7 @@ def _query_tracked(
     else:
         click.echo(
             f"Error: timed out after {poll_seconds}s. "
-            f"Check `hivemind room runs {run_id}`.",
+            f"Check `hmctl room runs {run_id}`.",
             err=True,
         )
     raise SystemExit(5)
@@ -625,7 +625,7 @@ def _resolve_admin_key(admin_key: str) -> str:
     1. ``--admin-key`` flag (Click also fills this from
        ``HIVEMIND_ADMIN_KEY`` env via the option's ``envvar=``).
     2. The active profile's ``api_key`` IF it was registered with
-       ``role: admin`` (set by ``hivemind init`` when /v1/health 401s
+       ``role: admin`` (set by ``hmctl init`` when /v1/health 401s
        and /v1/admin/tenants accepts the key).
     Otherwise, abort. We never silently use a tenant key for admin
     operations.
@@ -640,7 +640,7 @@ def _resolve_admin_key(admin_key: str) -> str:
         return cfg["api_key"]
     click.echo(
         "Error: admin key required. Pass --admin-key, set "
-        "HIVEMIND_ADMIN_KEY, or 'hivemind --profile <admin> init "
+        "HIVEMIND_ADMIN_KEY, or 'hmctl --profile <admin> init "
         "--api-key <admin-key>' to wire up an admin profile.",
         err=True,
     )
@@ -658,7 +658,7 @@ def _resolve_admin_service(service: str | None) -> str:
             url = _DEFAULT_SERVICE
     # Admin commands don't go through ``_require_trust``, so pin the
     # enclave cert from the trust store here. Without this, every
-    # ``hivemind admin *`` against an -8100s. URL fails the self-signed
+    # ``hmctl admin *`` against an -8100s. URL fails the self-signed
     # handshake and exits before reaching the server.
     _warm_pin_from_trust(url)
     return url

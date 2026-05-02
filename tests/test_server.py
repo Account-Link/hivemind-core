@@ -125,7 +125,7 @@ async def _self_serve_test_env(test_dsn, **settings_overrides):
 
 @pytest_asyncio.fixture
 async def self_serve_env(test_dsn):
-    """FastAPI client with public signup enabled and no free credit."""
+    """FastAPI client with public signup enabled and zero starting credit."""
     async for env in _self_serve_test_env(test_dsn):
         yield env
 

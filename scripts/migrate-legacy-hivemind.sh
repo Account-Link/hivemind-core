@@ -13,7 +13,7 @@ set -euo pipefail
 #   4. Prints the tenant's one-time API key
 #
 # What you still have to do yourself:
-#   - Immediately run `hivemind init` + `hivemind rotate-key` as the tenant.
+#   - Immediately run `hmctl init` + `hmctl rotate-key` as the tenant.
 #     The admin saw the plaintext key; rotating cuts them out of the loop.
 #
 # Env:
@@ -72,9 +72,9 @@ echo ""
 echo "╔═══════════════════════════════════════════════════════════════════╗"
 echo "║  NEXT STEP — rotate the key immediately (admin still knows it):   ║"
 echo "║                                                                   ║"
-echo "║    hivemind init --service ${CORE_URL} \\"
+echo "║    hmctl init --service ${CORE_URL} \\"
 echo "║                  --api-key ${API_KEY}"
-echo "║    hivemind rotate-key                                            ║"
+echo "║    hmctl rotate-key                                               ║"
 echo "║                                                                   ║"
 echo "║  After rotation, only the TEE knows anything that maps to this    ║"
 echo "║  tenant's data. The admin is cut out of the loop.                 ║"

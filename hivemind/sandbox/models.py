@@ -314,7 +314,7 @@ class BridgeArtifactUploadResponse(BaseModel):
     Retention is the server-wide artifact TTL (default 24h).
     """
 
-    path: str  # e.g. /v1/query/runs/{run_id}/artifacts/{filename}
+    path: str  # e.g. /v1/runs/{run_id}/artifacts/{filename}
     size_bytes: int
     retention_seconds: int
     error: str | None = None

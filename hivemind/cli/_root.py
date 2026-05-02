@@ -17,7 +17,7 @@ from ..version import APP_VERSION
     help="Auto-answer 'yes' to the compose-hash approval prompt. "
     "TLS pinning and the on-chain revoke kill-switch still apply, so a "
     "tampered or revoked hash still hard-aborts. Does not accept room "
-    "manifests; run `hivemind room accept` first in CI / scripts.",
+    "manifests; run `hmctl room accept` first in CI / scripts.",
 )
 @click.option(
     "--dangerously-skip-attestations",
@@ -44,7 +44,7 @@ from ..version import APP_VERSION
     metavar="NAME",
     help="Named identity to use. Each profile is an independent "
     "service+api_key pair stored at ~/.hivemind/profiles/<NAME>.yaml. "
-    "Defaults to 'default'. Example: hivemind --profile alice query '...'",
+    "Defaults to 'default'. Example: hmctl --profile alice query '...'",
 )
 def cli(
     auto_yes: bool,

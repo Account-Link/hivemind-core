@@ -148,8 +148,8 @@ services:
 
       # Default agents — CI only builds base/core/postgres/sql-proxy.
       # The 4 default agents (scope/query/index/mediator) are NOT in GHCR;
-      # set AUTOLOAD=false and upload them via `hivemind run` / the
-      # /v1/agents/upload API, or pre-build and push them to GHCR first.
+      # set AUTOLOAD=false and upload them via `hmctl room create` / the
+      # /v1/room-agents API, or pre-build and push them to GHCR first.
       HIVEMIND_AUTOLOAD_DEFAULT_AGENTS: "false"
       HIVEMIND_DEFAULT_SCOPE_IMAGE: ${HIVEMIND_DEFAULT_SCOPE_IMAGE:-}
       HIVEMIND_DEFAULT_QUERY_IMAGE: ${HIVEMIND_DEFAULT_QUERY_IMAGE:-}

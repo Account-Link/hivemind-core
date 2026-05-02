@@ -51,14 +51,76 @@ Credit codes are not signup codes and are never required to create the tenant.
 
 ### Admin Billing
 
-`POST /v1/admin/credit-codes` creates a tracked credit code and returns the
-plaintext code once. `GET /v1/admin/credit-codes` lists code status without
-the plaintext code. `GET /v1/admin/billing` shows every tenant's current
-balance, total credited, and total spent. `GET /v1/admin/billing/ledger` shows
-recent ledger entries across tenants.
+Admin billing routes require `Authorization: Bearer <HIVEMIND_ADMIN_KEY>`.
+
+- `POST /v1/admin/credit-codes`: create a tracked credit code and return the
+  plaintext code once.
+- `GET /v1/admin/credit-codes`: list credit-code status without plaintext
+  codes.
+- `POST /v1/admin/credit-codes/{code_id}/revoke`: revoke an unused or active
+  credit code.
+- `GET /v1/admin/billing`: show every tenant's current balance, total credited,
+  and total spent.
+- `GET /v1/admin/billing/ledger`: show recent ledger entries across tenants.
+- `GET /v1/admin/billing/{tenant_id}`: show one tenant's balance and ledger.
+- `POST /v1/admin/billing/{tenant_id}/credits`: grant or debit tenant credit.
+- `GET /v1/admin/billing/prices`, `POST /v1/admin/billing/prices`: inspect and
+  configure provider/model prices.
 
 Credit enforcement uses the existing `HIVEMIND_BILLING_ENFORCE_CREDITS=true`
 switch, so operators should configure model prices before enabling it.
+
+## Admin Tenants
+
+Admin routes require `Authorization: Bearer <HIVEMIND_ADMIN_KEY>`.
+
+- `POST /v1/admin/tenants`: create a tenant and return a one-time `hmk_...`.
+- `GET /v1/admin/tenants`: list tenants.
+- `DELETE /v1/admin/tenants/{tenant_id}`: delete a tenant.
+- `POST /v1/admin/tenants/{tenant_id}/reset-key`: reset a tenant key, with
+  optional seal clearing and capability revocation.
+- `POST /v1/admin/tenants/register`: adopt an existing tenant database.
+- `POST /v1/admin/rename-database`: rename a tenant database through the SQL
+  proxy admin channel.
+- `POST /v1/admin/migrate-to-roles`: run the SQL-proxy role migration.
+- `POST /v1/admin/agents/sweep-broken`: dry-run or delete agent registrations
+  whose Docker images are missing after a redeploy.
+- `GET /v1/admin/llm-probe`: probe configured LLM connectivity from the CVM.
+
+## System And Tenant Identity
+
+### `GET /v1/healthz`
+
+Unauthenticated liveness probe. Returns `{"ok": true}` when the FastAPI
+process is serving requests.
+
+### `GET /v1/health`
+
+Authenticated service check. Returns service version and table count for a
+valid owner/admin key. The CLI `doctor` command uses this for profile and
+version checks.
+
+### `POST /v1/tenant/rotate-key`
+
+Owner-only. Rotates the current tenant's `hmk_...` API key and returns the
+plaintext replacement once.
+
+### `GET /v1/whoami`
+
+Returns the authenticated caller role and tenant/capability identity.
+
+### `GET /v1/admin/schema`
+
+Owner/query caller schema introspection for the active tenant database.
+
+### Compose Pins
+
+Owner compose-hash allowlist APIs used by trust tooling:
+
+- `POST /v1/tenants/compose-pin`
+- `GET /v1/tenants/compose-pin`
+- `GET /v1/tenants/compose-pin/list`
+- `DELETE /v1/tenants/compose-pin/{pin_id}`
 
 ## Rooms
 
@@ -99,6 +161,14 @@ Response includes:
 }
 ```
 
+### `GET /v1/rooms`
+
+Owner-only. Lists rooms for the authenticated tenant.
+
+### `GET /v1/rooms/{room_id}`
+
+Returns owner-visible room metadata.
+
 ### `GET /v1/rooms/{room_id}/attest`
 
 Returns the signed room envelope, scope-agent attestation, fixed query-agent
@@ -110,6 +180,11 @@ link before presenting private data or agent code.
 
 Presents the current bearer and opens the room key in process memory. This is
 also performed by room data writes and room runs when needed.
+
+### `GET /v1/rooms/{room_id}/key`
+
+Invite-token route used by clients to receive the wrapped room key after
+verification.
 
 ### `POST /v1/rooms/{room_id}/data`
 
@@ -125,6 +200,10 @@ Owner-only. Adds encrypted room data.
 ### `GET /v1/rooms/{room_id}/data`
 
 Owner-only. Lists owner-visible room data after opening the room key.
+
+### `DELETE /v1/rooms/{room_id}`
+
+Owner-only. Deletes a room registration.
 
 ### `POST /v1/rooms/{room_id}/runs`
 
@@ -202,6 +281,10 @@ available to internal rebuild and digest paths inside the CVM.
 
 List room agents visible to the caller.
 
+### `GET /v1/room-agents/{agent_id}`
+
+Return one room agent's metadata.
+
 ### `GET /v1/room-agents/{agent_id}/attest`
 
 Returns agent config, source digests, image digest, inspection mode, and live CVM
@@ -211,6 +294,14 @@ attestation.
 
 List extracted source file paths and sizes. Sealed agents list paths but do not
 serve plaintext file bodies.
+
+### `GET /v1/room-agents/{agent_id}/files/{path}`
+
+Fetch one inspectable source file. Sealed agents reject plaintext file reads.
+
+### `DELETE /v1/room-agents/{agent_id}`
+
+Owner-only. Deletes a reusable room agent registration.
 
 ## Runs
 

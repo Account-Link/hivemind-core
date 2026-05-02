@@ -146,7 +146,7 @@ public key.
 
 For non-local services, the CLI also requires live CVM proof by default: DCAP
 quote verification must recover the dstack compose hash, and the observed TLS
-certificate must match the quote's REPORT_DATA v2 binding. `hivemind trust
+certificate must match the quote's REPORT_DATA v2 binding. `hmctl trust
 attest --reproduce` then checks that the live `app_compose` hash, registered
 source pointer, and deterministic deploy render hints describe the same compose
 YAML that is running in the enclave.

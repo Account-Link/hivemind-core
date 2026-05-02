@@ -6,7 +6,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 authors = [
-    { name = "Account Link" },
+    { name = "Teleport Computer" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

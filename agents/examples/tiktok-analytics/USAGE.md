@@ -1,162 +1,68 @@
-# TikTok Analytics Agent — 端到端使用指南
+# TikTok Analytics Agent - Room-Native Usage
 
-## 前置条件
+This example is a query agent for an uploadable room. It expects the room's
+scope policy to allow aggregate reads over the
+`data_xordi_tiktok_oauth_watch_history` table.
 
-- hivemind-core 正在运行 (本地 `localhost:8100` 或线上实例)
-- 数据库中已存在 `data_xordi_tiktok_oauth_watch_history` 表 (50 条记录)
-- 报告存储由内置的 Postgres artifact store 提供，保留 24 小时 (由 `HIVEMIND_ARTIFACT_RETENTION_SECONDS` 配置)
+## Prerequisites
 
-```bash
-# 设置变量 (根据实际环境修改)
-export CORE_URL="http://localhost:8100"
-# 如果线上实例需要认证:
-# export API_KEY="your-api-key"
-# export AUTH="-H 'Authorization: Bearer $API_KEY'"
-```
+- A running Hivemind service, local or hosted.
+- An active `hmk_...` profile configured with `hmctl init` or `hmctl signup`.
+- A room invite whose manifest allows participant query-agent uploads.
+- Artifact egress enabled on the room if you want `report.json`.
 
----
-
-## 完整流程
-
-### Step 1: 打包 agent
+## Run With The CLI
 
 ```bash
-cd agents/examples/tiktok-analytics
-tar czf /tmp/tiktok-analytics.tar.gz -C . .
+hmctl profile use my-tenant
+ROOM='hmroom://...'
+
+hmctl room inspect "$ROOM"
+hmctl room accept "$ROOM"
+
+hmctl room ask "$ROOM" \
+  --agent agents/examples/tiktok-analytics \
+  --timeout 900 \
+  --max-llm-calls 10 \
+  --max-tokens 200000 \
+  --fetch \
+  "Analyse TikTok watch history and produce aggregate hashtag statistics."
 ```
 
-### Step 2: 上传并提交异步任务
-
-通过 `/v1/query-agents/submit` 一步完成上传 + 启动执行：
+`--fetch` downloads visible artifacts to `./hivemind-artifacts/<run_id>/`.
+Without `--fetch`, inspect the run and artifact list with:
 
 ```bash
-curl -s -X POST "$CORE_URL/v1/query-agents/submit" \
-  -F "name=tiktok-analytics" \
-  -F "archive=@/tmp/tiktok-analytics.tar.gz" \
-  -F "prompt=Analyse TikTok watch history" \
-  -F "description=Summarise hashtag themes and per-user stats, upload report to artifact store" \
-  -F "max_llm_calls=5" \
-  -F "max_tokens=50000" \
-  -F "timeout_seconds=120" \
-  | python3 -m json.tool
+hmctl room runs <run_id> --json
 ```
 
-返回示例：
-
-```json
-{
-    "run_id": "a1b2c3d4e5f6",
-    "agent_id": "f6e5d4c3b2a1",
-    "status": "pending"
-}
-```
-
-记住 `run_id`，后续用来轮询结果。
+Artifacts are served by the public run API:
 
 ```bash
-export RUN_ID="a1b2c3d4e5f6"  # 替换为实际返回值
+curl "$CORE_URL/v1/runs/$RUN_ID/artifacts/report.json" \
+  -H "Authorization: Bearer $TENANT_API_KEY" \
+  -o report.json
 ```
 
-### Step 3: 轮询任务状态
+## What The Agent Does
 
-```bash
-curl -s "$CORE_URL/v1/agent-runs/$RUN_ID" | python3 -m json.tool
+```text
+tiktok-analytics agent
+  -> POST /tools/execute_sql
+     reads aggregate TikTok watch-history rows allowed by the room scope
+  -> local statistics
+     unique users, unique authors, hashtag counts
+  -> POST /llm/chat
+     summarizes themes and viewing patterns
+  -> POST /sandbox/artifact-upload
+     writes report.json into the Postgres-backed artifact store
+  -> stdout
+     JSON summary for the room run output
 ```
 
-**状态流转：** `pending` → `running` → `completed` / `failed`
+## Report Shape
 
-运行中的返回：
-
-```json
-{
-    "run_id": "a1b2c3d4e5f6",
-    "agent_id": "f6e5d4c3b2a1",
-    "status": "running",
-    "error": null,
-    "created_at": 1711612345.123,
-    "updated_at": 1711612350.456,
-    "artifacts": [],
-    "artifact_retention_seconds": 86400
-}
-```
-
-完成后的返回（包含已写入的 artifact 列表，通过服务端接口下载）：
-
-```json
-{
-    "run_id": "a1b2c3d4e5f6",
-    "agent_id": "f6e5d4c3b2a1",
-    "status": "completed",
-    "error": null,
-    "created_at": 1711612345.123,
-    "updated_at": 1711612380.789,
-    "artifacts": [
-        {
-            "filename": "report.json",
-            "content_type": "application/json",
-            "size_bytes": 2431,
-            "created_at": 1711612379.123
-        }
-    ],
-    "artifact_retention_seconds": 86400
-}
-```
-
-下载 artifact：
-
-```bash
-curl -s "$CORE_URL/v1/query/runs/$RUN_ID/artifacts/report.json" -o report.json
-```
-
-### Step 4: 简单轮询脚本
-
-```bash
-while true; do
-  STATUS=$(curl -s "$CORE_URL/v1/agent-runs/$RUN_ID")
-  echo "$STATUS" | python3 -m json.tool
-
-  S=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-  if [ "$S" = "completed" ] || [ "$S" = "failed" ]; then
-    break
-  fi
-  sleep 3
-done
-```
-
----
-
-## Agent 内部做了什么
-
-```
-┌─────────────────────────────────────────────────────┐
-│  tiktok-analytics agent (Docker container)          │
-│                                                     │
-│  1. POST /tools/execute_sql                         │
-│     → SELECT ... FROM watch_history ORDER BY ...    │
-│     → 获取 50 条记录                                  │
-│                                                     │
-│  2. 本地统计                                          │
-│     → unique_users, unique_authors                  │
-│     → top 20 hashtags by frequency                  │
-│                                                     │
-│  3. POST /llm/chat                                  │
-│     → LLM 分析 hashtag 主题、内容分类、观看模式        │
-│     → 返回结构化 JSON                                │
-│                                                     │
-│  4. POST /sandbox/artifact-upload                   │
-│     → 写入 report.json 到 Postgres artifact store    │
-│     → 通过 /v1/query/runs/{run_id}/artifacts 下载    │
-│     → 24 小时 TTL 自动清理                           │
-│                                                     │
-│  5. stdout → JSON summary                           │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## 报告示例
-
-artifact store 中的 `report.json` 结构：
+`report.json` is JSON like:
 
 ```json
 {
@@ -173,33 +79,32 @@ artifact store 中的 `report.json` 结构：
     ]
   },
   "llm_analysis": {
-    "themes": ["Entertainment & comedy", "Music nostalgia", "..."],
-    "categories": ["Comedy/Humor", "Music", "Lifestyle", "..."],
-    "patterns": ["High engagement on comedy content", "..."]
+    "themes": ["Entertainment and comedy", "Music nostalgia"],
+    "categories": ["Comedy/Humor", "Music", "Lifestyle"],
+    "patterns": ["High engagement on comedy content"]
   }
 }
 ```
 
----
+## Register For Reuse
 
-## 备选：仅注册 agent，不立即执行
-
-如果只想上传 agent 以便后续复用：
+To register the agent as a reusable room agent without running it:
 
 ```bash
-# 仅上传注册
-curl -s -X POST "$CORE_URL/v1/agents/upload" \
-  -F "name=tiktok-analytics" \
-  -F "archive=@/tmp/tiktok-analytics.tar.gz" \
-  | python3 -m json.tool
-# → {"agent_id": "...", "name": "tiktok-analytics", "files_extracted": 3}
+tar czf /tmp/tiktok-analytics.tar.gz -C agents/examples/tiktok-analytics .
 
-# 之后通过 /v1/query/run/submit 指定 agent_id 执行
-curl -s -X POST "$CORE_URL/v1/query/run/submit" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Analyse TikTok watch history",
-    "query_agent_id": "<agent_id>"
-  }' | python3 -m json.tool
-# → {"run_id": "...", "status": "running"}
+curl -s -X POST "$CORE_URL/v1/room-agents" \
+  -H "Authorization: Bearer $TENANT_API_KEY" \
+  -F "name=tiktok-analytics" \
+  -F "agent_type=query" \
+  -F "inspection_mode=full" \
+  -F "archive=@/tmp/tiktok-analytics.tar.gz;type=application/gzip" \
+  | python3 -m json.tool
+```
+
+The response includes an `agent_id` and a background build `run_id`. Poll the
+build with:
+
+```bash
+hmctl room runs <build_run_id> --json
 ```

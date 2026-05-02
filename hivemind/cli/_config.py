@@ -25,7 +25,7 @@ def _profile_name() -> str:
 
     1. ``HIVEMIND_PROFILE`` env var (set by ``--profile NAME``)
     2. The persistent pointer file at ``~/.hivemind/active``
-       (written by ``hivemind profile use NAME``)
+       (written by ``hmctl profile use NAME``)
     3. ``"default"``
     """
     from . import _ACTIVE_POINTER  # parent-owned for test patching
@@ -86,13 +86,13 @@ def _load_config(*, check_trust: bool = True) -> dict:
         if profile == _DEFAULT_PROFILE and existing:
             hint = (
                 f"Profile '{profile}' doesn't exist. Pick one of "
-                f"{existing} via 'hivemind profile use NAME', "
+                f"{existing} via 'hmctl profile use NAME', "
                 f"or pass --profile NAME on each command."
             )
         elif profile == _DEFAULT_PROFILE:
-            hint = f"Run 'hivemind init --api-key …' to create profile '{profile}'."
+            hint = f"Run 'hmctl init --api-key …' to create profile '{profile}'."
         else:
-            hint = f"Run 'hivemind --profile {profile} init --api-key …' to create it."
+            hint = f"Run 'hmctl --profile {profile} init --api-key …' to create it."
         click.echo(
             f"Error: profile '{profile}' not found at {p}. {hint}",
             err=True,
@@ -106,7 +106,7 @@ def _load_config(*, check_trust: bool = True) -> dict:
         raise SystemExit(1)
     if not config.get("service"):
         click.echo(
-            f"Error: Config {p} missing 'service' URL. Run 'hivemind init' again.",
+            f"Error: Config {p} missing 'service' URL. Run 'hmctl init' again.",
             err=True,
         )
         raise SystemExit(1)

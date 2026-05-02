@@ -45,7 +45,7 @@ register_billing_commands(admin_cli)
 
 def _tenant_init_command(*, service: str, profile: str, api_key: str) -> str:
     parts = [
-        "hivemind",
+        "hmctl",
         "-y",
         "--profile",
         profile,

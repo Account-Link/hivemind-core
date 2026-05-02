@@ -37,7 +37,7 @@ pinned in the room too; if you omit `--mediator-agent`, the service default is
 pinned when one is configured.
 
 ```bash
-hivemind room create <scope-agent-id-or-path> \
+hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md
@@ -53,7 +53,7 @@ the uploaded source is stored.
 For the current live watch-history tenant:
 
 ```bash
-hivemind --profile watch-history room create agents/default-scope \
+hmctl --profile watch-history room create agents/default-scope \
   --name watch-history-hashtags \
   --query-agent agents/default-query \
   --mediator-agent agents/default-mediator \
@@ -75,9 +75,9 @@ Inspect the signed room spec:
 
 ```bash
 ROOM='hmroom://...'
-hivemind room inspect "$ROOM"
-hivemind room inspect "$ROOM" --json | jq '.room.manifest'
-hivemind room accept "$ROOM"
+hmctl room inspect "$ROOM"
+hmctl room inspect "$ROOM" --json | jq '.room.manifest'
+hmctl room accept "$ROOM"
 ```
 
 `room accept` saves the verified manifest hash for the active local profile.
@@ -89,8 +89,8 @@ because it opts out of client-side trust checks.
 Ask through the invite:
 
 ```bash
-hivemind profile use liz
-hivemind -y room ask 'hmroom://...' \
+hmctl profile use liz
+hmctl -y room ask 'hmroom://...' \
   --timeout 900 \
   --max-tokens 1000000 \
   --max-llm-calls 60 \
@@ -115,8 +115,8 @@ The copied room link can be shared as a shell variable:
 
 ```bash
 ROOM='hmroom://hivemind.teleport.computer/room_...?service=https%3A%2F%2Fhivemind.teleport.computer&token=hmq_...&owner_pubkey=...'
-hivemind profile use liz
-hivemind -y room ask "$ROOM" --provider openrouter --model z-ai/glm-5 "..."
+hmctl profile use liz
+hmctl -y room ask "$ROOM" --provider openrouter --model z-ai/glm-5 "..."
 ```
 
 `room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
@@ -130,7 +130,7 @@ clamps requests server-side; current caps are 900s runtime, 100 LLM calls, and
 Use this when the participant should bring their own query logic.
 
 ```bash
-hivemind room create <scope-agent-id-or-path> \
+hmctl room create <scope-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md \
   --query-visibility sealed
@@ -139,7 +139,7 @@ hivemind room create <scope-agent-id-or-path> \
 Then the participant asks with:
 
 ```bash
-hivemind room ask 'hmroom://...' "What changed this month?" \
+hmctl room ask 'hmroom://...' "What changed this month?" \
   --agent ./participant-query-agent
 ```
 
@@ -150,14 +150,14 @@ tenant billing credentials. When you query with the CLI, it attaches the
 active tenant profile's `hmk_` API key for billing automatically:
 
 ```bash
-hivemind profile use liz
-hivemind room ask "$ROOM" "What changed this month?"
+hmctl profile use liz
+hmctl room ask "$ROOM" "What changed this month?"
 ```
 
 Use a different profile when a different tenant should pay:
 
 ```bash
-hivemind --profile liz-billing room ask "$ROOM" "What changed this month?"
+hmctl --profile liz-billing room ask "$ROOM" "What changed this month?"
 ```
 
 The active profile does not change room authorization; the `hmroom://...` invite
@@ -165,20 +165,20 @@ still controls what data can be read. On services with self-serve signup
 enabled, a participant can create their own payer profile:
 
 ```bash
-hivemind --profile liz signup liz --service https://hivemind.teleport.computer
-hivemind --profile liz redeem-credit 'hmcc_...'
+hmctl --profile liz signup liz --service https://hivemind.teleport.computer
+hmctl --profile liz redeem-credit 'hmcc_...'
 ```
 
 Admin billing commands:
 
 ```bash
-hivemind admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
-hivemind admin credit-codes list
-hivemind admin billing grant t_... 25.00 --note "initial credit"
-hivemind admin billing accounts
-hivemind admin billing balance t_...
-hivemind admin billing ledger
-hivemind admin billing prices
+hmctl admin credit-codes create --credit 3.00 --uses 1 --expires-in 7d
+hmctl admin credit-codes list
+hmctl admin billing grant t_... 25.00 --note "initial credit"
+hmctl admin billing accounts
+hmctl admin billing balance t_...
+hmctl admin billing ledger
+hmctl admin billing prices
 ```
 
 ## Visibility Choices
@@ -206,7 +206,7 @@ the service can report it.
 Default room creation allows Tinfoil LLM egress. To allow OpenRouter instead:
 
 ```bash
-hivemind room create <scope-agent-id-or-path> \
+hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md \
@@ -216,7 +216,7 @@ hivemind room create <scope-agent-id-or-path> \
 To allow both:
 
 ```bash
-hivemind room create <scope-agent-id-or-path> \
+hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --mediator-agent <mediator-agent-id-or-path> \
   --rules-file rules.md \
@@ -227,7 +227,7 @@ hivemind room create <scope-agent-id-or-path> \
 For non-LLM rooms only, disable bridge LLM egress:
 
 ```bash
-hivemind room create <scope-agent-id-or-path> \
+hmctl room create <scope-agent-id-or-path> \
   --query-agent <query-agent-id-or-path> \
   --rules-file rules.md \
   --no-llm

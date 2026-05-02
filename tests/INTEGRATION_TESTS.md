@@ -6,8 +6,8 @@ The public integration surface is room-first.
 
 - `GET /v1/healthz` returns `200`.
 - `GET /v1/attestation` returns a bundle or a clear not-ready reason.
-- `hivemind init --service ... --api-key ...` saves a profile.
-- `hivemind trust attest` verifies or fails with an actionable reason.
+- `hmctl init --service ... --api-key ...` saves a profile.
+- `hmctl trust attest` verifies or fails with an actionable reason.
 
 ## Room Agents
 
@@ -42,10 +42,10 @@ The public integration surface is room-first.
 
 ## CLI
 
-- `hivemind room create ./scope-agent --rules-file rules.md` uploads a local
+- `hmctl room create ./scope-agent --rules-file rules.md` uploads a local
   scope agent and prints an invite link.
-- `hivemind room inspect 'hmroom://...'` verifies the room envelope.
-- `hivemind room add-data <room> --file data.md` writes room data.
-- `hivemind room ask 'hmroom://...' "question"` verifies the run attestation.
-- `hivemind room ask 'hmroom://...' "question" --agent ./query-agent` uses the
+- `hmctl room inspect 'hmroom://...'` verifies the room envelope.
+- `hmctl room add-data <room> --file data.md` writes room data.
+- `hmctl room ask 'hmroom://...' "question"` verifies the run attestation.
+- `hmctl room ask 'hmroom://...' "question" --agent ./query-agent` uses the
   room query-agent upload path.

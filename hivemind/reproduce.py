@@ -13,7 +13,7 @@ Walks the chain of trust:
 
 Each step is independently verifiable with ``curl`` + ``sha256sum`` if
 the user wants to repeat it by hand. The CLI bundles them so a single
-``hivemind trust attest --reproduce`` walks every link and reports
+``hmctl trust attest --reproduce`` walks every link and reports
 which ones held.
 
 Pattern adapted from sxysun/is-this-real-tea's ``verify-compose-hash.py``

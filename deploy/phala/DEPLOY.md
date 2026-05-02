@@ -13,7 +13,7 @@ Postgres CVM (persistent, never redeployed unless necessary)
         v
 App CVM (can redeploy freely)
 +-- hivemind-core -- port 8100
-+-- dind           -- Docker-in-Docker for agent containers
++-- host docker socket mount for agent containers
 ```
 
 All agents (scope, query, index, mediator) run as Docker containers inside the App CVM.
@@ -162,7 +162,7 @@ curl https://hivemind.teleport.computer/v1/healthz
 > `HIVEMIND_ENCLAVE_TLS=1` for the raw passthrough route.
 >
 > - **Daily use** → `https://hivemind.teleport.computer` (LE cert,
->   normal `curl` / browser validation). This is what `hivemind init
+>   normal `curl` / browser validation). This is what `hmctl init
 >   --service ...` should point at by default.
 > - **Tier-3 pinning** → `https://<core_cvm_id>-8100s.dstack-pha-prod9.phala.network`
 >   (gateway TCP-passthrough, enclave-derived cert). The CLI auto-
@@ -182,9 +182,9 @@ On a redeploy with a new hash, it prompts again. State lives in
 `~/.hivemind/trust.json`.
 
 ```bash
-hivemind trust show                          # inspect current state
-hivemind trust approve <service_url>         # force-approve without prompt
-hivemind trust reset --all                   # nuke and start over
+hmctl trust show                          # inspect current state
+hmctl trust approve <service_url>         # force-approve without prompt
+hmctl trust reset --all                   # nuke and start over
 ```
 
 **(b) On-chain registry (optional but ON by default).** The shipped
@@ -200,13 +200,13 @@ curl https://hivemind.teleport.computer/v1/attestation \
 # → 77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd
 
 # Approve it (one-time, requires the contract owner's EOA key)
-PRIVATE_KEY=0x... hivemind admin hashes approve \
+PRIVATE_KEY=0x... hmctl admin hashes approve \
   77c7624144c415e55b5fc6d70d36a27f26a02a12a14b9612d00fa4547ae9bccd \
   --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
 
 # Audit / revoke later
-hivemind admin hashes list   --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
-hivemind admin hashes revoke <hash> --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+hmctl admin hashes list   --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
+hmctl admin hashes revoke <hash> --contract 0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E
 ```
 
 To run *without* on-chain governance, leave `HIVEMIND_APP_AUTH_CONTRACT`
@@ -223,7 +223,7 @@ export CORE_URL=https://hivemind.teleport.computer
 export HIVEMIND_ADMIN_KEY=<admin key from Step 0>
 
 # Via CLI
-hivemind admin tenants create "first-tenant" \
+hmctl admin tenants create "first-tenant" \
   --service "$CORE_URL" \
   --admin-key "$HIVEMIND_ADMIN_KEY"
 
@@ -246,8 +246,8 @@ rotation by the tenant:
 
 ```bash
 # Tenant-side (using the key the admin handed them)
-hivemind init --service "$CORE_URL" --api-key "hmk_..."
-hivemind rotate-key
+hmctl init --service "$CORE_URL" --api-key "hmk_..."
+hmctl rotate-key
 # → prints a brand-new hmk_... and overwrites .hivemind/config.yaml
 ```
 
@@ -260,16 +260,16 @@ maps to their data. The admin's copy of the original key is now worthless.
 ### Handing the key to the tenant
 
 Hand the bootstrap `hmk_...` to your user (out-of-band, e.g. 1Password).
-They rotate it, then use the rotated key as their normal bearer token
-against `/v1/query/run/submit`, `/v1/store`, etc. Their data lives in an isolated
-Postgres database (`tenant_t_abc123...`) that no other tenant — and, after
-rotation, not even you (the admin) — can read via this API.
+They rotate it, then use the rotated key as their normal bearer token for
+room APIs such as `/v1/rooms`, `/v1/room-agents`, and `/v1/runs`. Their data
+lives in an isolated Postgres database (`tenant_t_abc123...`) that no other
+tenant — and, after rotation, not even you (the admin) — can read via this API.
 
 List or delete tenants later:
 
 ```bash
-hivemind admin tenants list --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
-hivemind admin tenants delete t_abc123... --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
+hmctl admin tenants list --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
+hmctl admin tenants delete t_abc123... --service "$CORE_URL" --admin-key "$HIVEMIND_ADMIN_KEY"
 ```
 
 ## Step 3.5 (optional): Migrate a Legacy Single-Tenant Database
@@ -300,7 +300,7 @@ first (pause redeploys, stop any direct-psycopg clients). The sql-proxy
 will proactively close its own pooled connection for `hivemind` as part
 of the rename.
 
-After migration, the tenant should immediately `hivemind rotate-key` as
+After migration, the tenant should immediately `hmctl rotate-key` as
 described above.
 
 ## Step 4: Import Data (Per-Tenant)

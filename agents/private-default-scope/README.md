@@ -43,18 +43,16 @@ You are a scope agent. Enforce these rules (CONFIDENTIAL):
 ...
 EOF
 
-# Upload via the CLI
-hivemind scope --private-prompt ~/private-rules.md
-
-# Or do it manually:
+# Upload manually:
 cp ~/private-rules.md agents/private-default-scope/prompt.md
 tar czf /tmp/agent.tar.gz -C agents/private-default-scope \
   Dockerfile agent.py _bridge.py prompt.md
 curl -F "name=private-scope" \
      -F "agent_type=scope" \
+     -F "inspection_mode=sealed" \
      -F "archive=@/tmp/agent.tar.gz;type=application/gzip" \
      -H "Authorization: Bearer $TENANT_API_KEY" \
-     http://localhost:8100/v1/agents/upload
+     http://localhost:8100/v1/room-agents
 rm agents/private-default-scope/prompt.md      # don't leave it on disk
 ```
 

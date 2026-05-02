@@ -32,7 +32,7 @@ def profile_list():
 
     active = _profile_name()
     if not _PROFILES_DIR.exists():
-        click.echo(f"No profiles yet. Run 'hivemind init …' to create '{active}'.")
+        click.echo(f"No profiles yet. Run 'hmctl init …' to create '{active}'.")
         return
     rows: list[tuple[str, str, str, str]] = []
     for p in sorted(_PROFILES_DIR.glob("*.yaml")):
@@ -94,11 +94,11 @@ def profile_delete(name: str):
     if pointer_was_set:
         click.echo(
             f"Active-profile pointer cleared (it was pointing at '{name}'). "
-            "Run 'hivemind profile use NAME' to set a new one."
+            "Run 'hmctl profile use NAME' to set a new one."
         )
     click.echo(
         "Note: the API key on the server is still valid until you "
-        "rotate it via 'hivemind rotate-key' or delete the tenant."
+        "rotate it via 'hmctl rotate-key' or delete the tenant."
     )
 
 
@@ -107,7 +107,7 @@ def profile_delete(name: str):
 def profile_use(name: str):
     """Make NAME the persistent active profile.
 
-    Plain ``hivemind <cmd>`` (no --profile flag, no HIVEMIND_PROFILE env)
+    Plain ``hmctl <cmd>`` (no --profile flag, no HIVEMIND_PROFILE env)
     will use this profile from now on. Per-command overrides via
     ``--profile`` and ``HIVEMIND_PROFILE`` still win.
     """
@@ -117,7 +117,7 @@ def profile_use(name: str):
     if not p.exists():
         click.echo(
             f"Error: profile '{name}' not found at {p}. "
-            f"Run 'hivemind --profile {name} init …' first.",
+            f"Run 'hmctl --profile {name} init …' first.",
             err=True,
         )
         raise SystemExit(1)

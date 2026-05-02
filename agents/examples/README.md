@@ -20,9 +20,12 @@ docker build -t hivemind-default-query agents/default-query/
 # Pack any example into a tarball
 tar czf agent.tar.gz -C agents/examples/simple-query .
 
-# Upload to hivemind
-curl -X POST http://localhost:8100/v1/agents/upload \
+# Upload as a reusable room agent
+curl -X POST http://localhost:8100/v1/room-agents \
+  -H "Authorization: Bearer $TENANT_API_KEY" \
   -F "name=simple-query" \
+  -F "agent_type=query" \
+  -F "inspection_mode=full" \
   -F "archive=@agent.tar.gz"
 ```
 
@@ -84,7 +87,7 @@ docker build -t hivemind-agent-sdk-query agents/examples/agent-sdk-query/
 
 ### `tiktok-analytics/` — TikTok Watch-History Analytics + Artifact Upload
 
-Queries the `data_xordi_tiktok_oauth_watch_history` table, computes per-user and hashtag statistics, asks the LLM to summarise content themes, and writes a JSON report to the Postgres-backed artifact store via `POST /sandbox/artifact-upload`. Artifacts are fetched via `GET /v1/query/runs/{run_id}/artifacts/{filename}` and purged after the retention window (24h by default).
+Queries the `data_xordi_tiktok_oauth_watch_history` table, computes per-user and hashtag statistics, asks the LLM to summarise content themes, and writes a JSON report to the Postgres-backed artifact store via `POST /sandbox/artifact-upload`. Artifacts are fetched via `GET /v1/runs/{run_id}/artifacts/{filename}` and purged after the retention window (24h by default).
 
 **Role:** query | **Tools:** execute_sql, get_schema | **LLM calls:** 1 (analysis) | **Artifact upload:** yes
 

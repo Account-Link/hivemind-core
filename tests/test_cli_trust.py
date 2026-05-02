@@ -643,7 +643,7 @@ def test_room_ask_requires_billable_profile_for_invite_links(_sandbox):
 
     assert result.exit_code != 0
     assert "active tenant API key" in result.output
-    assert "hivemind --profile NAME init --service URL --api-key hmk_" in result.output
+    assert "hmctl --profile NAME init --service URL --api-key hmk_" in result.output
 
 
 def test_room_help_documents_spec_and_budget_defaults():
@@ -714,7 +714,7 @@ def test_admin_create_uses_admin_profile_without_trust_check(
     assert captured["headers"]["Authorization"] == "Bearer admin-key"
     assert captured["json"] == {"name": "liz"}
     assert (
-        "hivemind -y --profile liz init --service https://cvm.example "
+        "hmctl -y --profile liz init --service https://cvm.example "
         "--api-key hmk_liz"
     ) in result.output
 
@@ -725,7 +725,7 @@ def test_admin_create_uses_admin_profile_without_trust_check(
     assert result_json.exit_code == 0, result_json.output
     payload = json.loads(result_json.output)
     assert payload["tenant_setup_command"] == (
-        "hivemind -y --profile liz init --service https://cvm.example "
+        "hmctl -y --profile liz init --service https://cvm.example "
         "--api-key hmk_liz"
     )
 

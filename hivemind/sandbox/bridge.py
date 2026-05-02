@@ -857,9 +857,7 @@ class BridgeServer:
                     data,
                     req.content_type,
                 )
-                path = (
-                    f"/v1/query/runs/{bridge.run_id}/artifacts/{req.filename}"
-                )
+                path = f"/v1/runs/{bridge.run_id}/artifacts/{req.filename}"
                 return BridgeArtifactUploadResponse(
                     path=path,
                     size_bytes=result["size_bytes"],

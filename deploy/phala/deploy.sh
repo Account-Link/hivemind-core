@@ -271,7 +271,7 @@ service_url() {
 # (or a fresh relay clone with a stale .env) causes hivemind-core's
 # attestation bundle to advertise a `tls.pinning_url` that points at
 # the wrong cluster — symptoms: CLI fails Tier-3 cert pin verification,
-# `hivemind schema` errors with "Cannot reach <friendly>" on SSL EOF
+# `hmctl trust attest` errors with "Cannot reach <friendly>" on SSL EOF
 # while the friendly URL is actually fine. (Real incident, 2026-04-26.)
 #
 # Two modes:

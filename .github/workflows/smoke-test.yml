@@ -109,7 +109,7 @@ jobs:
           name="cli-smoke-${tag}"
 
           HOME="$tmp_home" \
-            uv run --python 3.12 hivemind -y --profile cli-smoke \
+            uv run --python 3.12 hmctl -y --profile cli-smoke \
             signup "$name" --service "$BASE_URL" --json \
             > "$tmp_home/signup.json"
           tenant_id=$(python3 - "$tmp_home/signup.json" <<'PY'
@@ -129,7 +129,7 @@ jobs:
           echo "[cli-smoke] signup OK tenant_id=${tenant_id} balance_micro_usd=${balance}"
 
           HOME="$tmp_home" HIVEMIND_ADMIN_KEY="$HIVEMIND_ADMIN_KEY" \
-            uv run --python 3.12 hivemind -y admin credit-codes create \
+            uv run --python 3.12 hmctl -y admin credit-codes create \
             --service "$BASE_URL" --credit 0.01 --uses 1 --label "$name" --json \
             > "$tmp_home/code.json"
           credit_code=$(python3 - "$tmp_home/code.json" <<'PY'
@@ -145,7 +145,7 @@ jobs:
           echo "[cli-smoke] admin credit-code create OK code_id=${code_id}"
 
           HOME="$tmp_home" \
-            uv run --python 3.12 hivemind -y --profile cli-smoke \
+            uv run --python 3.12 hmctl -y --profile cli-smoke \
             redeem-credit "$credit_code" --json \
             > "$tmp_home/redeem.json"
           redeemed_balance=$(python3 - "$tmp_home/redeem.json" <<'PY'
@@ -160,7 +160,7 @@ jobs:
           echo "[cli-smoke] redeem-credit OK balance_micro_usd=${redeemed_balance}"
 
           HOME="$tmp_home" HIVEMIND_ADMIN_KEY="$HIVEMIND_ADMIN_KEY" \
-            uv run --python 3.12 hivemind -y admin billing balance "$tenant_id" \
+            uv run --python 3.12 hmctl -y admin billing balance "$tenant_id" \
             --service "$BASE_URL" --json \
             > "$tmp_home/billing.json"
           admin_balance=$(python3 - "$tmp_home/billing.json" <<'PY'
@@ -175,7 +175,7 @@ jobs:
           echo "[cli-smoke] admin billing balance OK balance_micro_usd=${admin_balance}"
 
           HOME="$tmp_home" HIVEMIND_ADMIN_KEY="$HIVEMIND_ADMIN_KEY" \
-            uv run --python 3.12 hivemind -y admin tenants delete "$tenant_id" \
+            uv run --python 3.12 hmctl -y admin tenants delete "$tenant_id" \
             --service "$BASE_URL" --yes
           echo "[cli-smoke] admin tenant delete OK tenant_id=${tenant_id}"
           REMOTE

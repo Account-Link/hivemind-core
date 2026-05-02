@@ -116,7 +116,7 @@ def register_billing_commands(admin_cli: click.Group) -> None:
         click.echo(f"  {data['code']}")
         click.echo("")
         click.echo("Redeem:")
-        click.echo(f"  hivemind redeem-credit {shlex.quote(data['code'])}")
+        click.echo(f"  hmctl redeem-credit {shlex.quote(data['code'])}")
 
     @admin_credit_codes.command("list")
     @click.option("--include-revoked", is_flag=True, help="Include revoked codes.")

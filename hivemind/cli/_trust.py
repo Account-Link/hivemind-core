@@ -486,7 +486,7 @@ def _verify_tls_pin(
             # an implementation detail of where the enclave cert lives;
             # the fingerprint is what's bound into the TDX quote and
             # what an auditor compares. Full URL still available via
-            # `hivemind trust attest --raw` for anyone who wants it.
+            # `hmctl trust attest --raw` for anyone who wants it.
             click.echo(
                 f"  ✓ Live remote attestation verified — your connection "
                 f"terminates inside\n"
@@ -588,7 +588,7 @@ def _require_trust(config: dict) -> None:
                     )
                     click.echo(
                         f"  ✓ Source: {src}\n"
-                        f"    (run `hivemind trust attest --reproduce` "
+                        f"    (run `hmctl trust attest --reproduce` "
                         f"to walk the chain back to source).",
                         err=True,
                     )

@@ -4,11 +4,11 @@ Queries the watch-history records, asks the LLM to summarise hashtag
 themes and per-user statistics, then uploads a JSON report to the
 Postgres-backed artifact store via the bridge.
 
-Env vars (set by hivemind):
+Env vars (set by Hivemind):
   BRIDGE_URL      - HTTP endpoint for the bridge server
   SESSION_TOKEN   - Bearer token for bridge auth
   QUERY_PROMPT    - The user's question (unused here; analysis is fixed)
-  RUN_ID          - Current run ID (set when launched via /v1/query-agents/submit)
+  RUN_ID          - Current room run ID
 """
 
 import base64

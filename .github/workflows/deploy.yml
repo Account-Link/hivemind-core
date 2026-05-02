@@ -354,7 +354,7 @@ jobs:
           # GIT_SHA comes from the env (event context) — see top of step.
           # IMAGE_SHA, when present, is the deterministic render hint used by
           # the relay before deploy. Carry it in the on-chain source URI so
-          # `hivemind trust attest --reproduce` verifies the exact rendered
+          # `hmctl trust attest --reproduce` verifies the exact rendered
           # compose instead of the static repo template.
           COMPOSE_URI="https://github.com/teleport-computer/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
           if [ -n "${IMAGE_SHA:-}" ]; then

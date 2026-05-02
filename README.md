@@ -347,6 +347,11 @@ The public API is room-first:
 
 ```text
 Room lifecycle
+GET    /v1/healthz
+GET    /v1/health
+GET    /v1/whoami
+GET    /v1/attestation
+GET    /v1/admin/schema
 POST   /v1/rooms
 GET    /v1/rooms
 GET    /v1/rooms/{room_id}
@@ -366,6 +371,7 @@ Agent inspection
 POST /v1/room-agents
 GET  /v1/room-agents
 GET  /v1/room-agents/{agent_id}
+DELETE /v1/room-agents/{agent_id}
 GET  /v1/room-agents/{agent_id}/attest
 GET  /v1/room-agents/{agent_id}/files
 GET  /v1/room-agents/{agent_id}/files/{path}
@@ -374,12 +380,26 @@ Observation
 GET /v1/runs
 GET /v1/runs/{run_id}
 GET /v1/runs/{run_id}/artifacts/{filename}
-GET /v1/attestation
+
+Tenant trust
+POST   /v1/tenant/rotate-key
+POST   /v1/tenants/compose-pin
+GET    /v1/tenants/compose-pin
+GET    /v1/tenants/compose-pin/list
+DELETE /v1/tenants/compose-pin/{pin_id}
 
 Billing/admin
 POST /v1/signup
 GET  /v1/billing
 POST /v1/billing/credit-codes/redeem
+POST /v1/admin/tenants
+GET  /v1/admin/tenants
+DELETE /v1/admin/tenants/{tenant_id}
+POST /v1/admin/tenants/{tenant_id}/reset-key
+POST /v1/admin/tenants/register
+POST /v1/admin/rename-database
+POST /v1/admin/migrate-to-roles
+POST /v1/admin/agents/sweep-broken
 GET  /v1/admin/billing
 GET  /v1/admin/billing/ledger
 GET  /v1/admin/billing/{tenant_id}
@@ -389,6 +409,7 @@ POST /v1/admin/credit-codes
 POST /v1/admin/credit-codes/{code_id}/revoke
 GET  /v1/admin/billing/prices
 POST /v1/admin/billing/prices
+GET  /v1/admin/llm-probe
 ```
 
 Lower-level SQL, token, and generic agent endpoints are internal

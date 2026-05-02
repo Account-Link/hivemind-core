@@ -185,7 +185,7 @@ def doctor(room: str | None, as_json: bool):
                 checks,
                 "room acceptance",
                 "ok" if accepted else "warn",
-                "accepted locally" if accepted else "run `hivemind room accept ROOM`",
+                "accepted locally" if accepted else "run `hmctl room accept ROOM`",
             )
         except Exception as e:
             _add_check(checks, "room", "fail", str(e))

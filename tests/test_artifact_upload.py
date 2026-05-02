@@ -113,9 +113,7 @@ class TestBridgeArtifactUpload:
             )
             assert resp.status_code == 200
             data = resp.json()
-            assert data["path"] == (
-                "/v1/query/runs/test-run-123/artifacts/report.json"
-            )
+            assert data["path"] == "/v1/runs/test-run-123/artifacts/report.json"
             assert data["size_bytes"] == len(payload)
             assert data["retention_seconds"] == 86400
 

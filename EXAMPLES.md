@@ -3,9 +3,9 @@
 ## Create An Uploadable Room
 
 ```bash
-hivemind init --service http://localhost:8100 --api-key hmk_owner
+hmctl init --service http://localhost:8100 --api-key hmk_owner
 
-hivemind room create ./agents/my-scope \
+hmctl room create ./agents/my-scope \
   --rules-file rules.md \
   --query-visibility sealed
 ```
@@ -20,17 +20,17 @@ Invite: hmroom://...
 ## Add Room Data
 
 ```bash
-hivemind room add-data room_... --file company_docs.md --meta source=docs
-hivemind room add-data room_... "private note" --meta source=note
-hivemind room data room_...
+hmctl room add-data room_... --file company_docs.md --meta source=docs
+hmctl room add-data room_... "private note" --meta source=note
+hmctl room data room_...
 ```
 
 ## Participant Inspection And Ask
 
 ```bash
-hivemind room inspect 'hmroom://...'
-hivemind room inspect 'hmroom://...' --json | jq '.room.manifest'
-hivemind room ask 'hmroom://...' "What changed this month?"
+hmctl room inspect 'hmroom://...'
+hmctl room inspect 'hmroom://...' --json | jq '.room.manifest'
+hmctl room ask 'hmroom://...' "What changed this month?"
 ```
 
 `room ask` defaults to `--timeout 600`, `--max-llm-calls 20`,
@@ -40,7 +40,7 @@ dynamic scope/query/mediator rooms.
 With a participant-owned query agent:
 
 ```bash
-hivemind room ask 'hmroom://...' \
+hmctl room ask 'hmroom://...' \
   "What changed this month?" \
   --agent ./participant-query-agent
 ```
@@ -48,7 +48,7 @@ hivemind room ask 'hmroom://...' \
 ## Fixed Query Agent Room
 
 ```bash
-hivemind room create ./agents/my-scope \
+hmctl room create ./agents/my-scope \
   --query-agent ./agents/fixed-query \
   --query-visibility inspectable \
   --rules-file rules.md
@@ -59,7 +59,7 @@ Participants can ask questions but cannot upload replacement query code.
 If the scope and query agents are already registered, the command is shorter:
 
 ```bash
-hivemind room create scope_agent_id \
+hmctl room create scope_agent_id \
   --query-agent query_agent_id \
   --rules-file rules.md
 ```
@@ -67,7 +67,7 @@ hivemind room create scope_agent_id \
 For the current live watch-history tenant:
 
 ```bash
-hivemind --profile watch-history room create agents/default-scope \
+hmctl --profile watch-history room create agents/default-scope \
   --name watch-history-hashtags \
   --query-agent agents/default-query \
   --mediator-agent agents/default-mediator \
@@ -82,7 +82,7 @@ hivemind --profile watch-history room create agents/default-scope \
 ## Non-LLM Room Egress Deny
 
 ```bash
-hivemind room create ./agents/my-scope \
+hmctl room create ./agents/my-scope \
   --rules-file rules.md \
   --no-llm
 ```
@@ -93,7 +93,7 @@ Use this only for pinned agents that do not call LLM endpoints.
 ## Owner-Approved Deployment Updates
 
 ```bash
-hivemind room trust room_... --mode owner_approved --approve-live
+hmctl room trust room_... --mode owner_approved --approve-live
 ```
 
 Existing invite links keep working because recipients verify the updated room

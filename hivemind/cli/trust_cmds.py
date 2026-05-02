@@ -16,7 +16,7 @@ from ._trust import (
 )
 
 
-# ── Trust store inspection (``hivemind trust ...``) ──
+# ── Trust store inspection (``hmctl trust ...``) ──
 
 
 @click.group("trust")
@@ -65,7 +65,7 @@ def trust_reset(service: str | None, all_services: bool):
     if not all_services and not service:
         click.echo(
             "Specify a SERVICE URL or --all.\n"
-            "Run 'hivemind trust show' to see what's stored.",
+            "Run 'hmctl trust show' to see what's stored.",
             err=True,
         )
         raise SystemExit(1)

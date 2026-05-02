@@ -143,7 +143,7 @@ def redeem_credit(credit_code: str, as_json: bool):
     service = config["service"]
     headers = _headers(config)
     if "Authorization" not in headers:
-        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        click.echo("Error: no api_key in config. Run 'hmctl init'.", err=True)
         raise SystemExit(1)
     try:
         resp = _hpost(
@@ -176,7 +176,7 @@ def balance(limit: int, as_json: bool):
     service = config["service"]
     headers = _headers(config)
     if "Authorization" not in headers:
-        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        click.echo("Error: no api_key in config. Run 'hmctl init'.", err=True)
         raise SystemExit(1)
     try:
         resp = _hget(
@@ -231,7 +231,7 @@ def rotate_key(as_json: bool):
     service = config["service"]
     headers = _headers(config)
     if "Authorization" not in headers:
-        click.echo("Error: no api_key in config. Run 'hivemind init'.", err=True)
+        click.echo("Error: no api_key in config. Run 'hmctl init'.", err=True)
         raise SystemExit(1)
 
     try:

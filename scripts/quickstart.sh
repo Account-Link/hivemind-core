@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# quickstart.sh — zero to first successful query.
+# quickstart.sh — zero to first successful room query.
 #
 # What it does:
 #   1. Scaffold .env (prompts for LLM key if missing)
@@ -9,7 +9,7 @@ set -euo pipefail
 #   3. Start Postgres via docker-compose
 #   4. uv sync
 #   5. Launch hivemind.server in the background
-#   6. hivemind init → load a row → scope → query → print the answer
+#   6. hmctl init → seed demo data → create a room → ask → print the answer
 #   7. Print next-step cheat-sheet + shutdown command
 #
 # Prereqs: docker, uv (astral.sh/uv).
@@ -147,9 +147,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Wait for /v1/health
+# Wait for unauthenticated liveness.
 for i in $(seq 1 30); do
-    if curl -fsS http://localhost:8100/v1/health >/dev/null 2>&1; then
+    if curl -fsS http://localhost:8100/v1/healthz >/dev/null 2>&1; then
         break
     fi
     sleep 1
@@ -160,45 +160,58 @@ say "Server is up (pid $SERVER_PID)"
 # --- 6. End-to-end demo ---
 if [ "$DO_DEMO" -eq 1 ]; then
     say "Provisioning demo tenant via admin API"
-    TENANT_JSON="$(uv run hivemind admin create-tenant \
+    TENANT_JSON="$(uv run hmctl admin tenants create "quickstart-$(date +%s)" \
         --service http://localhost:8100 \
         --admin-key "$HIVEMIND_ADMIN_KEY" \
-        --name "quickstart-$(date +%s)" \
         --json)"
     BOOTSTRAP_KEY="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['api_key'])" "$TENANT_JSON")"
     TENANT_ID="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['tenant_id'])" "$TENANT_JSON")"
     say "Tenant provisioned: $TENANT_ID"
 
-    uv run hivemind init \
+    uv run hmctl init \
         --service http://localhost:8100 \
         --api-key "$BOOTSTRAP_KEY" >/dev/null
 
     say "Rotating bootstrap key (admin briefly saw it; tenant cuts them out)"
-    ROTATE_JSON="$(uv run hivemind rotate-key --yes --json)"
+    ROTATE_JSON="$(uv run hmctl rotate-key --yes --json)"
     TENANT_API_KEY="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['api_key'])" "$ROTATE_JSON")"
 
-    say "Running end-to-end demo (load row → scope → query)"
+    say "Running end-to-end demo (seed data → create room → ask)"
 
     AUTH_HEADER=(-H "Authorization: Bearer ${TENANT_API_KEY}")
 
-    # Create a trivial table + row so the scope/query agents have something real.
-    curl -fsS -X POST http://localhost:8100/v1/store \
+    # Developer-only seed path. Public clients should add data through rooms,
+    # but this quickstart needs a table for the default SQL query agent.
+    curl -fsS -X POST http://localhost:8100/v1/_internal/store \
         "${AUTH_HEADER[@]}" \
         -H "Content-Type: application/json" \
         -d '{"sql": "CREATE TABLE IF NOT EXISTS demo_notes (id SERIAL PRIMARY KEY, content TEXT)", "params": []}' \
         >/dev/null
-    curl -fsS -X POST http://localhost:8100/v1/store \
+    curl -fsS -X POST http://localhost:8100/v1/_internal/store \
         "${AUTH_HEADER[@]}" \
         -H "Content-Type: application/json" \
         -d '{"sql": "INSERT INTO demo_notes (content) VALUES (%s), (%s), (%s)", "params": ["sprint retro","design review","team lunch"]}' \
         >/dev/null
     say "Seeded demo_notes with 3 rows"
 
-    say "Registering scope policy (takes ~30s — scope agent runs in Docker)"
-    uv run hivemind scope "Allow aggregate counts only. Never expose individual row content." >/dev/null
+    say "Creating a fixed-query room"
+    ROOM_JSON="$(uv run hmctl room create default-scope \
+        --name quickstart-demo \
+        --query-agent default-query \
+        --mediator-agent default-mediator \
+        --llm-provider openrouter \
+        --rules "Allow aggregate counts over demo_notes only. Never expose individual row content." \
+        --json)"
+    ROOM_LINK="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['link'])" "$ROOM_JSON")"
+    ROOM_ID="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['room_id'])" "$ROOM_JSON")"
+    say "Room created: $ROOM_ID"
 
-    say "Running query (takes ~30s — query + mediator agents run in Docker)"
-    QUERY_OUT="$(uv run hivemind query 'How many rows are in demo_notes?' 2>&1 || true)"
+    uv run hmctl room accept "$ROOM_LINK" >/dev/null
+
+    say "Running room ask (takes ~30s — scope/query/mediator agents run in Docker)"
+    QUERY_OUT="$(uv run hmctl -y room ask "$ROOM_LINK" \
+        --provider openrouter \
+        'How many rows are in demo_notes?' 2>&1 || true)"
     echo "────────────────────────────────────────────────────────"
     echo "$QUERY_OUT"
     echo "────────────────────────────────────────────────────────"
@@ -209,12 +222,12 @@ printf '  Server log: %s\n' "$SERVER_LOG"
 printf '  Server pid: %s\n\n' "$SERVER_PID"
 cat <<EOF
 Next steps:
-  uv run hivemind agents                 # list registered agents
-  uv run hivemind runs                   # list recent runs
-  uv run hivemind query "<question>"     # ask another question
-  uv run hivemind run ./my-agent         # upload your own agent
+  uv run hmctl room list                 # list rooms
+  uv run hmctl room runs                 # list recent room runs
+  uv run hmctl room ask "${ROOM_LINK:-hmroom://...}" "<question>"
+  uv run hmctl room create ./scope-agent --query-agent ./query-agent --rules-file rules.md
 
-Install hivemind as a top-level command (no 'uv run' prefix):
+Install hmctl as a top-level command (no 'uv run' prefix):
   uv tool install --editable .
 
 Shut down:

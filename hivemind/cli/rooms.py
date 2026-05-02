@@ -89,7 +89,7 @@ def _room_sealed_hint(detail: str) -> str:
         f"{detail}\n\n"
         "This room belongs to another tenant and that owner tenant is still "
         "sealed after a server restart. Ask the room owner to run an hmk_ "
-        "request once, for example `hivemind room inspect \"$ROOM\"` with "
+        "request once, for example `hmctl room inspect \"$ROOM\"` with "
         "the owner profile, then recreate the room and share the new invite."
     )
 
@@ -308,7 +308,7 @@ def _require_room_manifest_acceptance(
 
     click.echo("This room manifest has not been accepted for this profile.")
     click.echo("Review the signed room rules before sending prompts or data:")
-    click.echo("  hivemind room inspect \"$ROOM\" --json | jq '.room.manifest'")
+    click.echo("  hmctl room inspect \"$ROOM\" --json | jq '.room.manifest'")
     click.echo("")
     _echo_room_manifest_summary(room_data)
     click.echo("")
@@ -318,8 +318,8 @@ def _require_room_manifest_acceptance(
     ):
         raise click.ClickException(
             "room manifest not accepted. Run "
-            "`hivemind room inspect \"$ROOM\" --json | jq '.room.manifest'` "
-            "and `hivemind room accept \"$ROOM\"` before asking, or use "
+            "`hmctl room inspect \"$ROOM\" --json | jq '.room.manifest'` "
+            "and `hmctl room accept \"$ROOM\"` before asking, or use "
             "--dangerously-skip-attestations only as an explicit risk "
             "acceptance bypass."
         )
@@ -384,7 +384,7 @@ def _maybe_upload_room_agent(
         data={
             "name": agent_name,
             "agent_type": agent_type,
-            "description": f"hivemind room {agent_type} agent {path.name}",
+            "description": f"hmctl room {agent_type} agent {path.name}",
             "private_paths": _json.dumps(list(private_paths)),
             "inspection_mode": _inspection_mode_from_visibility(visibility),
         },
@@ -740,7 +740,7 @@ def inspect_room(room: str, as_json: bool):
     Use --json to print the full room spec; the signed manifest is at
     .room.manifest, for example:
 
-        hivemind room inspect "$ROOM" --json | jq '.room.manifest'
+        hmctl room inspect "$ROOM" --json | jq '.room.manifest'
     """
     service, room_id, headers, owner_pubkey = _parse_room_ref(room)
     data = _fetch_verified_room(
@@ -1210,8 +1210,8 @@ def ask_room(
         if not profile_api_key:
             raise click.ClickException(
                 "room invite asks require an active tenant API key. "
-                "Run `hivemind --profile NAME init --service URL "
-                "--api-key hmk_...`, then `hivemind profile use NAME`, "
+                "Run `hmctl --profile NAME init --service URL "
+                "--api-key hmk_...`, then `hmctl profile use NAME`, "
                 "or pass `--profile NAME` before `room ask`."
             )
     if profile_api_key:
@@ -1265,7 +1265,7 @@ def ask_room(
             archive_bytes=archive_bytes,
             archive_name=archive_name,
             agent_name=agent_name,
-            description=f"hivemind room ask --agent {agent_path.name}",
+            description=f"hmctl room ask --agent {agent_path.name}",
             prompt=question,
             memory_mb=memory_mb,
             max_llm_calls=max_llm_calls,

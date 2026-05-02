@@ -52,7 +52,7 @@ uv run python -m eval grade watch_history_top_hashtags output.md
 or stdin:
 
 ```bash
-hivemind room ask "$ROOM" "..." | uv run python -m eval grade watch_history_top_hashtags -
+hmctl room ask "$ROOM" "..." | uv run python -m eval grade watch_history_top_hashtags -
 ```
 
 This is intentionally small. The next useful layer is a room runner that

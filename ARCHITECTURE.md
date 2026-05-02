@@ -256,7 +256,7 @@ After the client verifies the live attestation, room signature, owner public
 key, and room trust mode, it requires the active local profile to accept the
 manifest hash before sending the first prompt. The acceptance cache is keyed by
 profile, service, room id, owner public key, and manifest hash, so a changed
-manifest prompts again. `hivemind room accept "$ROOM"` records this explicitly;
+manifest prompts again. `hmctl room accept "$ROOM"` records this explicitly;
 otherwise the first `room ask` prompts. `--dangerously-skip-attestations`
 bypasses this checkpoint together with the rest of client-side trust checking.
 
@@ -553,6 +553,12 @@ the invite token to a new deployment.
 The room-first API surface is:
 
 ```text
+GET  /v1/healthz
+GET  /v1/health
+GET  /v1/attestation
+GET  /v1/whoami
+GET  /v1/admin/schema
+
 POST /v1/rooms
 GET  /v1/rooms
 GET  /v1/rooms/{room_id}
@@ -561,6 +567,7 @@ GET  /v1/rooms/{room_id}/key
 POST /v1/rooms/{room_id}/open
 POST /v1/rooms/{room_id}/data
 GET  /v1/rooms/{room_id}/data
+DELETE /v1/rooms/{room_id}
 POST /v1/rooms/{room_id}/trust
 POST /v1/rooms/{room_id}/runs
 POST /v1/rooms/{room_id}/query-agents
@@ -568,6 +575,7 @@ POST /v1/rooms/{room_id}/query-agents
 POST /v1/room-agents
 GET  /v1/room-agents
 GET  /v1/room-agents/{agent_id}
+DELETE /v1/room-agents/{agent_id}
 GET  /v1/room-agents/{agent_id}/files
 GET  /v1/room-agents/{agent_id}/files/{path}
 GET  /v1/room-agents/{agent_id}/attest
@@ -576,13 +584,33 @@ GET  /v1/runs
 GET  /v1/runs/{run_id}
 GET  /v1/runs/{run_id}/artifacts/{filename}
 
-GET  /v1/attestation
-GET  /v1/whoami
+POST /v1/tenant/rotate-key
+POST /v1/tenants/compose-pin
+GET  /v1/tenants/compose-pin
+GET  /v1/tenants/compose-pin/list
+DELETE /v1/tenants/compose-pin/{pin_id}
 
+POST /v1/signup
+GET  /v1/billing
+POST /v1/billing/credit-codes/redeem
+GET  /v1/admin/billing
+GET  /v1/admin/billing/ledger
 GET  /v1/admin/billing/{tenant_id}
 POST /v1/admin/billing/{tenant_id}/credits
 GET  /v1/admin/billing/prices
 POST /v1/admin/billing/prices
+GET  /v1/admin/credit-codes
+POST /v1/admin/credit-codes
+POST /v1/admin/credit-codes/{code_id}/revoke
+GET  /v1/admin/tenants
+POST /v1/admin/tenants
+DELETE /v1/admin/tenants/{tenant_id}
+POST /v1/admin/tenants/{tenant_id}/reset-key
+POST /v1/admin/tenants/register
+POST /v1/admin/rename-database
+POST /v1/admin/migrate-to-roles
+POST /v1/admin/agents/sweep-broken
+GET  /v1/admin/llm-probe
 ```
 
 Lower-level `_internal` routes exist for compatibility, tests, and maintenance.

@@ -3,11 +3,11 @@
 Run after pushing a new core CVM image. Walks the lifecycle for query
 tokens against a live deployment using the active profile's owner key:
 
-    1. /v1/tokens — issue a query token (pinned to a scope agent id)
-    2. /v1/tokens — list shows the token, no plaintext
-    3. /v1/scope-attest with the query token — returns the bound agent
-    4. /v1/store with the query token — owner-only, expect 403
-    5. /v1/tokens — revoke the token
+    1. /v1/_internal/tokens — issue a query token (pinned to a scope agent id)
+    2. /v1/_internal/tokens — list shows the token, no plaintext
+    3. /v1/room-agents/{scope_agent_id}/attest with the query token
+    4. /v1/billing with the query token — owner-only, expect 403
+    5. /v1/_internal/tokens — revoke the token
     6. resolve_any rejects the revoked token (re-use returns 401)
 
 Usage::
@@ -75,7 +75,7 @@ def main() -> int:
     with httpx.Client(verify=not args.insecure, timeout=30) as c:
         # 1. issue query token
         r = c.post(
-            f"{service}/v1/tokens",
+            f"{service}/v1/_internal/tokens",
             headers=H_OWNER,
             json={
                 "kind": "query",
@@ -88,54 +88,48 @@ def main() -> int:
         print(f"[1] query token issued: id={q['token_id']}")
 
         # 2. list
-        r = c.get(f"{service}/v1/tokens", headers=H_OWNER)
+        r = c.get(f"{service}/v1/_internal/tokens", headers=H_OWNER)
         r.raise_for_status()
         rows = r.json()["tokens"]
         ids = {row["token_id"] for row in rows}
         assert q["token_id"] in ids
         print(f"[2] list returned {len(rows)} tokens")
 
-        # 3. query token → /v1/scope-attest
+        # 3. query token -> room-agent attestation for the bound scope agent
         r = c.get(
-            f"{service}/v1/scope-attest",
+            f"{service}/v1/room-agents/{scope_agent_id}/attest",
             headers={"Authorization": f"Bearer {q['token']}"},
         )
         r.raise_for_status()
         att = r.json()
-        assert att["scope_agent_id"] == scope_agent_id
+        assert att["agent_id"] == scope_agent_id
         digest = att["files_digest_sha256"]
         print(
-            f"[3] scope-attest: agent={att['scope_agent_id']} "
+            f"[3] room-agent attest: agent={att['agent_id']} "
             f"files={att['files_count']} digest={digest[:12]}…"
         )
 
-        # 4. query token → /v1/store (owner-only) must 403.
-        r = c.post(
-            f"{service}/v1/store",
+        # 4. query token -> /v1/billing (owner-only) must 403.
+        r = c.get(
+            f"{service}/v1/billing",
             headers={"Authorization": f"Bearer {q['token']}"},
-            json={"sql": "SELECT 1", "params": []},
         )
         assert r.status_code == 403, (
-            f"expected 403 for query token on /v1/store, got {r.status_code}: "
+            f"expected 403 for query token on /v1/billing, got {r.status_code}: "
             f"{r.text}"
         )
-        print("[4] query→/v1/store: 403 ✓ (owner-only path enforced)")
+        print("[4] query -> /v1/billing: 403 ok (owner-only path enforced)")
 
         # 5. revoke the token
         r = c.delete(
-            f"{service}/v1/tokens/{q['token_id']}", headers=H_OWNER,
+            f"{service}/v1/_internal/tokens/{q['token_id']}", headers=H_OWNER,
         )
         r.raise_for_status()
         print("[5] revoked the query token")
 
         # 6. revoked token → 401
         r = c.get(
-            f"{service}/v1/health",
-            headers={"Authorization": f"Bearer {q['token']}"},
-        )
-        # /v1/health is unauthed; use an authed endpoint instead.
-        r = c.get(
-            f"{service}/v1/scope-attest",
+            f"{service}/v1/room-agents/{scope_agent_id}/attest",
             headers={"Authorization": f"Bearer {q['token']}"},
         )
         assert r.status_code == 401, (

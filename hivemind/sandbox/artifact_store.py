@@ -2,7 +2,7 @@
 
 Replaces the S3 upload path. Agents POST /sandbox/artifact-upload to the
 bridge, which writes the bytes directly into _hivemind_query_artifacts.
-Callers fetch them via GET /v1/query/runs/{run_id}/artifacts/{filename}.
+Callers fetch them via GET /v1/runs/{run_id}/artifacts/{filename}.
 
 Retention: artifacts are purged after ARTIFACT_RETENTION_SECONDS (default
 24 hours) by the periodic sweeper in hivemind.core.
