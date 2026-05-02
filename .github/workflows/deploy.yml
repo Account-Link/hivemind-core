@@ -290,7 +290,7 @@ jobs:
       # Skipped on postgres-only deploys (hivemind-pg has its own
       # compose_hash but isn't gated by this contract).
       - name: Install cast
-        if: always() && github.event.inputs.target != 'postgres'
+        if: always() && !cancelled() && github.event.inputs.target != 'postgres'
         run: |
           set -euo pipefail
           # Avoid foundryup/foundry-toolchain here: both query the GitHub
@@ -301,7 +301,7 @@ jobs:
           cast --version
 
       - name: Approve compose_hash on-chain
-        if: always() && github.event.inputs.target != 'postgres'
+        if: always() && !cancelled() && github.event.inputs.target != 'postgres'
         timeout-minutes: 6
         env:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}

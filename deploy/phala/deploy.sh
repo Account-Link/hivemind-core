@@ -40,6 +40,7 @@ PHALA_ENV_UPDATE_TIMEOUT="${PHALA_ENV_UPDATE_TIMEOUT:-90}"
 PHALA_RESTART_TIMEOUT="${PHALA_RESTART_TIMEOUT:-420}"
 PHALA_QUERY_TIMEOUT="${PHALA_QUERY_TIMEOUT:-45}"
 PHALA_START_TIMEOUT="${PHALA_START_TIMEOUT:-120}"
+PHALA_TIMEOUT_KILL_AFTER="${PHALA_TIMEOUT_KILL_AFTER:-30s}"
 
 # CVM names are env-overridable so a fresh-cluster first-deploy can
 # use a temporary name (e.g. `hivemind-core-prod10`) without colliding
@@ -67,6 +68,12 @@ log()  { printf "\033[0;36m[deploy]\033[0m %s\n" "$*"; }
 warn() { printf "\033[0;33m[deploy]\033[0m %s\n" "$*" >&2; }
 die()  { printf "\033[0;31m[deploy ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
 
+phala_timeout() {
+    local seconds="$1"
+    shift
+    timeout --foreground --kill-after="${PHALA_TIMEOUT_KILL_AFTER}" "${seconds}" "$@"
+}
+
 retry_env_update() {
     local name="$1"
     local env_file="$2"
@@ -74,7 +81,7 @@ retry_env_update() {
     local status=0
 
     for i in $(seq 1 18); do
-        if output=$(timeout --foreground "${PHALA_ENV_UPDATE_TIMEOUT}" \
+        if output=$(phala_timeout "${PHALA_ENV_UPDATE_TIMEOUT}" \
                 phala envs update --cvm-id "${name}" -e "${env_file}" 2>&1); then
             [ -n "${output}" ] && printf "%s\n" "${output}"
             return 0
@@ -168,7 +175,7 @@ deploy_and_seal() {
     # on-chain approval step can run, even on a successful deploy.
     if [ -n "${NODE_ID}" ]; then
         log "creating ${name} on node-id=${NODE_ID} (compose=${compose})"
-        if ! timeout --foreground "${PHALA_DEPLOY_TIMEOUT}" \
+        if ! phala_timeout "${PHALA_DEPLOY_TIMEOUT}" \
                 phala deploy -n "${name}" --node-id "${NODE_ID}" \
                 -c "${compose}" -e "${env_file}" --wait; then
             warn "phala deploy --wait returned non-zero or timed out after ${PHALA_DEPLOY_TIMEOUT}s; continuing — wait_healthy is the real correctness check"
@@ -185,17 +192,17 @@ deploy_and_seal() {
     fi
 
     log "updating ${name} in place (compose=${compose})"
-    if ! timeout --foreground "${PHALA_DEPLOY_TIMEOUT}" \
+    if ! phala_timeout "${PHALA_DEPLOY_TIMEOUT}" \
             phala deploy --cvm-id "${name}" -c "${compose}" -e "${env_file}" --wait; then
         warn "phala deploy --wait returned non-zero or timed out after ${PHALA_DEPLOY_TIMEOUT}s; continuing — wait_healthy is the real correctness check"
         local s
-        s=$(timeout --foreground "${PHALA_QUERY_TIMEOUT}" \
+        s=$(phala_timeout "${PHALA_QUERY_TIMEOUT}" \
             phala cvms get --cvm-id "${name}" --json 2>/dev/null \
             | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))') || s=""
         log "post-deploy status: ${s}"
         if [ "${s}" = "stopped" ]; then
             warn "CVM left in stopped state — issuing explicit start"
-            timeout --foreground "${PHALA_START_TIMEOUT}" \
+            phala_timeout "${PHALA_START_TIMEOUT}" \
                 phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
                 || warn "phala cvms start also returned non-zero; wait_healthy will verify"
         fi
@@ -215,17 +222,17 @@ deploy_and_seal() {
     # Without this guard the workflow exited before the on-chain
     # approval step could run, even though the deploy itself succeeded.
     log "restarting ${name} to pick up re-sealed envs"
-    if ! timeout --foreground "${PHALA_RESTART_TIMEOUT}" \
+    if ! phala_timeout "${PHALA_RESTART_TIMEOUT}" \
             phala cvms restart --cvm-id "${name}" >/dev/null 2>&1; then
         warn "phala cvms restart returned non-zero or timed out after ${PHALA_RESTART_TIMEOUT}s; checking state"
         local s
-        s=$(timeout --foreground "${PHALA_QUERY_TIMEOUT}" \
+        s=$(phala_timeout "${PHALA_QUERY_TIMEOUT}" \
             phala cvms get --cvm-id "${name}" --json 2>/dev/null \
             | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))') || s=""
         log "post-restart status: ${s}"
         if [ "${s}" = "stopped" ]; then
             warn "CVM left in stopped state — issuing explicit start"
-            timeout --foreground "${PHALA_START_TIMEOUT}" \
+            phala_timeout "${PHALA_START_TIMEOUT}" \
                 phala cvms start --cvm-id "${name}" >/dev/null 2>&1 \
                 || warn "phala cvms start also returned non-zero; wait_healthy will verify"
         fi
