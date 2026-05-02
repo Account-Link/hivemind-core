@@ -301,6 +301,7 @@ jobs:
 
       - name: Approve compose_hash on-chain
         if: always() && github.event.inputs.target != 'postgres'
+        timeout-minutes: 6
         env:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           CONTRACT: "0x29b475E6D2e10bd3266569D4c5cf27BFd4f8c36E"
@@ -354,7 +355,7 @@ jobs:
           # the relay before deploy. Carry it in the on-chain source URI so
           # `hivemind trust attest --reproduce` verifies the exact rendered
           # compose instead of the static repo template.
-          COMPOSE_URI="https://github.com/Account-Link/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
+          COMPOSE_URI="https://github.com/teleport-computer/hivemind-core/blob/${GIT_SHA}/deploy/phala/docker-compose.core.yaml"
           if [ -n "${IMAGE_SHA:-}" ]; then
             COMPOSE_URI="${COMPOSE_URI}?image_sha=${IMAGE_SHA}"
           fi

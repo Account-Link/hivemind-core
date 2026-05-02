@@ -61,6 +61,29 @@ log()  { printf "\033[0;36m[deploy]\033[0m %s\n" "$*"; }
 warn() { printf "\033[0;33m[deploy]\033[0m %s\n" "$*" >&2; }
 die()  { printf "\033[0;31m[deploy ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
 
+retry_env_update() {
+    local name="$1"
+    local env_file="$2"
+    local output=""
+
+    for i in $(seq 1 18); do
+        if output=$(phala envs update --cvm-id "${name}" -e "${env_file}" 2>&1); then
+            [ -n "${output}" ] && printf "%s\n" "${output}"
+            return 0
+        fi
+        if printf "%s\n" "${output}" | grep -qi "Another operation is already in progress"; then
+            warn "env re-seal blocked by another CVM operation; retry ${i}/18 in 20s"
+            sleep 20
+            continue
+        fi
+        printf "%s\n" "${output}" >&2
+        return 1
+    done
+
+    printf "%s\n" "${output}" >&2
+    die "env re-seal on ${name} did not complete after retries"
+}
+
 # Extract every `${VAR:?...}` reference from a compose file — these
 # are the hard-required envs. Default-fallback forms `${VAR:-...}`
 # are intentionally excluded.
@@ -161,7 +184,7 @@ deploy_and_seal() {
     fi
 
     log "re-sealing env vars on ${name}"
-    phala envs update --cvm-id "${name}" -e "${env_file}"
+    retry_env_update "${name}" "${env_file}"
 
     # `phala cvms restart` polls for status=running and exits non-zero
     # at its hardcoded 300s timeout. On prod9 with enclave-TLS + ACME
