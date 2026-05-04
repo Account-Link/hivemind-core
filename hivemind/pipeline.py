@@ -1103,6 +1103,23 @@ class Pipeline:
             )
 
             # -- Stage 2: Mediator --
+            #
+            # Observable skip reasons. The fail-closed assertion below
+            # turns a "skipped despite pinned" into a hard error, but the
+            # operator wants the *why* in the logs even when the skip is
+            # legitimate (no mediator pinned, or query produced nothing).
+            if not resolved_mediator_id:
+                logger.info(
+                    "run %s: skipping mediator stage — no mediator pinned "
+                    "(req.mediator_agent_id=%r, settings.default_mediator_agent=%r)",
+                    run_id, mediator_agent_id, self.settings.default_mediator_agent,
+                )
+            elif not query_output:
+                logger.info(
+                    "run %s: skipping mediator stage — query agent produced "
+                    "empty output (resolved_mediator_id=%r)",
+                    run_id, resolved_mediator_id,
+                )
             if resolved_mediator_id and query_output:
                 if remaining < MEDIATOR_MIN_TOKENS:
                     raise ValueError(
@@ -1148,6 +1165,40 @@ class Pipeline:
                     await asyncio.to_thread(
                         run_store.update_stage, run_id, "mediator",
                         ended_at=time.time(),
+                    )
+
+            # Defense in depth: if a mediator was pinned for this run
+            # (room manifest mediator.agent_id, or the operator-side
+            # default_mediator_agent), it MUST have run before we reach
+            # this point. The mediator is the load-bearing output filter
+            # — if it silently skipped (resolved_mediator_id was None at
+            # the resolution step above, or the guard at the Stage-2
+            # block fell through), we are about to release unfiltered
+            # query output. Refuse.
+            #
+            # Reaching this assertion = a real bug, not an edge case.
+            # Possible root causes that have shown up in practice:
+            #   - room.manifest.mediator.agent_id was set, but
+            #     apply_room_to_query_request didn't propagate it into
+            #     qreq.mediator_agent_id (e.g., manifest schema drift).
+            #   - settings.default_mediator_agent was unset and the room
+            #     was created without an explicit --mediator-agent.
+            # Either way, fail closed: the user pinned a mediator; we owe
+            # them mediation or an explicit error.
+            mediator_pinned = bool(
+                mediator_agent_id or self.settings.default_mediator_agent
+            )
+            if mediator_pinned:
+                run_check = await asyncio.to_thread(
+                    run_store.get, run_id,
+                )
+                if not run_check or not run_check.get("mediator_started_at"):
+                    raise ValueError(
+                        f"Mediator '{resolved_mediator_id}' was pinned but "
+                        f"did not run for run {run_id}. Refusing to release "
+                        "unmediated output. This is a server-side bug — "
+                        "include the run_id and the room manifest hash when "
+                        "filing it."
                     )
 
             # Artifacts (if any) were written straight to Postgres during

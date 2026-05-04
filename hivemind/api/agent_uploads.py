@@ -285,6 +285,37 @@ def register_agent_upload_routes(
         scope_agent_id = _require_scope_agent_id(hm, scope_agent_id)
         await _ensure_scope_agent_exists(hm, scope_agent_id)
 
+        # Honor the room's pinned mediator. Without this, a bilateral
+        # room (uploadable query agent + pinned mediator) would silently
+        # skip the mediator stage at run time — `submit_room_run` in
+        # api/rooms.py uses apply_room_to_query_request to do the same
+        # resolution, but this upload-and-run endpoint had its own form
+        # parameter and ignored the manifest, leaking unmediated output.
+        manifest = room.get("manifest") or {}
+        manifest_mediator = manifest.get("mediator")
+        if isinstance(manifest_mediator, dict):
+            fixed_mediator_agent_id = (
+                manifest_mediator.get("agent_id") or ""
+            ).strip()
+            requested_mediator_agent_id = (mediator_agent_id or "").strip()
+            if fixed_mediator_agent_id:
+                if (
+                    requested_mediator_agent_id
+                    and requested_mediator_agent_id != fixed_mediator_agent_id
+                ):
+                    raise HTTPException(
+                        400,
+                        "room mediator agent is fixed by the signed room "
+                        "manifest; caller-supplied mediator cannot override "
+                        "it",
+                    )
+                mediator_agent_id = fixed_mediator_agent_id
+            elif requested_mediator_agent_id:
+                raise HTTPException(
+                    400,
+                    "room manifest does not allow a mediator-agent override",
+                )
+
         room_vault_items: list[dict] = []
         bearer = _bearer(request)
         await asyncio.to_thread(
