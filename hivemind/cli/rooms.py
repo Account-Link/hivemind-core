@@ -370,6 +370,7 @@ def _maybe_upload_room_agent(
     visibility: str,
     private_paths: tuple[str, ...] = (),
     as_json: bool = False,
+    timeout_seconds: int | None = None,
 ) -> str:
     path = Path(ref)
     if not path.exists():
@@ -378,16 +379,19 @@ def _maybe_upload_room_agent(
     archive_bytes, archive_name, agent_name = _archive_for_path(path)
     if not as_json:
         click.echo(f"Uploading {agent_type} agent {archive_name}...")
+    upload_data: dict[str, str] = {
+        "name": agent_name,
+        "agent_type": agent_type,
+        "description": f"hmctl room {agent_type} agent {path.name}",
+        "private_paths": _json.dumps(list(private_paths)),
+        "inspection_mode": _inspection_mode_from_visibility(visibility),
+    }
+    if timeout_seconds is not None:
+        upload_data["timeout_seconds"] = str(timeout_seconds)
     resp = _hpost(
         f"{service}/v1/room-agents",
         files={"archive": (archive_name, archive_bytes, "application/gzip")},
-        data={
-            "name": agent_name,
-            "agent_type": agent_type,
-            "description": f"hmctl room {agent_type} agent {path.name}",
-            "private_paths": _json.dumps(list(private_paths)),
-            "inspection_mode": _inspection_mode_from_visibility(visibility),
-        },
+        data=upload_data,
         headers=headers,
         timeout=60,
     )
@@ -632,6 +636,17 @@ def rooms_cli():
         "or owner-managed room allowlist."
     ),
 )
+@click.option(
+    "--agent-timeout",
+    type=int,
+    default=None,
+    help=(
+        "Per-agent run timeout in seconds, applied to scope/query/"
+        "mediator uploads. Default 120s is fine for small deterministic "
+        "agents but too short for the LLM-driven default-scope on cold "
+        "paths — bump to 600 for those rooms."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON on stdout.")
 def create_room(
     scope: str,
@@ -652,6 +667,7 @@ def create_room(
     no_llm: bool,
     allow_artifacts: bool,
     trust_mode: str,
+    agent_timeout: int | None,
     as_json: bool,
 ):
     """Create a room and print an invite link."""
@@ -671,6 +687,7 @@ def create_room(
         visibility=scope_visibility,
         private_paths=scope_private_paths,
         as_json=as_json,
+        timeout_seconds=agent_timeout,
     )
     query_agent_id = None
     if query_agent:
@@ -682,6 +699,7 @@ def create_room(
             visibility=query_visibility,
             private_paths=query_private_paths,
             as_json=as_json,
+            timeout_seconds=agent_timeout,
         )
     mediator_agent_id = None
     if mediator_agent:
@@ -693,6 +711,7 @@ def create_room(
             visibility=mediator_visibility,
             private_paths=mediator_private_paths,
             as_json=as_json,
+            timeout_seconds=agent_timeout,
         )
     payload = {
         "name": name,
@@ -1324,9 +1343,13 @@ def room_runs(run_id: str | None, limit: int, as_json: bool):
         output = (row.get("output") or "").replace("\n", " ")
         if len(output) > 80:
             output = output[:77] + "..."
+        # `room_id`/`run_id`/`status` can be None on partial rows. Default
+        # `dict.get('k', default)` returns the stored value (None) over the
+        # default whenever the key exists, so we coerce explicitly. Without
+        # this, `f"{None:<18}"` raises TypeError mid-listing.
+        run_id_s = row.get("run_id") or "?"
+        status_s = row.get("status") or "?"
+        room_id_s = row.get("room_id") or ""
         click.echo(
-            f"{row.get('run_id','?'):<14} "
-            f"{row.get('status','?'):<10} "
-            f"{row.get('room_id',''):<18} "
-            f"{output}"
+            f"{run_id_s:<14} {status_s:<10} {room_id_s:<18} {output}"
         )

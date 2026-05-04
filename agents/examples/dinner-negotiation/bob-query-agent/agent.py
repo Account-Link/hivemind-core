@@ -25,43 +25,61 @@ Env vars set by hivemind:
   BRIDGE_URL    — HTTP endpoint for the bridge (LLM + tools)
   SESSION_TOKEN — Bearer token for the bridge
   QUERY_PROMPT  — Bob's question (e.g., "Find a Thu/Fri evening near Mission")
+
+Implementation note: this uses stdlib `urllib` instead of `httpx` so
+the Dockerfile can layer on top of `hivemind-agent-base` (which ships
+aiohttp, not httpx) without an extra pip install. That keeps the
+agent image build robust under sandbox network policies that block
+pip at build time.
 """
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
-import httpx
-
-BRIDGE = os.environ["BRIDGE_URL"]
+BRIDGE = os.environ["BRIDGE_URL"].rstrip("/")
 TOKEN = os.environ["SESSION_TOKEN"]
 PROMPT = os.environ.get("QUERY_PROMPT", "").strip()
 
 PRIVATE_DIR = Path(__file__).parent / "b-private"
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json",
+}
 
-client = httpx.Client(
-    base_url=BRIDGE,
-    headers={"Authorization": f"Bearer {TOKEN}"},
-    timeout=60,
-)
+
+def _post(path: str, body: dict, timeout: int = 60) -> dict:
+    req = urlrequest.Request(
+        url=f"{BRIDGE}{path}",
+        data=json.dumps(body).encode("utf-8"),
+        headers=HEADERS,
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urlerror.HTTPError as e:
+        body_bytes = e.read()
+        raise RuntimeError(
+            f"bridge {path} failed {e.code}: {body_bytes.decode('utf-8', 'replace')[:300]}"
+        ) from e
 
 
 def call_tool(name: str, args: dict) -> str:
-    resp = client.post(f"/tools/{name}", json={"arguments": args})
-    resp.raise_for_status()
-    data = resp.json()
+    data = _post(f"/tools/{name}", {"arguments": args})
     if data.get("error"):
         return f"Error: {data['error']}"
     return data["result"]
 
 
 def llm_call(messages: list[dict], max_tokens: int = 2048) -> str:
-    resp = client.post(
-        "/llm/chat",
-        json={"messages": messages, "max_tokens": max_tokens},
+    data = _post(
+        "/llm/chat", {"messages": messages, "max_tokens": max_tokens}
     )
-    resp.raise_for_status()
-    return resp.json()["content"]
+    return data["content"]
 
 
 def load_private(name: str) -> dict:
@@ -85,18 +103,15 @@ def main():
     my_calendar = load_private("my-calendar.json")
     my_prefs = load_private("my-preferences.json")
 
-    # ── 2. Inspect Alice's schema, then SELECT only what scope allows. ──
-    schema = call_tool("get_schema", {})
-
-    # We deliberately ask for a narrow projection — only times. The
-    # scope agent should already enforce this, but asking narrowly
-    # makes the agent's intent unambiguous and gives the mediator less
-    # to redact if scope_fn is permissive.
+    # ── 2. SELECT only what scope allows. ───────────────────────────
+    # Narrow projection: only times. The scope agent should already
+    # enforce this, but asking narrowly makes the agent's intent
+    # unambiguous and gives the mediator less to redact.
     sql = (
         "SELECT start_time, end_time FROM calendar "
         "WHERE is_busy = false "
-        "  AND start_time >= '2026-05-04' "
-        "  AND start_time <  '2026-05-15' "
+        "  AND start_time >= NOW() "
+        "  AND start_time <  NOW() + INTERVAL '14 days' "
         "ORDER BY start_time"
     )
     alice_free_raw = call_tool("execute_sql", {"sql": sql})
@@ -109,9 +124,17 @@ def main():
     # Doing the join deterministically here means the LLM only has to
     # do the polish step, not the arithmetic. Smaller LLM context, less
     # to redact, more reproducible answers.
-    bob_free = [
-        e for e in my_calendar.get("events", []) if not e.get("busy")
-    ]
+    today_utc = datetime.now(timezone.utc).date()
+    bob_free = []
+    for e in my_calendar.get("events", []):
+        if e.get("busy"):
+            continue
+        offset = e.get("day_offset")
+        if offset is None:
+            continue
+        e = dict(e)
+        e["date"] = (today_utc + timedelta(days=int(offset))).isoformat()
+        bob_free.append(e)
     candidates = []
     for a in alice_free:
         a_date = (a.get("start_time") or "")[:10]

@@ -111,9 +111,11 @@ explicit budgets for dynamic-scope rooms.
 ### Flow B — User has private data; you create a room for them
 
 ```bash
-# 1. Load data into a tenant table (psycopg %s placeholders, not $1)
-hmctl sql 'CREATE TABLE events (id BIGSERIAL PRIMARY KEY, ...)'
-hmctl sql 'INSERT INTO events VALUES (DEFAULT, %s, %s)' -p 'val1' -p 'val2'
+# 1. Load data into a tenant table (psycopg %s placeholders, not $1).
+# `hmctl sql -f file.sql` is on hmctl 0.3.7+; on older builds POST to
+# /v1/tenant/sql via curl.
+hmctl sql 'CREATE TABLE events (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ, kind TEXT, value INTEGER)'
+hmctl sql 'INSERT INTO events (ts, kind, value) VALUES (NOW(), %s, %s)' -p 'pageview' -p 1
 
 # 2. Write rules.md — plain markdown describing what the room allows
 cat > rules.md <<'EOF'
@@ -127,14 +129,43 @@ Not allowed:
 - secrets or system internals
 EOF
 
-# 3. Mint the room with default agents
+# 3. Mint the room. Choose one of:
+#
+#  (a) Fixed query agent — owner pre-loads the question logic, the
+#      participant ONLY supplies the question. Use --query-agent.
+#  (b) Uploadable query agent — the participant uploads their own
+#      sealed agent (with bundled private data, the bilateral case).
+#      OMIT --query-agent. This is what the dinner-negotiation
+#      example uses.
+#
+# Use --llm-provider openrouter (known-working). tinfoil's default
+# model is currently unpriced on production billing and will reject
+# at run time; that's deployment config, not a CLI bug.
+#
+# --agent-timeout 600 bumps the per-agent build/run timeout from the
+# 120s default; the LLM-driven default-mediator can need a few
+# hundred seconds on cold paths.
+
+# Example (a): fixed query agent, single-asker pattern
 hmctl room create agents/default-scope \
   --query-agent agents/default-query \
   --mediator-agent agents/default-mediator \
   --rules-file rules.md \
   --query-visibility inspectable \
   --trust-mode owner_approved \
-  --llm-provider tinfoil
+  --agent-timeout 600 \
+  --llm-provider openrouter
+
+# Example (b): uploadable query agent, bilateral pattern
+# (note: NO --query-agent flag)
+hmctl room create agents/default-scope \
+  --mediator-agent agents/default-mediator \
+  --rules-file rules.md \
+  --query-visibility sealed \
+  --output-visibility owner_and_querier \
+  --trust-mode owner_approved \
+  --agent-timeout 600 \
+  --llm-provider openrouter
 
 # 4. Hand the printed `hmroom://...` URI to the other party
 ```
@@ -244,10 +275,15 @@ when the user wants their reasoning approach not to be reverse-engineered.
 
 ```bash
 hmctl room create ./scope-agent \
-  --query-agent ./query-agent \
+  --mediator-agent agents/default-mediator \
   --query-visibility sealed \
-  --rules-file rules.md
+  --rules-file rules.md \
+  --agent-timeout 600 \
+  --llm-provider openrouter
 ```
+
+(Drop `--query-agent` if the participant should upload their own
+sealed query agent — that's the bilateral pattern.)
 
 ## Verifying the enclave (only if the user explicitly cares)
 

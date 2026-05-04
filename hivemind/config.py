@@ -92,6 +92,18 @@ class Settings(BaseSettings):
     # Credit codes are separate and can be redeemed after signup.
     self_serve_signup_enabled: bool = False
 
+    # Credit code that gets auto-redeemed by the server immediately after a
+    # /v1/signup mints a tenant. Empty (default) = no auto-credit; the
+    # tenant lands at $0 and must redeem manually via
+    # POST /v1/billing/credit-codes/redeem. When set to a valid hmcc_*
+    # code, the server mints the tenant, then redeems the code against
+    # the new tenant before responding so CLI users (`hmctl signup`) get
+    # the same first-run-covered experience as the website's /signup. The
+    # code's max_redemptions cap is the abuse fence — set it sized to
+    # your expected signup volume. Failures (revoked, exhausted, expired)
+    # are non-fatal and logged; signup still succeeds.
+    signup_starter_credit_code: str = ""
+
     # Artifact retention — how long query-agent artifact uploads and run
     # output/error text are kept before the periodic sweeper purges them.
     # Artifacts and run output live in Postgres inside the TEE; there is

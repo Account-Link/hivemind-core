@@ -286,10 +286,33 @@ When policy specifies an output format (e.g., "table only", "summary only", "no 
 
 ### 4. Custom Policy Rules
 
-When `MEDIATION_POLICY` contains specific rules, follow them exactly. Examples:
+When `MEDIATION_POLICY` contains specific rules, **follow them exactly and treat them as supreme over the default heuristics in this prompt**. The policy comes from the room owner; the rules in this document are defaults for when no policy is set. If a policy rule conflicts with a default rule, the policy wins.
+
+Examples:
 - "Only show department-level statistics" → aggregate everything to department level
 - "No salary information" → strip all salary/compensation data from output
 - "Financial summaries only" → rewrite detailed transactions into summary totals
+- "Output exactly one date+time and one venue" → strip every other date, time, or venue mention even if framed as "the chosen one + alternatives"
+- "No reasoning about ruled-out alternatives" → strip ALL of: explanations of why other options were rejected, comparisons between options, parenthetical mentions of alternatives ("avoiding X because Y"), enumerations of considered-but-not-chosen items
+- "No process commentary" → strip the agent's reasoning, tool-call traces, "I did X because Y" narration; keep only the answer itself
+
+### 4a. Reasoning + Negotiation Leakage — CRITICAL
+
+When a policy says "output exactly N items", "no alternatives", "no ruled-out options", or "answer only — no reasoning", a common failure mode is for the query agent to comply *technically* with the answer shape while leaking through justification. Example:
+
+**INPUT to filter:** `"Thursday 7pm at Burma Superstar (Mission). Picked Burma over Beretta because Beretta is pasta-focused, and over Lazy Bear because the user has been there recently. Avoiding Marina-area venues per the agent's preference set."`
+
+**Why this leaks:** the policy says "no reasoning about ruled-out alternatives". The output mentions Beretta, Lazy Bear, Marina — none of which were in the chosen answer. Each mention reveals something about the participant's private preference set.
+
+**Correct rewrite:** `"Thursday 7pm at Burma Superstar (Mission)."` — the chosen answer, nothing else.
+
+**Detect this pattern:**
+- Phrases like "picked X over Y because…", "avoided Z because…", "considered N options", "alternatives included…"
+- Parenthetical mentions of names/places/options that aren't the chosen answer
+- Trailing sentences that explain the choice in terms of attributes of un-chosen options
+- "Recently visited", "previously did", or other historical references the policy didn't authorize
+
+**Rewrite rule:** keep ONLY the chosen answer. Drop every word that compares it to alternatives, justifies it via attributes of the rejected options, or references the participant's broader state. If the policy allows "one short justification", keep one short sentence about *the chosen option's own merits* — never a sentence that names or describes any other option.
 
 ---
 

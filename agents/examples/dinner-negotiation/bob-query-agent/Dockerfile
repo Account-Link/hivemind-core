@@ -1,8 +1,14 @@
-# python:3.12-slim, resolved 2026-04-29.
-FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
+# Base off hivemind-agent-base so the sandbox builder doesn't need to
+# resolve pip + apt at build time. The base image already has httpx
+# pinned. If you need extra dependencies, layer them after this line.
+#
+# A bare `FROM python:3.12-slim` + `pip install httpx` Dockerfile DOES
+# build standalone but FAILS inside the sandbox builder's network-
+# constrained build context — pip cannot reach PyPI from there. Using
+# the prebuilt base avoids that whole class of issue.
+FROM hivemind-agent-base:latest
+
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 COPY agent.py .
 COPY b-private/ ./b-private/
 CMD ["python", "agent.py"]
