@@ -161,32 +161,44 @@ def main():
     # Critically, we hand the LLM only what it needs to produce the
     # final sentence. We don't echo our private files into the prompt
     # beyond the relevant subset, so the mediator has less to scrub.
+    #
+    # Token budget note: chain-of-thought-prone models (default
+    # openrouter routing currently includes some) burn the budget on
+    # reasoning before emitting the answer, leaving the actual venue
+    # line truncated. Two mitigations: (a) prompt explicitly forbids
+    # thinking-aloud and demands the one-line answer, (b) budget is
+    # 1500 tokens — generous enough that even a verbose model lands
+    # the final line.
     system = (
-        "You are a scheduling agent producing exactly one short answer:\n"
-        "  one date and time, one venue (name + neighborhood), and one "
-        "  short justification sentence.\n"
-        "Do NOT list alternatives. Do NOT mention any time other than "
-        "the chosen one. Do NOT mention any venue the user has visited "
-        "recently. Do NOT include any flags or preferences verbatim."
+        "You are a scheduling agent. Your ONLY output is one line of "
+        "the form:\n"
+        "  <Day Month D, YYYY> at <HH:MM> at <Venue> (<neighborhood>) "
+        "— <one short reason>.\n\n"
+        "Rules:\n"
+        "- DO NOT think out loud. DO NOT include reasoning, "
+        "analysis, alternatives, or commentary.\n"
+        "- DO NOT list candidates. DO NOT mention any other time.\n"
+        "- DO NOT mention any venue from the recently-visited list.\n"
+        "- DO NOT echo Bob's preference flags verbatim.\n"
+        "- Output the single line above and stop."
     )
     user = (
         f"User question: {PROMPT}\n\n"
-        f"Candidate dates where both Alice and Bob are free:\n"
+        f"Free-overlap candidates (date + windows):\n"
         f"{json.dumps(candidates, indent=2)}\n\n"
-        f"Bob's neighborhood preferences (use, do not echo):\n"
+        f"Bob's neighborhood prefs:\n"
         f"  preferred: {my_prefs['neighborhoods_preferred']}\n"
         f"  avoid:     {my_prefs['neighborhoods_avoid']}\n"
         f"  diet:      avoid_pasta={my_prefs['diet']['avoid_pasta']}, "
         f"vegetarian={my_prefs['diet']['vegetarian']}\n"
-        f"Recently visited (avoid suggesting these):\n"
+        f"Recently visited (DO NOT suggest these):\n"
         f"  {[v['name'] for v in my_prefs['venues_visited_recently']]}\n\n"
-        f"Pick the earliest candidate that fits, suggest one venue that "
-        f"matches neighborhood + diet preferences, write one short answer."
+        f"Pick the earliest candidate. One line only."
     )
     answer = llm_call([
         {"role": "system", "content": system},
         {"role": "user", "content": user},
-    ], max_tokens=400)
+    ], max_tokens=1500)
 
     # The mediator will see this stdout as RAW_OUTPUT and decide what
     # to release. Anything that violates rules.md gets stripped.
