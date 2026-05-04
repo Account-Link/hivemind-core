@@ -90,6 +90,14 @@ hmctl --version  # expect 0.3.7+
 to get whatever's on PyPI; you'll need to use the curl fallback for
 seeding and skip the `--agent-timeout` flag.)
 
+About `--profile` and `--service`: a profile is a saved (service
+URL, API key) pair stored at `~/.hivemind/profiles/<name>.yaml`. The
+default service is `http://localhost:8100`, so you MUST pass
+`--service https://hivemind.teleport.computer` on the first signup
+or it'll try localhost. After signup writes the profile config,
+later `hmctl --profile NAME …` commands inherit the service URL
+automatically.
+
 ### Alice — provision, seed, mint room
 
 ```bash

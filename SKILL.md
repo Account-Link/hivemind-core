@@ -33,29 +33,52 @@ Do NOT invoke for:
 # may still be on 0.3.6; install from main until the next release:
 uv tool install --upgrade git+https://github.com/teleport-computer/hivemind.git
 hmctl --version  # expect 0.3.7+
-hmctl signup my-agent --service https://hivemind.teleport.computer
-hmctl balance
-```
-
-`signup` provisions a $0 balance. If the deployment has
-`signup_starter_credit_code` set on the server, signup auto-redeems
-and you have enough for one full run. Otherwise the balance is $0
-and you must redeem a code:
-
-```bash
-# Public starter code: $1, 1000 redemptions, 90-day expiry. One per
-# tenant. If exhausted, ask the operator for a fresh code.
-hmctl redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
-```
-
-If the user already has an `hmk_…` key, skip signup:
-
-```bash
-hmctl init --service https://hivemind.teleport.computer --api-key hmk_...
 ```
 
 The package installs both `hmctl` (short) and `hivemind` (long) — same
 binary.
+
+### Profiles + the `--service` flag
+
+A *profile* is a saved (service URL, API key) pair stored at
+`~/.hivemind/profiles/<name>.yaml`. The default service is
+`http://localhost:8100`, so **you must pass `--service
+https://hivemind.teleport.computer`** the first time you create a
+profile or it'll try localhost. After signup/init writes the profile
+config, every subsequent `hmctl --profile NAME …` command reads the
+service URL from that file — no need to repeat `--service`. To run
+two parties from one machine, use a `--profile` per party:
+
+```bash
+# First-time profile creation MUST pass --service for hosted use:
+hmctl --profile alice signup alice --service https://hivemind.teleport.computer
+hmctl --profile bob   signup bob   --service https://hivemind.teleport.computer
+
+# After that, --service is implicit from the profile:
+hmctl --profile alice balance
+hmctl --profile bob   balance
+```
+
+If the user already has an `hmk_…` key, use `init` instead of signup:
+
+```bash
+hmctl --profile alice init --service https://hivemind.teleport.computer --api-key hmk_...
+```
+
+### Funding the tenant
+
+`signup` provisions a $0 balance. If the deployment has
+`signup_starter_credit_code` set on the server (env var
+`HIVEMIND_SIGNUP_STARTER_CREDIT_CODE`), signup auto-redeems and you
+have enough for one full run. Otherwise the balance is $0 and you must
+redeem a code:
+
+```bash
+# Public starter code: $1, 1000 redemptions, 90-day expiry. One per
+# tenant. If exhausted, ask the operator for a fresh code.
+hmctl --profile alice redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
+hmctl --profile bob   redeem-credit hmcc_0F7HJvv8uYNwMj1QPcplj3tGx-zNrcXm9s8ulLLKJd0
+```
 
 ## What your code can do inside the CVM (sandbox rules)
 
@@ -310,6 +333,30 @@ room manifest signature. `hmctl room ask` does sensible defaults already;
 the explicit verify is for users with regulatory or counterparty
 requirements. Use `--dangerously-skip-attestations` to bypass entirely
 (not recommended).
+
+## Retrieving run output after the fact
+
+Two paths, depending on caller role:
+
+- **Owner** can list and fetch any run on their tenant:
+  ```bash
+  hmctl --profile alice room runs --limit 10              # list recent
+  hmctl --profile alice room runs <run_id>                # fetch one as JSON
+  ```
+
+- **Participant** (querier using an invite token) cannot list — `GET
+  /v1/runs` is owner-scoped. They CAN fetch a specific run by id, but
+  only by re-authenticating with the same invite token that issued it:
+  ```bash
+  hmctl --profile bob room ask 'hmroom://...' "..." --json   # captures run_id
+  # Then bob's local hmctl auth (his hmk_) will 404 — he must use the
+  # invite token. Easiest: capture the output the first time and store
+  # it; the live `room ask` invocation already streamed the final
+  # answer to stdout.
+  ```
+
+For most flows the participant should treat the live `room ask`
+output as canonical and not rely on after-the-fact fetch.
 
 ## Common errors and what they mean
 
