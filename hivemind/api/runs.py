@@ -7,22 +7,49 @@ import email.utils
 from collections.abc import Callable
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..tenants import Caller
 
 
-def _caller_can_access_run(caller: Caller, run: dict) -> bool:
-    """Owner sees tenant runs; query tokens see only their own runs."""
+def _caller_can_access_run(
+    caller: Caller,
+    run: dict,
+    *,
+    asker_tenant_id: str | None = None,
+) -> bool:
+    """Owner sees tenant runs; query tokens see only their own runs.
+
+    Share-link askers see only runs they paid for in their bound room.
+    ``asker_tenant_id`` is the tenant resolved from
+    ``X-Hivemind-Api-Key`` on the read request — the caller must
+    re-prove identity each read so a single share token can't leak
+    runs across askers. Pass ``None`` if the header was absent and the
+    handler should refuse access.
+    """
     if caller.role == "owner":
         return True
+    if caller.role == "share":
+        bound = (caller.constraints.get("room_id") or "").strip()
+        if not bound or run.get("room_id") != bound:
+            return False
+        if not asker_tenant_id:
+            return False
+        return run.get("payer_tenant_id") == asker_tenant_id
     return bool(caller.token_id) and run.get("issuer_token_id") == caller.token_id
 
 
-def _caller_can_access_run_payload(caller: Caller, run: dict) -> bool:
+def _caller_can_access_run_payload(
+    caller: Caller,
+    run: dict,
+    *,
+    asker_tenant_id: str | None = None,
+) -> bool:
     """Whether caller may see output text and artifacts for a run."""
-    if not _caller_can_access_run(caller, run):
+    if not _caller_can_access_run(
+        caller, run, asker_tenant_id=asker_tenant_id,
+    ):
         return False
     visibility = (run.get("output_visibility") or "owner_and_querier").strip()
     if (
@@ -35,8 +62,15 @@ def _caller_can_access_run_payload(caller: Caller, run: dict) -> bool:
     return True
 
 
-def _redact_run_payload_for_caller(caller: Caller, run: dict) -> dict:
-    if _caller_can_access_run_payload(caller, run):
+def _redact_run_payload_for_caller(
+    caller: Caller,
+    run: dict,
+    *,
+    asker_tenant_id: str | None = None,
+) -> dict:
+    if _caller_can_access_run_payload(
+        caller, run, asker_tenant_id=asker_tenant_id,
+    ):
         return run
     redacted = dict(run)
     redacted["output"] = None
@@ -46,29 +80,58 @@ def _redact_run_payload_for_caller(caller: Caller, run: dict) -> dict:
     return redacted
 
 
+def _asker_tenant_for_share(caller: Caller, request) -> str | None:
+    """For role='share', resolve X-Hivemind-Api-Key → tenant_id.
+
+    Returns ``None`` if the header is absent or the key is invalid; the
+    run-read handler treats ``None`` as forbidden (rather than 401) so
+    leaking "this run exists but you can't see it" doesn't happen.
+    """
+    if caller.role != "share":
+        return None
+    payer_key = (
+        request.headers.get("X-Hivemind-Api-Key")
+        or request.headers.get("X-Hivemind-Payer-Key")
+        or ""
+    ).strip()
+    if not payer_key:
+        return None
+    registry = request.app.state.registry
+    payer = registry.resolve_payer_key(payer_key)
+    if payer is None:
+        return None
+    return payer.get("tenant_id")
+
+
 def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) -> None:
     """Register run read and artifact endpoints."""
 
     @app.get("/v1/runs/{run_id}")
     async def get_agent_run(
         run_id: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        request: Request,
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         """Get the status and result of an agent run."""
         hm = caller.hive
         run = await asyncio.to_thread(hm.run_store.get, run_id)
-        if not run or not _caller_can_access_run(caller, run):
-            raise HTTPException(404, "Run not found")
-        if _caller_can_access_run_payload(caller, run) and run.get(
-            "artifacts_enabled", True
+        asker = _asker_tenant_for_share(caller, request)
+        if not run or not _caller_can_access_run(
+            caller, run, asker_tenant_id=asker,
         ):
+            raise HTTPException(404, "Run not found")
+        if _caller_can_access_run_payload(
+            caller, run, asker_tenant_id=asker,
+        ) and run.get("artifacts_enabled", True):
             run["artifacts"] = await asyncio.to_thread(
                 hm.artifact_store.list_for_run, run_id
             )
         else:
             run["artifacts"] = []
         run["artifact_retention_seconds"] = hm.settings.artifact_retention_seconds
-        run = _redact_run_payload_for_caller(caller, run)
+        run = _redact_run_payload_for_caller(
+            caller, run, asker_tenant_id=asker,
+        )
         return JSONResponse(
             content=run,
             headers={"Cache-Control": "no-cache, no-store"},
@@ -76,9 +139,10 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
 
     @app.get("/v1/runs")
     async def list_agent_runs(
+        request: Request,
         limit: int = 20,
         token_id: str | None = None,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         """List recent agent runs."""
         capped = min(limit, 100)
@@ -98,6 +162,29 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
                 caller.hive.run_store.list_by_token, tid, capped,
             )
             return [_redact_run_payload_for_caller(caller, r) for r in rows]
+        if caller.role == "share":
+            asker = _asker_tenant_for_share(caller, request)
+            if not asker:
+                # No identity → return empty rather than 401, so the
+                # absence of X-Hivemind-Api-Key on the share-link path
+                # is a soft-fail UX: callers see "no runs yet" until
+                # they wire their own hmk_ key.
+                return []
+            bound = (caller.constraints.get("room_id") or "").strip()
+            rows = await asyncio.to_thread(
+                caller.hive.run_store.list_recent, capped,
+            )
+            rows = [
+                r for r in rows
+                if r.get("room_id") == bound
+                and r.get("payer_tenant_id") == asker
+            ]
+            return [
+                _redact_run_payload_for_caller(
+                    caller, r, asker_tenant_id=asker,
+                )
+                for r in rows
+            ]
         if caller.role == "query":
             rows = await asyncio.to_thread(
                 caller.hive.run_store.list_by_token, caller.token_id, capped,
@@ -114,13 +201,17 @@ def register_run_routes(app: FastAPI, requires_role: Callable[..., Callable]) ->
     async def get_run_artifact(
         run_id: str,
         filename: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        request: Request,
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         hm = caller.hive
         run = await asyncio.to_thread(hm.run_store.get, run_id)
+        asker = _asker_tenant_for_share(caller, request)
         if (
             not run
-            or not _caller_can_access_run_payload(caller, run)
+            or not _caller_can_access_run_payload(
+                caller, run, asker_tenant_id=asker,
+            )
             or not run.get("artifacts_enabled", True)
         ):
             raise HTTPException(404, "Artifact not found or expired")

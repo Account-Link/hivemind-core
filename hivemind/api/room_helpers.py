@@ -38,6 +38,15 @@ async def load_room_for_caller(
         if rid and rid != bound:
             raise HTTPException(403, "query token is bound to a different room")
         rid = bound
+    if caller.role == "share":
+        bound = (caller.constraints.get("room_id") or "").strip()
+        if not bound:
+            raise HTTPException(400, "share-link token is not bound to a room")
+        if rid and rid != bound:
+            raise HTTPException(
+                403, "share-link token is bound to a different room"
+            )
+        rid = bound
     if not rid:
         raise HTTPException(400, "room_id is required")
     room = await asyncio.to_thread(caller.hive.room_store.get, rid)
@@ -94,7 +103,9 @@ def room_wrap_id(caller: Caller) -> str:
         return "owner"
     token_id = (caller.token_id or "").strip()
     if not token_id:
-        raise HTTPException(500, "query caller is missing token_id")
+        raise HTTPException(500, f"{caller.role} caller is missing token_id")
+    if caller.role == "share":
+        return f"share:{token_id}"
     return f"query:{token_id}"
 
 
@@ -105,6 +116,25 @@ def room_link(request: Request, room_id: str, token: str, pubkey_b64: str) -> st
         f"hmroom://{host}/{room_id}"
         f"?service={quote(base, safe='')}"
         f"&token={quote(token, safe='')}"
+        f"&owner_pubkey={quote(pubkey_b64, safe='')}"
+    )
+
+
+def share_room_link(
+    request: Request,
+    room_id: str,
+    share_token: str,
+    pubkey_b64: str,
+) -> str:
+    """Stable share-link URI. Same shape as :func:`room_link` but the
+    capability is carried in ``?share=`` so the server can route the
+    bearer through the share-link auth path instead of invite-token."""
+    base = str(request.base_url).rstrip("/")
+    host = request.url.netloc or "service"
+    return (
+        f"hmroom://{host}/{room_id}"
+        f"?service={quote(base, safe='')}"
+        f"&share={quote(share_token, safe='')}"
         f"&owner_pubkey={quote(pubkey_b64, safe='')}"
     )
 

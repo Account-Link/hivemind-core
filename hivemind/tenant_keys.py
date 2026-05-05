@@ -17,6 +17,7 @@ CREDIT_CODE_PREFIX = "hmcc_"
 # the prefix lets the resolver pick the right table without trying both
 # lookups on every request.
 QUERY_TOKEN_PREFIX = "hmq_"  # query-only: submit prompts via the active scope agent
+SHARE_TOKEN_PREFIX = "hms_"  # stable per-room share link; anyone with it can ask
 
 MICRO_USD = Decimal("1000000")
 TOKENS_PER_MTOK = 1_000_000

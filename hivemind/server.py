@@ -196,6 +196,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "payer_token_id": "",
                 "billable_role": billable_role,
             }
+        if caller.role == "share":
+            raise HTTPException(
+                402,
+                "share-link asks require X-Hivemind-Api-Key so usage can be "
+                "charged to the asker's tenant. Pass your own hmk_ key in "
+                "X-Hivemind-Api-Key (or use `hmctl --profile NAME room ask "
+                "'hmroom://...?share=...'` from a CLI profile that has one).",
+            )
         raise HTTPException(
             402,
             "room invite queries require a tenant API key so usage can be "

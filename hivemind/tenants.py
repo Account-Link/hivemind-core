@@ -42,6 +42,7 @@ from .tenant_keys import (
     CREDIT_CODE_ID_PREFIX as _CREDIT_CODE_ID_PREFIX,
     CREDIT_CODE_PREFIX as _CREDIT_CODE_PREFIX,
     QUERY_TOKEN_PREFIX as _QUERY_TOKEN_PREFIX,
+    SHARE_TOKEN_PREFIX as _SHARE_TOKEN_PREFIX,
     TENANT_ID_PREFIX as _TENANT_ID_PREFIX,
     charge_for_tokens as _charge_for_tokens,
     hash_api_key as _hash_api_key,
@@ -73,6 +74,7 @@ __all__ = [
     "_CREDIT_CODE_ID_PREFIX",
     "_CREDIT_CODE_PREFIX",
     "_QUERY_TOKEN_PREFIX",
+    "_SHARE_TOKEN_PREFIX",
     "_TENANT_ID_PREFIX",
     "_charge_for_tokens",
     "_hash_api_key",
@@ -107,7 +109,7 @@ _DEFAULT_MODEL_PRICES: tuple[tuple[str, str, int, int, str], ...] = (
 )
 
 
-Role = Literal["owner", "query"]
+Role = Literal["owner", "query", "share"]
 
 
 class DuplicateTenantNameError(ValueError):
@@ -136,6 +138,10 @@ class Caller:
       - query: room invite constraints. Every run is forced through the
         signed room manifest; the tenant DB room row remains the source
         of truth.
+      - share: stable per-room share-link. Constraints carry only
+        ``{"room_id": "<id>"}``. The asker's own ``hmk_`` (passed via
+        ``X-Hivemind-Api-Key``) provides identity and pays for the run.
+        ``token_id`` is the 12-hex prefix of the share-token hash.
     """
 
     tenant_id: str
@@ -325,6 +331,37 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
                 )
             except Exception:
                 pass
+        # Stable per-room share links — Google-Docs-style "anyone with the
+        # link who has any tenant key can ask in this room." One row per
+        # (tenant_id, room_id); rotation replaces share_token in place,
+        # disable hard-deletes the row. Plaintext share_token is kept
+        # (deviating from API-key threat model) so the owner can re-fetch
+        # the link any time without losing it. Threat model note: control
+        # DB lives inside the CVM; an attacker with control-DB read can
+        # already read every capability_token's seal_wrapped_dek, so
+        # storing share-token plaintext here does not weaken the existing
+        # posture meaningfully. Owner can rotate to invalidate.
+        self._control_db.execute_commit(
+            """
+            CREATE TABLE IF NOT EXISTS _room_share_links (
+                tenant_id        TEXT NOT NULL REFERENCES _tenants(id)
+                                     ON DELETE CASCADE,
+                room_id          TEXT NOT NULL,
+                share_token      TEXT NOT NULL UNIQUE,
+                prefix           TEXT NOT NULL,
+                created_at       DOUBLE PRECISION NOT NULL,
+                rotated_at       DOUBLE PRECISION,
+                seal_salt        TEXT,
+                seal_wrapped_dek TEXT,
+                seal_kdf_params  TEXT,
+                PRIMARY KEY (tenant_id, room_id)
+            )
+            """
+        )
+        self._control_db.execute_commit(
+            "CREATE INDEX IF NOT EXISTS _room_share_links_token_idx "
+            "ON _room_share_links (share_token)"
+        )
         # Compose pins. Owner-signed envelopes that authorize one or more
         # ``compose_hash`` values for a scope agent. ``hmq_`` URIs can
         # reference a pin instead of baking a single compose_hash, so
@@ -665,6 +702,149 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
                 }
             )
         return out
+
+    # ── Room share-link operations ──────────────────────────────────
+
+    def get_room_share_link(self, tenant_id: str, room_id: str) -> dict | None:
+        """Return the active share link for a room, including plaintext.
+
+        Owner-readable any time (the room owner already has full access
+        to their tenant's data; surfacing the share-token plaintext here
+        is the same UX as a Google-Docs share URL). Returns ``None`` if
+        no share link is configured for this room.
+        """
+        rows = self._control_db.execute(
+            "SELECT share_token, prefix, created_at, rotated_at "
+            "FROM _room_share_links WHERE tenant_id = %s AND room_id = %s",
+            [tenant_id, room_id],
+        )
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "tenant_id": tenant_id,
+            "room_id": room_id,
+            "share_token": r["share_token"],
+            "prefix": r["prefix"],
+            "created_at": r["created_at"],
+            "rotated_at": r["rotated_at"],
+        }
+
+    def enable_room_share_link(
+        self,
+        tenant_id: str,
+        room_id: str,
+        owner_token: str,
+    ) -> dict:
+        """Create a stable share link for ``(tenant_id, room_id)``.
+
+        Idempotent: if a row already exists, returns the existing one
+        (same plaintext) so the website's "Generate" button is safe to
+        click twice. Use :meth:`rotate_room_share_link` to invalidate
+        and replace. ``owner_token`` is the bearer the owner used to
+        reach this endpoint; it's needed only to wrap the tenant DEK
+        against the share token so share-link askers can thaw the seal
+        across redeploys, mirroring the capability-token flow.
+        """
+        rows = self._control_db.execute(
+            "SELECT id FROM _tenants WHERE id = %s", [tenant_id]
+        )
+        if not rows:
+            raise KeyError(f"tenant '{tenant_id}' not found")
+
+        existing = self.get_room_share_link(tenant_id, room_id)
+        if existing is not None:
+            return existing
+
+        token = _new_capability_token(_SHARE_TOKEN_PREFIX)
+        prefix = _token_id(_hash_api_key(token))[:8]
+        seal_salt, seal_wrapped_dek, seal_kdf_params = (
+            self._capability_dek_wrap(tenant_id, token)
+        )
+        self._control_db.execute_commit(
+            "INSERT INTO _room_share_links "
+            "(tenant_id, room_id, share_token, prefix, created_at, "
+            "seal_salt, seal_wrapped_dek, seal_kdf_params) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            [
+                tenant_id,
+                room_id,
+                token,
+                prefix,
+                time.time(),
+                seal_salt,
+                seal_wrapped_dek,
+                seal_kdf_params,
+            ],
+        )
+        # owner_token is intentionally unused for now — kept in the
+        # signature so future tightening (e.g. an explicit owner-key
+        # binding on the share row) doesn't churn the registry call site.
+        del owner_token
+        return self.get_room_share_link(tenant_id, room_id) or {
+            "tenant_id": tenant_id,
+            "room_id": room_id,
+            "share_token": token,
+            "prefix": prefix,
+            "created_at": time.time(),
+            "rotated_at": None,
+        }
+
+    def rotate_room_share_link(
+        self,
+        tenant_id: str,
+        room_id: str,
+        owner_token: str,
+    ) -> dict:
+        """Replace the share token in place. Old plaintext is invalidated.
+
+        Raises ``KeyError`` if no share link exists for this room — the
+        caller should mint via :meth:`enable_room_share_link` instead.
+        """
+        existing = self.get_room_share_link(tenant_id, room_id)
+        if existing is None:
+            raise KeyError(
+                f"no share link for room '{room_id}' — enable first"
+            )
+        token = _new_capability_token(_SHARE_TOKEN_PREFIX)
+        prefix = _token_id(_hash_api_key(token))[:8]
+        seal_salt, seal_wrapped_dek, seal_kdf_params = (
+            self._capability_dek_wrap(tenant_id, token)
+        )
+        self._control_db.execute_commit(
+            "UPDATE _room_share_links SET "
+            "share_token = %s, prefix = %s, rotated_at = %s, "
+            "seal_salt = %s, seal_wrapped_dek = %s, seal_kdf_params = %s "
+            "WHERE tenant_id = %s AND room_id = %s",
+            [
+                token,
+                prefix,
+                time.time(),
+                seal_salt,
+                seal_wrapped_dek,
+                seal_kdf_params,
+                tenant_id,
+                room_id,
+            ],
+        )
+        del owner_token
+        return self.get_room_share_link(tenant_id, room_id) or {
+            "tenant_id": tenant_id,
+            "room_id": room_id,
+            "share_token": token,
+            "prefix": prefix,
+            "created_at": existing.get("created_at"),
+            "rotated_at": time.time(),
+        }
+
+    def disable_room_share_link(self, tenant_id: str, room_id: str) -> bool:
+        """Hard-delete the share link row. Existing tokens stop resolving."""
+        rowcount = self._control_db.execute_commit(
+            "DELETE FROM _room_share_links "
+            "WHERE tenant_id = %s AND room_id = %s",
+            [tenant_id, room_id],
+        )
+        return bool(rowcount)
 
     def revoke_capability(self, tenant_id: str, token_id_prefix: str) -> bool:
         """Revoke a token by its short id. Returns True if a row updated."""
@@ -1076,6 +1256,8 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
                 token_id="",
                 sealed=False,
             )
+        if token.startswith(_SHARE_TOKEN_PREFIX):
+            return self._resolve_share_token(token)
         if not token.startswith(_QUERY_TOKEN_PREFIX):
             return None
 
@@ -1123,6 +1305,49 @@ class TenantRegistry(CreditCodeRegistryMixin, BillingRegistryMixin):
             tenant_id=tenant_id,
             role="query",
             constraints=constraints,
+            hive=hive,
+            token_id=_token_id(token_hash),
+            sealed=sealed,
+        )
+
+    def _resolve_share_token(self, token: str) -> Caller | None:
+        """Resolve an ``hms_`` share-link bearer to a Caller(role='share').
+
+        Lookup is by exact match on the plaintext share_token column
+        (UNIQUE-indexed). The Caller's tenant_id and hive belong to the
+        room owner (which is whose tenant DB stores the room). The asker's
+        own identity for billing comes via ``X-Hivemind-Api-Key`` later
+        in ``_payer_for_request``.
+        """
+        rows = self._control_db.execute(
+            "SELECT s.tenant_id, s.room_id, s.seal_salt, s.seal_wrapped_dek, "
+            "       s.seal_kdf_params, t.suspended "
+            "FROM _room_share_links s "
+            "JOIN _tenants t ON t.id = s.tenant_id "
+            "WHERE s.share_token = %s",
+            [token],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        if row["suspended"]:
+            return None
+        tenant_id = row["tenant_id"]
+        hive = self.for_tenant(tenant_id)
+        if hive is None:
+            return None
+        sealed = not self.sealer.is_unsealed(tenant_id)
+        if sealed:
+            sealed = not self._thaw_capability_dek(
+                tenant_id=tenant_id,
+                token=token,
+                row=row,
+            )
+        token_hash = _hash_api_key(token)
+        return Caller(
+            tenant_id=tenant_id,
+            role="share",
+            constraints={"room_id": row["room_id"]},
             hive=hive,
             token_id=_token_id(token_hash),
             sealed=sealed,

@@ -19,6 +19,7 @@ from .room_helpers import (
     load_room_for_caller,
     room_link,
     room_wrap_id,
+    share_room_link,
 )
 from ..config import Settings
 from ..models import QueryRequest
@@ -208,7 +209,7 @@ def register_room_routes(
     @app.get("/v1/rooms")
     async def list_rooms(
         limit: int = 50,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         if caller.role == "query":
             room = await load_room_for_caller(
@@ -221,7 +222,7 @@ def register_room_routes(
     @app.get("/v1/rooms/{room_id}")
     async def get_room(
         room_id: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         # GET is read-only — return revoked rooms with the revoked_at
         # flag set so UIs can render "this room was revoked" instead of
@@ -234,7 +235,7 @@ def register_room_routes(
     @app.get("/v1/rooms/{room_id}/attest")
     async def attest_room(
         room_id: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         from .. import attestation as _att
 
@@ -261,7 +262,7 @@ def register_room_routes(
     @app.get("/v1/rooms/{room_id}/key")
     async def room_vault_status(
         room_id: str,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         room = await load_room_for_caller(caller, room_id)
         return await asyncio.to_thread(caller.hive.room_vault.status, room["room_id"])
@@ -270,7 +271,7 @@ def register_room_routes(
     async def open_room_vault(
         room_id: str,
         request: Request,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         room = await load_room_for_caller(caller, room_id)
         await asyncio.to_thread(
@@ -329,6 +330,111 @@ def register_room_routes(
             raise HTTPException(404, f"room '{room_id}' not found")
         return {"status": "ok", "room_id": room_id}
 
+    def _share_link_payload(
+        request: Request,
+        room: dict,
+        share: dict | None,
+    ) -> dict:
+        """Render a share-link row for the API response.
+
+        ``share`` is the row from
+        :meth:`TenantRegistry.get_room_share_link` or ``None`` for
+        disabled. Owner-only path; we always return the plaintext
+        share_token (this is the "Google-Docs URL" UX) so the website
+        can re-display the link any time without forcing a rotate.
+        """
+        if share is None:
+            return {"enabled": False, "room_id": room["room_id"]}
+        manifest = room.get("manifest") or {}
+        pubkey_b64 = manifest.get("owner_pubkey_b64") or ""
+        return {
+            "enabled": True,
+            "room_id": room["room_id"],
+            "share_token": share["share_token"],
+            "prefix": share["prefix"],
+            "created_at": share["created_at"],
+            "rotated_at": share.get("rotated_at"),
+            "link": share_room_link(
+                request, room["room_id"], share["share_token"], pubkey_b64,
+            ),
+        }
+
+    @app.get("/v1/rooms/{room_id}/share-link")
+    async def get_room_share_link(
+        room_id: str,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        """Read the room's stable share link (or absence). Owner-only."""
+        room = await load_room_for_caller(caller, room_id)
+        registry = request.app.state.registry
+        share = await asyncio.to_thread(
+            registry.get_room_share_link, caller.tenant_id, room["room_id"],
+        )
+        return _share_link_payload(request, room, share)
+
+    @app.post("/v1/rooms/{room_id}/share-link")
+    async def enable_room_share_link(
+        room_id: str,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        """Mint a stable share link for this room.
+
+        Idempotent: clicking twice returns the same link. Use
+        ``POST .../share-link/rotate`` to invalidate and re-issue.
+        """
+        room = await load_room_for_caller(caller, room_id)
+        registry = request.app.state.registry
+        share = await asyncio.to_thread(
+            registry.enable_room_share_link,
+            caller.tenant_id,
+            room["room_id"],
+            bearer(request),
+        )
+        return _share_link_payload(request, room, share)
+
+    @app.post("/v1/rooms/{room_id}/share-link/rotate")
+    async def rotate_room_share_link(
+        room_id: str,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        """Invalidate the existing share token and mint a new one.
+
+        Existing links stop resolving the moment this returns; everyone
+        you previously sent the link to needs the new one. Returns the
+        new link plaintext so the owner can copy it.
+        """
+        room = await load_room_for_caller(caller, room_id)
+        registry = request.app.state.registry
+        try:
+            share = await asyncio.to_thread(
+                registry.rotate_room_share_link,
+                caller.tenant_id,
+                room["room_id"],
+                bearer(request),
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        return _share_link_payload(request, room, share)
+
+    @app.delete("/v1/rooms/{room_id}/share-link")
+    async def disable_room_share_link(
+        room_id: str,
+        request: Request,
+        caller: Caller = Depends(requires_role("owner")),
+    ):
+        """Hard-delete the share link. Existing share URLs stop working."""
+        room = await load_room_for_caller(caller, room_id)
+        registry = request.app.state.registry
+        await asyncio.to_thread(
+            registry.disable_room_share_link,
+            caller.tenant_id,
+            room["room_id"],
+        )
+        return {"enabled": False, "room_id": room["room_id"]}
+
     @app.post("/v1/rooms/{room_id}/trust")
     async def update_room_trust(
         room_id: str,
@@ -357,7 +463,7 @@ def register_room_routes(
         room_id: str,
         req: RoomRunRequest,
         request: Request,
-        caller: Caller = Depends(requires_role("owner", "query")),
+        caller: Caller = Depends(requires_role("owner", "query", "share")),
     ):
         room = await load_room_for_caller(caller, room_id)
         qreq = QueryRequest(
