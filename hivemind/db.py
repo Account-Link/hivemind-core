@@ -203,6 +203,11 @@ _INTERNAL_DDL: tuple[str, ...] = (
 )
 
 _INTERNAL_MIGRATIONS: tuple[str, ...] = (
+    # Per-agent harness selector. Default 'claude_code' preserves existing
+    # rows. New rows can opt into 'hermes' (NousResearch/hermes-agent base
+    # image + native plugin tools).
+    "ALTER TABLE _hivemind_agents "
+    "ADD COLUMN IF NOT EXISTS harness TEXT NOT NULL DEFAULT 'claude_code'",
     "ALTER TABLE _hivemind_query_runs "
     "ADD COLUMN IF NOT EXISTS room_id TEXT",
     "ALTER TABLE _hivemind_query_runs "

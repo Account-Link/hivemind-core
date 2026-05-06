@@ -202,6 +202,14 @@ class SandboxBackend:
                 # Anthropic SDK auto-routing
                 "ANTHROPIC_BASE_URL": bridge_url,
                 "ANTHROPIC_API_KEY": session_token,
+                # Hermes harness: the in-container hivemind plugin reads
+                # HIVEMIND_AGENT_ROLE to gate which tools register for this
+                # role (query/scope/mediator/index). Other harnesses ignore it.
+                **(
+                    {"HIVEMIND_AGENT_ROLE": role}
+                    if getattr(agent, "harness", "claude_code") == "hermes"
+                    else {}
+                ),
                 **({"RUN_ID": run_id} if run_id else {}),
                 **env,
             }

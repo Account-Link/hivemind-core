@@ -166,3 +166,46 @@ def ensure_agent_base_image() -> bool:
         # will run on next restart when the recipe is updated.
         return True
     return _build_inline()
+
+
+# ── Hermes base image ──────────────────────────────────────────────────────
+#
+# The hermes base bundles plugin Python files (agents/base-hermes/plugins/),
+# which can't be embedded as a Python string the same way the claude_code
+# inline Dockerfile is. So this bootstrap is GHCR-pull-only: if the pull
+# fails, hermes default agents skip autoload (with a warning), while
+# claude_code defaults still work. Operators who need offline-first hermes
+# bootstrap should pre-build the image into the local daemon, or stand up
+# a private registry mirror.
+
+_HERMES_GHCR_IMAGE_DEFAULT = (
+    "ghcr.io/teleport-computer/hivemind-agent-base-hermes:latest"
+)
+_HERMES_LOCAL_TAG = "hivemind-agent-base-hermes:latest"
+
+
+def ensure_agent_base_hermes_image() -> bool:
+    """Guarantee `hivemind-agent-base-hermes:latest` is in the daemon.
+
+    Best-effort GHCR pull. Returns False (without raising) when the image
+    is missing AND the pull fails — callers should treat this as a skip
+    signal for hermes-flavored autoload, not as a hard failure.
+    """
+    if _image_present(_HERMES_LOCAL_TAG):
+        return True
+    source = os.environ.get(
+        "HIVEMIND_AGENT_BASE_HERMES_IMAGE", _HERMES_GHCR_IMAGE_DEFAULT
+    )
+    try:
+        client = _client()
+        logger.info("agent-base bootstrap: pulling %s", source)
+        img = client.images.pull(source)
+        name, tag = _HERMES_LOCAL_TAG.rsplit(":", 1)
+        img.tag(name, tag=tag)
+        logger.info(
+            "agent-base bootstrap: tagged %s from %s", _HERMES_LOCAL_TAG, source
+        )
+        return True
+    except Exception as e:
+        logger.info("agent-base hermes bootstrap: pull failed (%s)", e)
+        return False

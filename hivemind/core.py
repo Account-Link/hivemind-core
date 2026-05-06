@@ -131,33 +131,28 @@ class Hivemind:
         return build_sandbox_settings(self.settings)
 
     def _bootstrap_default_agents(self) -> None:
-        """Auto-register built-in default agents using stable IDs."""
+        """Auto-register built-in default agents using stable IDs.
+
+        Two harness flavors run side-by-side: the original Claude-Code-SDK
+        agents (harness="claude_code") and the NousResearch/hermes-agent
+        agents (harness="hermes"). Each flavor is independently gated by
+        its own image setting — leaving the image blank skips that flavor.
+        """
         if not self.settings.autoload_default_agents:
             return
 
+        # (role, harness, agent_key, image_key, fallback_agent_id)
         specs = (
-            (
-                "scope",
-                "default_scope_agent",
-                "default_scope_image",
-                "default-scope",
-            ),
-            (
-                "query",
-                "default_query_agent",
-                "default_query_image",
-                "default-query",
-            ),
-            (
-                "mediator",
-                "default_mediator_agent",
-                "default_mediator_image",
-                "default-mediator",
-            ),
+            ("scope",    "claude_code", "default_scope_agent",          "default_scope_image",          "default-scope"),
+            ("query",    "claude_code", "default_query_agent",          "default_query_image",          "default-query"),
+            ("mediator", "claude_code", "default_mediator_agent",       "default_mediator_image",       "default-mediator"),
+            ("scope",    "hermes",      "default_scope_hermes_agent",   "default_scope_hermes_image",   "default-scope-hermes"),
+            ("query",    "hermes",      "default_query_hermes_agent",   "default_query_hermes_image",   "default-query-hermes"),
+            ("mediator", "hermes",      "default_mediator_hermes_agent","default_mediator_hermes_image","default-mediator-hermes"),
         )
 
         runner = None
-        for role, agent_key, image_key, fallback_agent_id in specs:
+        for role, harness, agent_key, image_key, fallback_agent_id in specs:
             image = (getattr(self.settings, image_key, "") or "").strip()
             if not image:
                 continue
@@ -166,9 +161,9 @@ class Hivemind:
                 runner = _create_runner(self._build_sandbox_settings())
             if not runner.image_exists(image):
                 logger.warning(
-                    "Default %s image not found: %s — skipping autoload. "
-                    "Build/pull the image or set HIVEMIND_AUTOLOAD_DEFAULT_AGENTS=false.",
-                    role, image,
+                    "Default %s/%s image not found: %s — skipping autoload. "
+                    "Build/pull the image or unset HIVEMIND_%s.",
+                    role, harness, image, image_key.upper(),
                 )
                 continue
 
@@ -180,14 +175,15 @@ class Hivemind:
             existing = self.agent_store.get(agent_id)
             config = AgentConfig(
                 agent_id=agent_id,
-                name=f"default-{role}",
-                description=f"Autoloaded default {role} agent",
+                name=fallback_agent_id,
+                description=f"Autoloaded default {role} agent ({harness} harness)",
                 agent_type=role,
                 image=image,
                 memory_mb=self.settings.container_memory_mb,
                 max_llm_calls=self.settings.max_llm_calls,
                 max_tokens=self.settings.max_tokens,
                 timeout_seconds=self.settings.agent_timeout,
+                harness=harness,
             )
             self.agent_store.upsert(config)
 

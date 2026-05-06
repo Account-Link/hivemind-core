@@ -92,16 +92,19 @@ fi
 export HIVEMIND_ADMIN_KEY="$(grep '^HIVEMIND_ADMIN_KEY=' .env | head -1 | cut -d= -f2-)"
 
 # --- 2. Build all images in parallel ---
-say "Building hivemind-agent-base + 4 default agent images (parallel)..."
+say "Building 2 base images + 8 default agent images (parallel)..."
 BUILD_LOG="/tmp/hivemind-quickstart-build.log"
 : > "$BUILD_LOG"
 
-# Base must finish first (the four defaults FROM it)
+# Both bases must finish first (the defaults FROM them).
 docker build -t hivemind-agent-base -f agents/base/Dockerfile agents/base/ >>"$BUILD_LOG" 2>&1 \
     || { tail -40 "$BUILD_LOG"; die "base image build failed"; }
+docker build -t hivemind-agent-base-hermes -f agents/base-hermes/Dockerfile agents/base-hermes/ >>"$BUILD_LOG" 2>&1 \
+    || { tail -40 "$BUILD_LOG"; die "base-hermes image build failed"; }
 
 pids=()
-for agent in default-index default-query default-scope default-mediator; do
+for agent in default-index default-query default-scope default-mediator \
+             default-index-hermes default-query-hermes default-scope-hermes default-mediator-hermes; do
     (
         docker build -t "hivemind-${agent}:local" "agents/${agent}/" >>"$BUILD_LOG" 2>&1
     ) &
@@ -116,7 +119,7 @@ if [ "$fail" -ne 0 ]; then
     tail -60 "$BUILD_LOG"
     die "one or more default-agent image builds failed (full log: $BUILD_LOG)"
 fi
-say "All 5 images built (log: $BUILD_LOG)"
+say "All 10 images built (log: $BUILD_LOG)"
 
 # --- 3. Start Postgres ---
 say "Starting Postgres..."

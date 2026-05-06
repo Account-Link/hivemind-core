@@ -1,0 +1,4 @@
+name: hivemind
+version: 0.1.0
+description: "Native Hermes tools for hivemind sandboxed agents — execute_sql, get_schema, verify_scope_fn, simulate_query, simulate_multi. All five call back to the per-session bridge over HTTP. No MCP (slow). Role gating is enforced server-side by the bridge."
+author: "hivemind-core"

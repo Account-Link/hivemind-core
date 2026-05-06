@@ -97,8 +97,8 @@ class AgentStore:
             "INSERT INTO _hivemind_agents "
             "(agent_id, name, description, agent_type, image, entrypoint, "
             "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
-            "inspection_mode, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "inspection_mode, harness, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 config.agent_id,
                 config.name,
@@ -111,6 +111,7 @@ class AgentStore:
                 config.max_tokens,
                 config.timeout_seconds,
                 getattr(config, "inspection_mode", "full") or "full",
+                getattr(config, "harness", "claude_code") or "claude_code",
                 time.time(),
             ],
         )
@@ -123,8 +124,8 @@ class AgentStore:
             INSERT INTO _hivemind_agents
             (agent_id, name, description, agent_type, image, entrypoint,
              memory_mb, max_llm_calls, max_tokens, timeout_seconds,
-             inspection_mode, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             inspection_mode, harness, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(agent_id) DO UPDATE SET
                 name=EXCLUDED.name,
                 description=EXCLUDED.description,
@@ -135,7 +136,8 @@ class AgentStore:
                 max_llm_calls=EXCLUDED.max_llm_calls,
                 max_tokens=EXCLUDED.max_tokens,
                 timeout_seconds=EXCLUDED.timeout_seconds,
-                inspection_mode=EXCLUDED.inspection_mode
+                inspection_mode=EXCLUDED.inspection_mode,
+                harness=EXCLUDED.harness
             """,
             [
                 config.agent_id,
@@ -149,6 +151,7 @@ class AgentStore:
                 config.max_tokens,
                 config.timeout_seconds,
                 getattr(config, "inspection_mode", "full") or "full",
+                getattr(config, "harness", "claude_code") or "claude_code",
                 time.time(),
             ],
         )
@@ -167,6 +170,7 @@ class AgentStore:
             max_tokens=r["max_tokens"],
             timeout_seconds=r["timeout_seconds"],
             inspection_mode=r.get("inspection_mode") or "full",
+            harness=r.get("harness") or "claude_code",
         )
 
     def get(self, agent_id: str) -> AgentConfig | None:
@@ -174,7 +178,7 @@ class AgentStore:
         rows = self.db.execute(
             "SELECT agent_id, name, description, agent_type, image, entrypoint, "
             "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
-            "inspection_mode "
+            "inspection_mode, harness "
             "FROM _hivemind_agents WHERE agent_id = %s",
             [agent_id],
         )
@@ -188,7 +192,7 @@ class AgentStore:
             rows = self.db.execute(
                 "SELECT agent_id, name, description, agent_type, image, entrypoint, "
                 "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
-                "inspection_mode "
+                "inspection_mode, harness "
                 "FROM _hivemind_agents WHERE agent_type = %s ORDER BY created_at DESC",
                 [agent_type],
             )
@@ -196,7 +200,7 @@ class AgentStore:
             rows = self.db.execute(
                 "SELECT agent_id, name, description, agent_type, image, entrypoint, "
                 "memory_mb, max_llm_calls, max_tokens, timeout_seconds, "
-                "inspection_mode "
+                "inspection_mode, harness "
                 "FROM _hivemind_agents ORDER BY created_at DESC"
             )
         return [self._row_to_config(r) for r in rows]

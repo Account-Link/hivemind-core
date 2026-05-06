@@ -121,7 +121,10 @@ class Settings(BaseSettings):
     app_auth_rpc_url: str = "https://ethereum-sepolia-rpc.publicnode.com"
     app_auth_explorer_base_url: str = "https://sepolia.etherscan.io"
 
-    # Default agents (Docker images) — empty = not available
+    # Default agents (Docker images) — empty = not available.
+    # The claude_code-harness defaults extend hivemind-agent-base; the
+    # hermes-harness defaults extend hivemind-agent-base-hermes and use the
+    # NousResearch/hermes-agent loop with native plugin tools.
     autoload_default_agents: bool = True
     default_query_agent: str = ""
     default_scope_agent: str = ""
@@ -129,6 +132,12 @@ class Settings(BaseSettings):
     default_query_image: str = ""
     default_scope_image: str = ""
     default_mediator_image: str = ""
+    default_query_hermes_agent: str = ""
+    default_scope_hermes_agent: str = ""
+    default_mediator_hermes_agent: str = ""
+    default_query_hermes_image: str = ""
+    default_scope_hermes_image: str = ""
+    default_mediator_hermes_image: str = ""
 
     @model_validator(mode="after")
     def _validate_security(self):

@@ -85,6 +85,12 @@ class AgentConfig(BaseModel):
     #              Files endpoint refuses plaintext to anyone. Image digest
     #              + attested file list still bind the workload.
     inspection_mode: str = "full"
+    # Agent-loop harness. "claude_code" uses claude-agent-sdk + Claude Code
+    # CLI inside the container (image must extend hivemind-agent-base).
+    # "hermes" uses NousResearch/hermes-agent (image must extend
+    # hivemind-agent-base-hermes); the runtime injects HIVEMIND_AGENT_ROLE
+    # so the in-container Hermes plugin registers role-appropriate tools.
+    harness: str = "claude_code"
 
 
 class SandboxSettings(BaseModel):

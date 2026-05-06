@@ -803,16 +803,29 @@ class DockerRunner:
                 parts = raw_line.strip().split()
                 if len(parts) < 2 or parts[0].upper() != "FROM":
                     continue
-                if not parts[1].startswith("hivemind-agent-base"):
-                    continue
-                from ..agent_base_bootstrap import ensure_agent_base_image
-
-                if not ensure_agent_base_image():
-                    raise RuntimeError(
-                        "hivemind-agent-base:latest is required by this "
-                        "agent Dockerfile but could not be provisioned"
+                base_ref = parts[1]
+                # Match the more-specific tag first (-hermes) so it doesn't
+                # fall through to the generic claude_code branch.
+                if base_ref.startswith("hivemind-agent-base-hermes"):
+                    from ..agent_base_bootstrap import (
+                        ensure_agent_base_hermes_image,
                     )
-                return
+
+                    if not ensure_agent_base_hermes_image():
+                        raise RuntimeError(
+                            "hivemind-agent-base-hermes:latest is required by "
+                            "this agent Dockerfile but could not be provisioned"
+                        )
+                    return
+                if base_ref.startswith("hivemind-agent-base"):
+                    from ..agent_base_bootstrap import ensure_agent_base_image
+
+                    if not ensure_agent_base_image():
+                        raise RuntimeError(
+                            "hivemind-agent-base:latest is required by this "
+                            "agent Dockerfile but could not be provisioned"
+                        )
+                    return
 
     def _build_container_limits(self) -> dict:
         memory_bytes = int(self.settings.docker_build_memory_mb) * 1024 * 1024

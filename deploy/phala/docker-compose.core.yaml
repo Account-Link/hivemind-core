@@ -146,8 +146,9 @@ services:
       HIVEMIND_BILLING_ENFORCE_CREDITS: ${HIVEMIND_BILLING_ENFORCE_CREDITS:-true}
       HIVEMIND_SELF_SERVE_SIGNUP_ENABLED: ${HIVEMIND_SELF_SERVE_SIGNUP_ENABLED:-true}
 
-      # Default agents — CI only builds base/core/postgres/sql-proxy.
-      # The 4 default agents (scope/query/index/mediator) are NOT in GHCR;
+      # Default agents — CI only builds base/core/postgres/sql-proxy +
+      # base-sdk-hermes. The per-role default agents (scope/query/index/
+      # mediator, both claude_code and hermes flavors) are NOT in GHCR;
       # set AUTOLOAD=false and upload them via `hmctl room create` / the
       # /v1/room-agents API, or pre-build and push them to GHCR first.
       HIVEMIND_AUTOLOAD_DEFAULT_AGENTS: "false"
@@ -155,6 +156,9 @@ services:
       HIVEMIND_DEFAULT_QUERY_IMAGE: ${HIVEMIND_DEFAULT_QUERY_IMAGE:-}
       HIVEMIND_DEFAULT_INDEX_IMAGE: ${HIVEMIND_DEFAULT_INDEX_IMAGE:-}
       HIVEMIND_DEFAULT_MEDIATOR_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_IMAGE:-}
+      HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE: ${HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE:-}
+      HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE: ${HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE:-}
+      HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE: ${HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # dstack socket — lets hivemind fetch its TDX quote + measurements
