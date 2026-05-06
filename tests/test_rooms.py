@@ -89,6 +89,7 @@ def room_env():
         admin_key="admin-test-key",
         sql_proxy_admin_key="",
         autoload_default_agents=False,
+        default_query_agent="query-a",
         artifact_sweep_interval_seconds=9999,
     )
     registry = TenantRegistry(settings)
@@ -197,6 +198,49 @@ def test_room_create_mints_signed_manifest_and_room_token(room_env):
     assert status.status_code == 200
     assert status.json()["wrap_count"] == 2
     assert status.json()["item_count"] == 0
+
+
+def test_room_create_omitted_query_pins_service_default(room_env):
+    client, tenant, _hive = room_env
+    resp = client.post(
+        "/v1/rooms",
+        json={
+            "name": "default query",
+            "rules": "Use the service default query agent.",
+            "scope_agent_id": "scope-a",
+            "egress": {"llm_providers": ["tinfoil"], "allow_artifacts": False},
+        },
+        headers=_headers(tenant["api_key"]),
+    )
+
+    assert resp.status_code == 200, resp.text
+    room = resp.json()["room"]
+    assert room["query_mode"] == "fixed"
+    assert room["fixed_query_agent_id"] == "query-a"
+    assert room["manifest"]["query"]["mode"] == "fixed"
+    assert room["manifest"]["query"]["agent_id"] == "query-a"
+
+
+def test_room_create_explicit_uploadable_bypasses_service_default(room_env):
+    client, tenant, _hive = room_env
+    resp = client.post(
+        "/v1/rooms",
+        json={
+            "name": "uploadable query",
+            "rules": "Allow participant query uploads.",
+            "scope_agent_id": "scope-a",
+            "query_mode": "uploadable",
+            "egress": {"llm_providers": ["tinfoil"], "allow_artifacts": False},
+        },
+        headers=_headers(tenant["api_key"]),
+    )
+
+    assert resp.status_code == 200, resp.text
+    room = resp.json()["room"]
+    assert room["query_mode"] == "uploadable"
+    assert room["fixed_query_agent_id"] == ""
+    assert room["manifest"]["query"]["mode"] == "uploadable"
+    assert room["manifest"]["query"]["agent_id"] == ""
 
 
 def test_room_rules_default_to_agent_policy(room_env):

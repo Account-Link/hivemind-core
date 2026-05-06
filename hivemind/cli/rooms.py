@@ -558,7 +558,15 @@ def rooms_cli():
 @click.option(
     "--query-agent",
     default=None,
-    help="Fixed query agent id or local path. Omit to allow recipient uploads.",
+    help=(
+        "Fixed query agent id or local path. Omit to pin the service default "
+        "query agent when configured."
+    ),
+)
+@click.option(
+    "--uploadable-query",
+    is_flag=True,
+    help="Allow recipient uploads instead of pinning the service default query.",
 )
 @click.option(
     "--query-private",
@@ -657,6 +665,7 @@ def create_room(
     scope_visibility: str,
     scope_private_paths: tuple[str, ...],
     query_agent: str | None,
+    uploadable_query: bool,
     query_private_paths: tuple[str, ...],
     query_visibility: str,
     mediator_agent: str | None,
@@ -671,6 +680,11 @@ def create_room(
     as_json: bool,
 ):
     """Create a room and print an invite link."""
+    if query_agent and uploadable_query:
+        raise click.ClickException(
+            "--query-agent and --uploadable-query are mutually exclusive"
+        )
+
     config = _load_config()
     service = config["service"]
     headers = _headers(config)
@@ -718,8 +732,6 @@ def create_room(
         "rules": rules,
         "policy": policy,
         "scope_agent_id": scope_agent_id,
-        "query_mode": "fixed" if query_agent_id else "uploadable",
-        "query_agent_id": query_agent_id,
         "query_visibility": query_visibility,
         "mediator_agent_id": mediator_agent_id,
         "mediator_visibility": mediator_visibility if mediator_agent_id else None,
@@ -730,6 +742,12 @@ def create_room(
         },
         "trust": {"mode": trust_mode},
     }
+    if query_agent_id:
+        payload["query_mode"] = "fixed"
+        payload["query_agent_id"] = query_agent_id
+    elif uploadable_query:
+        payload["query_mode"] = "uploadable"
+        payload["query_agent_id"] = None
     try:
         resp = _hpost(
             f"{service}/v1/rooms",

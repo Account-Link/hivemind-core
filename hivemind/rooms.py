@@ -121,9 +121,9 @@ class RoomTrust(BaseModel):
 class RoomCreateRequest(BaseModel):
     """Compact owner-facing API for creating a room.
 
-    The default is intentionally opinionated:
-    uploadable query agent, sealed uploaded query source, querier-only
-    output, no artifacts, and Tinfoil-only LLM egress.
+    The API route resolves an omitted query mode to the service default
+    query agent when configured. Callers that want recipient-uploaded
+    query agents should set ``query_mode="uploadable"`` explicitly.
     """
 
     name: str = ""
@@ -151,8 +151,6 @@ class RoomCreateRequest(BaseModel):
     def _validate_mode(self):
         if self.query_agent_id and self.query_mode is None:
             self.query_mode = "fixed"
-        if self.query_mode is None:
-            self.query_mode = "uploadable"
         if self.query_mode == "fixed" and not (self.query_agent_id or "").strip():
             raise ValueError("query_agent_id is required when query_mode='fixed'")
         if self.query_agent_id is not None:

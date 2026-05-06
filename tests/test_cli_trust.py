@@ -382,6 +382,66 @@ def test_room_list_and_revoke_commands(_sandbox, monkeypatch):
     assert calls["headers"]["Authorization"] == "Bearer test-key"
 
 
+def test_room_create_omits_query_fields_to_pin_service_default(
+    _sandbox, monkeypatch
+):
+    captured: dict = {}
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"room_id": "room_new", "link": _ROOM_LINK}
+
+    def fake_hpost(url, **kwargs):
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        return Resp()
+
+    monkeypatch.setattr(_rooms_cli, "_hpost", fake_hpost)
+
+    result = CliRunner().invoke(
+        _cli_mod.cli,
+        ["--yes", "room", "create", "scope-a", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == "https://cvm.example/v1/rooms"
+    assert "query_mode" not in captured["json"]
+    assert "query_agent_id" not in captured["json"]
+
+
+def test_room_create_uploadable_query_is_explicit(_sandbox, monkeypatch):
+    captured: dict = {}
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"room_id": "room_new", "link": _ROOM_LINK}
+
+    def fake_hpost(url, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return Resp()
+
+    monkeypatch.setattr(_rooms_cli, "_hpost", fake_hpost)
+
+    result = CliRunner().invoke(
+        _cli_mod.cli,
+        ["--yes", "room", "create", "scope-a", "--uploadable-query", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["query_mode"] == "uploadable"
+    assert captured["json"]["query_agent_id"] is None
+
+
 def test_room_prune_dry_run_and_revoke_keeps_requested_room(_sandbox, monkeypatch):
     _stub_attestation(
         monkeypatch,

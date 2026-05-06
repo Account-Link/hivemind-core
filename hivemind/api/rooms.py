@@ -37,6 +37,18 @@ from ..tenant_signing import derive_signing_keypair
 from ..tenants import Caller
 
 
+def _apply_room_query_default(req: RoomCreateRequest, settings: Settings) -> None:
+    """Pin the service default query agent unless uploadable was explicit."""
+    if req.query_mode is not None:
+        return
+    default_query_agent = (settings.default_query_agent or "").strip()
+    if default_query_agent:
+        req.query_mode = "fixed"
+        req.query_agent_id = default_query_agent
+    else:
+        req.query_mode = "uploadable"
+
+
 def register_room_routes(
     app: FastAPI,
     settings: Settings,
@@ -53,6 +65,7 @@ def register_room_routes(
         caller: Caller = Depends(requires_role("owner")),
     ):
         """Create a signed room manifest and a recipient invite token."""
+        _apply_room_query_default(req, settings)
         hm = caller.hive
         scope_cfg = await asyncio.to_thread(
             hm.agent_store.get, req.scope_agent_id,
