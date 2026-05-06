@@ -89,6 +89,67 @@ def test_remote_https_requires_full_attestation_by_default(
     assert "TDX quote" in result.output
 
 
+def test_tls_pin_allows_dcap_verified_v1_for_strict_remote(
+    _sandbox, monkeypatch, capsys
+):
+    monkeypatch.delenv("HIVEMIND_ALLOW_DEGRADED_ATTESTATION", raising=False)
+    bundle = {
+        "ready": True,
+        "attestation": {
+            "report_data_version": 1,
+            "dcap": {"status": "verified"},
+        },
+    }
+
+    _cli_trust._verify_tls_pin(
+        bundle,
+        observed_fp=None,
+        service="https://cvm.example",
+    )
+
+    assert "DCAP quote verified" in capsys.readouterr().err
+
+
+def test_tls_pin_rejects_v1_without_dcap_for_strict_remote(
+    _sandbox, monkeypatch
+):
+    monkeypatch.delenv("HIVEMIND_ALLOW_DEGRADED_ATTESTATION", raising=False)
+    bundle = {
+        "ready": True,
+        "attestation": {"report_data_version": 1},
+    }
+
+    with pytest.raises(SystemExit) as exc:
+        _cli_trust._verify_tls_pin(
+            bundle,
+            observed_fp=None,
+            service="https://cvm.example",
+        )
+
+    assert exc.value.code == 4
+
+
+def test_tls_pin_env_requires_v2_even_when_dcap_verified(_sandbox, monkeypatch):
+    monkeypatch.delenv("HIVEMIND_ALLOW_DEGRADED_ATTESTATION", raising=False)
+    monkeypatch.setenv("HIVEMIND_REQUIRE_TLS_PIN", "1")
+    bundle = {
+        "ready": True,
+        "attestation": {
+            "report_data_version": 1,
+            "dcap": {"status": "verified"},
+        },
+    }
+
+    with pytest.raises(SystemExit) as exc:
+        _cli_trust._verify_tls_pin(
+            bundle,
+            observed_fp=None,
+            service="https://cvm.example",
+        )
+
+    assert exc.value.code == 4
+
+
 def test_room_ask_omits_room_id_from_path_scoped_run_body(
     _sandbox, monkeypatch
 ):

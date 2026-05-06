@@ -59,6 +59,23 @@ def test_report_data_v2_verify_roundtrip():
     )
 
 
+def test_enclave_tls_env_parses_disabled_zero(monkeypatch):
+    monkeypatch.setenv("HIVEMIND_ENCLAVE_TLS", "0")
+
+    assert attestation.enclave_tls_enabled() is False
+    assert attestation._pinning_url("appid-deadbeef") == ""
+
+
+def test_enclave_tls_env_parses_truthy_values(monkeypatch):
+    monkeypatch.setenv("HIVEMIND_ENCLAVE_TLS", "true")
+
+    assert attestation.enclave_tls_enabled() is True
+    assert (
+        attestation._pinning_url("appid-deadbeef")
+        == "https://appid-deadbeef-8100s.dstack-pha-prod9.phala.network"
+    )
+
+
 def test_parse_mr_config_id_extracts_48_bytes_at_known_offset():
     # Fake quote: zeros up to offset 48+184, then 48 bytes of 0xaa.
     zeros = b"\x00" * (48 + 184)

@@ -6,12 +6,11 @@
 #      Served by dstack-ingress (LE cert, ACME DNS-01 inside the enclave
 #      via Cloudflare). This is the default URL clients should use.
 #
-#   2. Raw URL       https://<app_id>-8100s.dstack-pha-prod9.phala.network
-#      TCP-passthrough straight to the hivemind container's enclave TLS
-#      cert (deterministic, dstack-KMS-derived, sha256(cert.DER) bound
-#      into the TDX quote's REPORT_DATA). This is the Tier-3 attestation
-#      pinning surface — what the CLI uses internally for /v1/attestation
-#      verification, and what audit verifiers can pin out-of-band.
+#   2. Raw URL       https://<app_id>-8100.dstack-pha-prod9.phala.network
+#      Phala terminates public TLS at the gateway and forwards cleartext HTTP
+#      to the app container. The current prod9 API no longer exposes the
+#      older `-8100s` TCP-passthrough surface, so core must not speak TLS on
+#      this port. Attestation remains DCAP + on-chain compose-hash bound.
 #
 # REQUIRED CVM NODE: prod9. dstack-ingress 20250929 + the multi-domain
 # `_dstack-app-address.<domain>` TXT routing only works on the prod9
@@ -95,16 +94,12 @@ services:
       HIVEMIND_APP_AUTH_RPC_URL: ${HIVEMIND_APP_AUTH_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
       HIVEMIND_APP_AUTH_EXPLORER_BASE_URL: ${HIVEMIND_APP_AUTH_EXPLORER_BASE_URL:-https://sepolia.etherscan.io}
 
-      # TLS-in-enclave (Tier 3 attestation binding — feedling's first binding).
-      # Turn on to have the enclave terminate TLS with a deterministic
-      # dstack-KMS-derived cert whose sha256(DER) is bound into the TDX
-      # quote's REPORT_DATA (v2). The CLI reconstructs the binding from
-      # (APP_VERSION, observed_fingerprint) and aborts on mismatch.
-      # Requires: (a) the service URL uses ``-8100s.app.phala.network``
-      # (the ``s`` suffix is Phala's TCP-passthrough convention), so the
-      # CLI sees the enclave's self-signed cert directly. (b) the CLI
-      # must be >=0.3.1 to consume the v2 report_data layout.
-      HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-1}
+      # TLS-in-enclave (Tier 3 attestation binding) is disabled by default
+      # on prod9 because Phala exposes `-8100` as TLS-terminated HTTP, not
+      # TCP passthrough. Enabling this without a reachable `-8100s` surface
+      # makes the gateway send HTTP to an HTTPS uvicorn socket and every
+      # health/attestation request times out.
+      HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-0}
 
       # Cluster-aware pinning surface. The CVM doesn't know its own
       # gateway base_domain from inside (dstack.info() doesn't expose
@@ -177,11 +172,9 @@ services:
   # teleport.computer zone. The LE-issued cert + private key live on the
   # `letsencrypt` volume (TEE-encrypted disk).
   #
-  # Upstream is hivemind:8100 over TLS (the enclave-derived cert).
-  # Internal hop, internal Docker bridge — cert verification skipped at
-  # the ingress. The transport secrecy that matters is wire→ingress (LE)
-  # and the per-app envelope crypto on response payloads. The Tier-3
-  # cert pin is still verifiable out-of-band on the `-8100s.` raw route.
+  # Upstream is cleartext HTTP over the internal Docker bridge. Public
+  # transport TLS terminates at dstack-ingress / the Phala gateway; the
+  # trust boundary remains DCAP + on-chain compose-hash approval.
   dstack-ingress:
     image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
     restart: unless-stopped
@@ -198,9 +191,9 @@ services:
       GATEWAY_DOMAIN: "_.dstack-pha-prod9.phala.network"
       CERTBOT_EMAIL: ${CERTBOT_EMAIL:-sxysun9@gmail.com}
       SET_CAA: "true"
-      # Upstream — hivemind speaks enclave-TLS on 8100. ingress
-      # re-encrypts toward LE cert on the public side.
-      TARGET_ENDPOINT: "https://hivemind:8100"
+      # Upstream — hivemind speaks HTTP on 8100. ingress presents the LE
+      # cert on the public side.
+      TARGET_ENDPOINT: "http://hivemind:8100"
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - hivemind_ingress_letsencrypt:/etc/letsencrypt

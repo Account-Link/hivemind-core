@@ -383,15 +383,32 @@ def _verify_tls_pin(
     if not bundle.get("ready"):
         return
     att = bundle.get("attestation") or {}
-    strict = bool(os.environ.get("HIVEMIND_REQUIRE_TLS_PIN")) or (
+    require_tls_pin = bool(os.environ.get("HIVEMIND_REQUIRE_TLS_PIN"))
+    strict = require_tls_pin or (
         _strict_remote_attestation_required(service or "")
         and not _allow_degraded_attestation()
     )
     if att.get("report_data_version") != 2:
+        dcap_status = ((att.get("dcap") or {}).get("status") or "").lower()
+        if require_tls_pin:
+            click.echo(
+                "Error: HIVEMIND_REQUIRE_TLS_PIN=1 but this CVM did not "
+                "publish REPORT_DATA v2 with enclave TLS binding.",
+                err=True,
+            )
+            raise SystemExit(4)
         if strict:
+            if dcap_status in {"verified", "tcb_issue"}:
+                click.echo(
+                    "! TLS pin unavailable; DCAP quote verified. "
+                    "Continuing with compose-hash attestation.",
+                    err=True,
+                )
+                return
             click.echo(
                 "Error: strict attestation required, but this CVM did not "
-                "publish REPORT_DATA v2 with enclave TLS binding.",
+                "publish REPORT_DATA v2 with enclave TLS binding and DCAP "
+                "did not verify.",
                 err=True,
             )
             raise SystemExit(4)

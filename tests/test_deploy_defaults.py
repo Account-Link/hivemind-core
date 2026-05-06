@@ -1,4 +1,9 @@
+import subprocess
 from pathlib import Path
+
+
+def test_phala_deploy_script_shell_syntax_is_valid():
+    subprocess.run(["bash", "-n", "deploy/phala/deploy.sh"], check=True)
 
 
 def test_phala_compose_defaults_rooms_to_hermes_agents():
@@ -20,6 +25,8 @@ def test_phala_compose_defaults_rooms_to_hermes_agents():
         "HIVEMIND_DEFAULT_MEDIATOR_AGENT: "
         "${HIVEMIND_DEFAULT_MEDIATOR_AGENT:-default-mediator-hermes}"
     ) in compose
+    assert "HIVEMIND_ENCLAVE_TLS: ${HIVEMIND_ENCLAVE_TLS:-0}" in compose
+    assert 'TARGET_ENDPOINT: "http://hivemind:8100"' in compose
 
 
 def test_phala_deploy_syncs_default_room_agents_to_hermes():
@@ -35,3 +42,6 @@ def test_phala_deploy_syncs_default_room_agents_to_hermes():
     )
     assert "ghcr.io/teleport-computer" in deploy_sh
     assert 'hivemind-default-query-hermes:${image_tag}' in deploy_sh
+    assert "env_file_has_key HIVEMIND_ENCLAVE_TLS" in deploy_sh
+    assert "compose_tls_default" in deploy_sh
+    assert "is_truthy" in deploy_sh

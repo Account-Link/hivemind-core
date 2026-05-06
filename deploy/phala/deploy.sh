@@ -397,13 +397,104 @@ sync_hermes_default_agents() {
         "${image_prefix}/hivemind-default-mediator-hermes:${image_tag}"
 }
 
+is_truthy() {
+    local value
+    value="$(printf "%s" "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    case "${value}" in
+        1|true|yes|on) return 0 ;;
+        [1-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+env_file_has_key() {
+    local key="$1"
+    local env_file="${2:-${ENV_FILE}}"
+    grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "${env_file}" 2>/dev/null
+}
+
+env_file_value() {
+    local key="$1"
+    local env_file="${2:-${ENV_FILE}}"
+    python3 - "${env_file}" "${key}" <<'PY'
+import re
+import shlex
+import sys
+
+env_file, key = sys.argv[1], sys.argv[2]
+pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=\s*(.*)$")
+found = False
+value = ""
+try:
+    with open(env_file, encoding="utf-8") as fh:
+        for raw_line in fh:
+            if re.match(r"^\s*#", raw_line):
+                continue
+            match = pattern.match(raw_line.rstrip("\n"))
+            if not match:
+                continue
+            raw_value = match.group(1).strip()
+            try:
+                parts = shlex.split(raw_value, comments=True, posix=True)
+                value = parts[0] if parts else ""
+            except ValueError:
+                value = raw_value.split("#", 1)[0].strip().strip("'\"")
+            found = True
+except FileNotFoundError:
+    pass
+if found:
+    print(value)
+PY
+}
+
+compose_tls_default() {
+    local compose="$1"
+    python3 - "${compose}" <<'PY'
+import re
+import shlex
+import sys
+
+compose = sys.argv[1]
+pattern = re.compile(r"^\s*HIVEMIND_ENCLAVE_TLS\s*:\s*(.*?)\s*(?:#.*)?$")
+try:
+    with open(compose, encoding="utf-8") as fh:
+        for line in fh:
+            match = pattern.match(line.rstrip("\n"))
+            if not match:
+                continue
+            raw_value = match.group(1).strip()
+            env_default = re.match(
+                r"^\$\{HIVEMIND_ENCLAVE_TLS:-([^}]+)\}$",
+                raw_value,
+            )
+            if env_default:
+                raw_value = env_default.group(1)
+            try:
+                parts = shlex.split(raw_value, comments=False, posix=True)
+                value = parts[0] if parts else ""
+            except ValueError:
+                value = raw_value.strip("'\"")
+            print(value.strip())
+            break
+except FileNotFoundError:
+    pass
+PY
+}
+
 # Does this core compose have enclave TLS enabled (default or override)?
 core_tls_enabled() {
     local compose="$1"
-    # Enabled if compose sets a truthy default for HIVEMIND_ENCLAVE_TLS
-    # (e.g. `${HIVEMIND_ENCLAVE_TLS:-1}`) OR the env file overrides it.
-    grep -qE '^[[:space:]]*HIVEMIND_ENCLAVE_TLS:[[:space:]]*\$\{HIVEMIND_ENCLAVE_TLS:-[^}]+\}' "${compose}" && return 0
-    grep -qE '^[[:space:]]*HIVEMIND_ENCLAVE_TLS=[1-9]' "${ENV_FILE}" 2>/dev/null && return 0
+    local value
+    # Explicit env-file value wins over the compose fallback. This matters
+    # because `HIVEMIND_ENCLAVE_TLS=0` is a deliberate prod9 setting, not a
+    # truthy non-empty string.
+    if env_file_has_key HIVEMIND_ENCLAVE_TLS "${ENV_FILE}"; then
+        value="$(env_file_value HIVEMIND_ENCLAVE_TLS "${ENV_FILE}")"
+        is_truthy "${value}" && return 0
+        return 1
+    fi
+    value="$(compose_tls_default "${compose}")"
+    is_truthy "${value}" && return 0
     return 1
 }
 
@@ -419,12 +510,9 @@ wait_healthy() {
     local started=$(date +%s)
     local code
     while : ; do
-        # -k: accept core's self-signed quote-bound cert on -8100s
-        # (HIVEMIND_ENCLAVE_TLS=1 / TCP passthrough). The actual security
-        # gate is the CLI's Tier-3 cross-pin via /v1/attestation, not this
-        # health probe. Without -k, curl returns "000" (cert verify fail)
-        # even when core is fully serving — which used to make every
-        # post-prod9 deploy report a false negative.
+        # -k keeps this health probe transport-agnostic: it tolerates either
+        # gateway TLS on -8100 or a self-signed enclave cert on a passthrough
+        # route. CLI trust, DCAP, and on-chain approval are the security gate.
         code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 8 "${url}" 2>/dev/null || echo "000")
         if [ "${code}" = "200" ]; then
             local elapsed=$(( $(date +%s) - started ))

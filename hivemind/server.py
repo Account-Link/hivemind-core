@@ -683,10 +683,10 @@ def main():
     # opens. The lifespan call becomes a no-op thanks to bootstrap's
     # idempotency guard.
     ssl_kwargs: dict = {}
-    if os.environ.get("HIVEMIND_ENCLAVE_TLS"):
-        from . import attestation as _att
+    from . import attestation as _att
 
-        logger.info("HIVEMIND_ENCLAVE_TLS=1 — bootstrapping TLS before listen")
+    if _att.enclave_tls_enabled():
+        logger.info("HIVEMIND_ENCLAVE_TLS enabled — bootstrapping TLS before listen")
         ready = _bootstrap_attestation_bounded(
             max(1, settings.attestation_bootstrap_timeout_seconds)
         )

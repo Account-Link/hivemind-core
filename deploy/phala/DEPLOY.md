@@ -155,21 +155,19 @@ curl https://hivemind.teleport.computer/v1/healthz
 # {"ok": true}
 ```
 
-> **Two-surface URLs (prod9, dstack-ingress).** The shipped compose ships
-> the Phase E pattern: a `dstack-ingress` sidecar terminates LE-issued
-> TLS for `hivemind.teleport.computer` (ACME DNS-01 via Cloudflare,
-> issued *inside* the enclave), and the hivemind container itself keeps
-> `HIVEMIND_ENCLAVE_TLS=1` for the raw passthrough route.
+> **Prod9 TLS topology (dstack-ingress).** The shipped compose uses HTTP
+> from the Phala gateway / `dstack-ingress` sidecar to the hivemind
+> container. Public TLS still terminates at the gateway or the LE-issued
+> `hivemind.teleport.computer` certificate, while service identity is
+> enforced by DCAP quote verification plus on-chain compose-hash approval.
 >
 > - **Daily use** → `https://hivemind.teleport.computer` (LE cert,
 >   normal `curl` / browser validation). This is what `hmctl init
 >   --service ...` should point at by default.
-> - **Tier-3 pinning** → `https://<core_cvm_id>-8100s.dstack-pha-prod9.phala.network`
->   (gateway TCP-passthrough, enclave-derived cert). The CLI auto-
->   discovers this URL from `/v1/attestation`'s `tls.pinning_url`
->   field and pins it transparently. Raw `curl` on this URL needs
->   `--cacert ~/.hivemind/enclave-tls-<fp16>.pem` (written by the CLI
->   on first connection) or `-k`.
+> - **Raw gateway health** → `https://<app_id>-8100.dstack-pha-prod9.phala.network`
+>   (gateway TLS to cleartext HTTP upstream). The older `-8100s`
+>   passthrough pinning surface is not exposed by current prod9 metadata,
+>   so `HIVEMIND_ENCLAVE_TLS` defaults to `0`.
 
 ## Step 2.5: Approve the compose_hash
 

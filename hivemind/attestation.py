@@ -25,7 +25,7 @@ fingerprint it observed on the wire and compare. Layout mirrors
 feedling-mcp-v1/backend/enclave_app.py::build_report_data (same
 ``binding || version || flag || reserved`` shape), so the verifier
 is a direct translation between repos. v1 is preserved when TLS
-derivation is disabled — ``HIVEMIND_ENCLAVE_TLS=1`` turns v2 on.
+derivation is disabled — a truthy ``HIVEMIND_ENCLAVE_TLS`` turns v2 on.
 
 The authoritative compose-hash binding lives in
 ``measurements.mr_config_id``, which dstack itself writes into the
@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 _REPORT_DATA_VERSION_TAG = b"hivemind-core-v1"
 _REPORT_DATA_V2_TAG = b"hivemind-core-v2"
+_ENV_TRUE = {"1", "true", "yes", "on"}
+_ENV_FALSE = {"", "0", "false", "no", "off"}
 
 _state: dict[str, Any] = {
     "ready": False,
@@ -62,6 +64,36 @@ _state: dict[str, Any] = {
 }
 
 
+def _env_flag_enabled(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _ENV_TRUE:
+        return True
+    if value in _ENV_FALSE:
+        return False
+    if value.isdigit():
+        return int(value) != 0
+    logger.warning(
+        "Ignoring unrecognized %s=%r; expected 1/true/yes/on or "
+        "0/false/no/off.",
+        name,
+        raw,
+    )
+    return False
+
+
+def enclave_tls_enabled() -> bool:
+    """Return whether core should derive and serve enclave TLS.
+
+    Compose renders disabled booleans as the string ``"0"``. Treating any
+    non-empty env var as true makes ``HIVEMIND_ENCLAVE_TLS=0`` accidentally
+    enable TLS, which breaks Phala's TLS-terminating gateway path.
+    """
+    return _env_flag_enabled("HIVEMIND_ENCLAVE_TLS")
+
+
 def disable(reason: str) -> None:
     """Permanently disable attestation bootstrap for this process.
 
@@ -74,6 +106,8 @@ def disable(reason: str) -> None:
     _state["attestation"] = None
     _state["run_signer_priv"] = None
     _state["run_signer_pub"] = None
+    _state["tls_cert_pem"] = None
+    _state["tls_key_pem"] = None
     _state["disabled"] = True
 
 
@@ -141,7 +175,7 @@ def _pinning_url(app_id: str) -> str:
     Override the gateway via HIVEMIND_PINNING_GATEWAY, and the listen port
     via HIVEMIND_PORT.
     """
-    if not os.environ.get("HIVEMIND_ENCLAVE_TLS"):
+    if not enclave_tls_enabled():
         return ""
     if not app_id:
         return ""
@@ -204,13 +238,13 @@ def bootstrap() -> None:
         dstack = DstackClient()
 
         # ── TLS binding (v2) ──
-        # When HIVEMIND_ENCLAVE_TLS=1 we derive a stable TLS cert from
+        # When HIVEMIND_ENCLAVE_TLS is truthy we derive a stable TLS cert from
         # dstack-KMS and fold sha256(cert_der) into report_data so the
         # CLI can pin the fingerprint cryptographically.
         tls_bundle: dict[str, Any] | None = None
         cert_fingerprint_hex = ""
         report_data_version = 1
-        if os.environ.get("HIVEMIND_ENCLAVE_TLS"):
+        if enclave_tls_enabled():
             try:
                 from . import tls as _tls
 
