@@ -119,26 +119,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as e:
             logger.warning("attestation bootstrap raised: %s", e)
 
-        # Kick off agent-base image provisioning in the background — do
-        # NOT block HTTP readiness on it. GHCR pull can fail (private
-        # repo, network blip) and fall back to a multi-minute build that
-        # can OOM-kill a small CVM. When that ran under `await`, lifespan
-        # never completed and uvicorn served "Empty reply from server"
-        # until the whole container restart-looped. Uploading/running
-        # agents before this completes returns the usual missing-base
-        # error — acceptable vs. a hung control plane.
-        async def _bootstrap_agent_base():
-            try:
-                from .agent_base_bootstrap import (
-                    ensure_agent_base_hermes_image,
-                    ensure_agent_base_image,
-                )
-                await asyncio.to_thread(ensure_agent_base_image)
-                await asyncio.to_thread(ensure_agent_base_hermes_image)
-            except Exception as e:
-                logger.warning("agent-base bootstrap raised: %s", e)
+        # Docker image pulls/builds must not be coupled to control-plane
+        # readiness on small CVMs. DockerRunner ensures base images on demand
+        # before agent builds; this optional warmup is for larger operators
+        # that explicitly prefer cold-start work at process startup.
+        agent_base_task = None
+        if settings.bootstrap_agent_base_on_startup:
+            async def _bootstrap_agent_base():
+                try:
+                    from .agent_base_bootstrap import (
+                        ensure_agent_base_hermes_image,
+                        ensure_agent_base_image,
+                    )
+                    await asyncio.to_thread(ensure_agent_base_image)
+                    await asyncio.to_thread(ensure_agent_base_hermes_image)
+                except Exception as e:
+                    logger.warning("agent-base bootstrap raised: %s", e)
 
-        agent_base_task = _spawn_bg(app, _bootstrap_agent_base())
+            agent_base_task = _spawn_bg(app, _bootstrap_agent_base())
 
         registry = TenantRegistry(settings)
         app.state.registry = registry

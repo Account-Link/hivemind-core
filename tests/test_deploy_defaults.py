@@ -25,6 +25,7 @@ def test_phala_compose_defaults_rooms_to_hermes_agents():
 def test_phala_deploy_syncs_default_room_agents_to_hermes():
     deploy_sh = Path("deploy/phala/deploy.sh").read_text()
 
+    assert 'local image_tag="${IMAGE_SHA:-latest}"' in deploy_sh
     assert "HIVEMIND_DEFAULT_INDEX_AGENT \\\n        default-index-hermes" in deploy_sh
     assert "HIVEMIND_DEFAULT_SCOPE_AGENT \\\n        default-scope-hermes" in deploy_sh
     assert "HIVEMIND_DEFAULT_QUERY_AGENT \\\n        default-query-hermes" in deploy_sh
@@ -32,3 +33,5 @@ def test_phala_deploy_syncs_default_room_agents_to_hermes():
         "HIVEMIND_DEFAULT_MEDIATOR_AGENT \\\n        default-mediator-hermes"
         in deploy_sh
     )
+    assert "ghcr.io/teleport-computer" in deploy_sh
+    assert 'hivemind-default-query-hermes:${image_tag}' in deploy_sh

@@ -151,6 +151,9 @@ class Settings(BaseSettings):
     # core image sets this to /app/agents so default agents can be built
     # locally when GHCR agent packages are private or unreachable.
     bundled_agents_dir: str = ""
+    # Do not make core readiness depend on Docker pulls/builds. Agent base
+    # images are ensured on demand by DockerRunner before an agent build.
+    bootstrap_agent_base_on_startup: bool = False
 
     @model_validator(mode="after")
     def _validate_security(self):

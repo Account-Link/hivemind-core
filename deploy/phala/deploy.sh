@@ -374,6 +374,9 @@ sync_self_serve_billing_policy() {
 
 sync_hermes_default_agents() {
     local env_file="$1"
+    local image_tag="${IMAGE_SHA:-latest}"
+    local image_prefix="ghcr.io/teleport-computer"
+
     sync_env_value "${env_file}" HIVEMIND_AUTOLOAD_DEFAULT_AGENTS true
     sync_env_value "${env_file}" HIVEMIND_BUNDLED_AGENTS_DIR /app/agents
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_AGENT \
@@ -385,13 +388,13 @@ sync_hermes_default_agents() {
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_MEDIATOR_AGENT \
         default-mediator-hermes
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE \
-        hivemind-default-index-hermes:latest
+        "${image_prefix}/hivemind-default-index-hermes:${image_tag}"
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE \
-        hivemind-default-scope-hermes:latest
+        "${image_prefix}/hivemind-default-scope-hermes:${image_tag}"
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE \
-        hivemind-default-query-hermes:latest
+        "${image_prefix}/hivemind-default-query-hermes:${image_tag}"
     sync_env_value "${env_file}" HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE \
-        hivemind-default-mediator-hermes:latest
+        "${image_prefix}/hivemind-default-mediator-hermes:${image_tag}"
 }
 
 # Does this core compose have enclave TLS enabled (default or override)?

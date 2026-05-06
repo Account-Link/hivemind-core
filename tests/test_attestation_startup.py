@@ -42,3 +42,7 @@ def test_ephemeral_tls_cert_is_usable():
     assert bundle["cert_pem"].startswith(b"-----BEGIN CERTIFICATE-----")
     assert bundle["key_pem"].startswith(b"-----BEGIN PRIVATE KEY-----")
     assert len(bundle["fingerprint"]) == 32
+
+
+def test_agent_base_bootstrap_is_not_startup_default():
+    assert server.Settings().bootstrap_agent_base_on_startup is False
