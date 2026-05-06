@@ -372,6 +372,19 @@ sync_self_serve_billing_policy() {
     sync_env_value "${env_file}" HIVEMIND_BILLING_ENFORCE_CREDITS true
 }
 
+sync_hermes_default_agents() {
+    local env_file="$1"
+    sync_env_value "${env_file}" HIVEMIND_AUTOLOAD_DEFAULT_AGENTS true
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_INDEX_HERMES_IMAGE \
+        ghcr.io/teleport-computer/hivemind-default-index-hermes:latest
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_SCOPE_HERMES_IMAGE \
+        ghcr.io/teleport-computer/hivemind-default-scope-hermes:latest
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_QUERY_HERMES_IMAGE \
+        ghcr.io/teleport-computer/hivemind-default-query-hermes:latest
+    sync_env_value "${env_file}" HIVEMIND_DEFAULT_MEDIATOR_HERMES_IMAGE \
+        ghcr.io/teleport-computer/hivemind-default-mediator-hermes:latest
+}
+
 # Does this core compose have enclave TLS enabled (default or override)?
 core_tls_enabled() {
     local compose="$1"
@@ -427,6 +440,7 @@ deploy_core() {
     sync_pinning_gateway "${CORE_NAME}" "${ENV_FILE}"
     sync_default_llm_model "${ENV_FILE}"
     sync_self_serve_billing_policy "${ENV_FILE}"
+    sync_hermes_default_agents "${ENV_FILE}"
     precheck_env  "${CORE_COMPOSE}" "${ENV_FILE}"
     deploy_and_seal "${CORE_NAME}"  "${CORE_COMPOSE}" "${ENV_FILE}"
     local url tls=0

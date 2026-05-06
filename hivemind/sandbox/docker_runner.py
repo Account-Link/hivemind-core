@@ -949,6 +949,16 @@ class DockerRunner:
         except docker.errors.ImageNotFound:
             return False
 
+    def pull_image(self, image: str) -> bool:
+        """Best-effort pull for operator-configured default-agent images."""
+        try:
+            logger.info("Pulling Docker image %s", image)
+            self._get_client().images.pull(image)
+            return True
+        except Exception as e:
+            logger.info("Docker image pull failed for %s: %s", image, e)
+            return False
+
     async def ensure_image_async(
         self, image_tag: str, files: dict[str, str] | None,
     ) -> bool:

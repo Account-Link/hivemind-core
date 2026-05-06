@@ -1014,6 +1014,35 @@ def test_build_image_ensures_hermes_base_before_generic_base(tmp_path):
     mock_client.images.build.assert_called_once()
 
 
+def test_pull_image_returns_true_on_success():
+    mock_client = MagicMock()
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        assert runner.pull_image("ghcr.io/example/agent:latest") is True
+
+    mock_client.images.pull.assert_called_once_with(
+        "ghcr.io/example/agent:latest"
+    )
+
+
+def test_pull_image_returns_false_on_error():
+    mock_client = MagicMock()
+    mock_client.images.pull.side_effect = RuntimeError("denied")
+    settings = _make_settings()
+
+    with patch("hivemind.sandbox.docker_runner.docker") as mock_docker:
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors = __import__("docker").errors
+
+        runner = DockerRunner(settings)
+        assert runner.pull_image("ghcr.io/example/agent:latest") is False
+
+
 def test_build_image_rejects_missing_dockerfile(tmp_path):
     """build_image should raise ValueError if no Dockerfile exists."""
     (tmp_path / "agent.py").write_text("print('hello')\n")

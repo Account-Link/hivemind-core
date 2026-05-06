@@ -162,13 +162,22 @@ class Hivemind:
             if runner is None:
                 runner = _create_runner(self._build_sandbox_settings())
             if not runner.image_exists(image):
-                logger.warning(
-                    "Default %s/%s image not found: %s — skipping autoload. "
-                    "Build/pull the image or unset HIVEMIND_%s.",
-                    role, harness, image, image_key.upper(),
-                )
-                continue
-
+                pulled = False
+                pull_image = getattr(runner, "pull_image", None)
+                if callable(pull_image):
+                    pulled = bool(pull_image(image))
+                if pulled and runner.image_exists(image):
+                    logger.info(
+                        "Pulled default %s/%s image for autoload: %s",
+                        role, harness, image,
+                    )
+                else:
+                    logger.warning(
+                        "Default %s/%s image not found: %s — skipping autoload. "
+                        "Build/pull the image or unset HIVEMIND_%s.",
+                        role, harness, image, image_key.upper(),
+                    )
+                    continue
             agent_id = (getattr(self.settings, agent_key, "") or "").strip()
             if not agent_id:
                 agent_id = fallback_agent_id

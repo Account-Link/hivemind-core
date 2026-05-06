@@ -24,7 +24,7 @@ on:
         required: false
         default: ""
       targets:
-        description: "Images to build (comma-separated: core,postgres,sql-proxy,base-sdk,base-sdk-hermes or all)"
+        description: "Images to build (comma-separated: core,postgres,sql-proxy,base-sdk,base-sdk-hermes,default-hermes or all)"
         required: false
         default: "all"
 
@@ -49,6 +49,7 @@ jobs:
     outputs:
       ns: ${{ steps.lower.outputs.ns }}
       version: ${{ steps.ver.outputs.version }}
+      short_sha: ${{ steps.sha.outputs.short_sha }}
     steps:
       - id: lower
         run: echo "ns=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
@@ -59,6 +60,8 @@ jobs:
           else
             echo "version=" >> "$GITHUB_OUTPUT"
           fi
+      - id: sha
+        run: echo "short_sha=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
   # ---------- base SDK (shared layer for all agent images) ----------
   base-sdk:
@@ -114,6 +117,7 @@ jobs:
     if: >-
       github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.targets, 'base-sdk-hermes') ||
+      contains(github.event.inputs.targets, 'default-hermes') ||
       github.event.inputs.targets == 'all'
     runs-on: ubuntu-latest
     permissions:
@@ -153,6 +157,60 @@ jobs:
       - name: Print image info
         run: |
           echo "### hivemind-agent-base-hermes" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- default Hermes agents (index/query/scope/mediator) ----------
+  default-hermes:
+    needs: [prepare, base-sdk-hermes]
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.targets, 'default-hermes') ||
+      github.event.inputs.targets == 'all'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [index, query, scope, mediator]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GA_GHCR_TOKEN }}
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-default-${{ matrix.role }}-hermes
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }},enable=${{ needs.prepare.outputs.version != '' }}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f
+        id: build
+        with:
+          context: agents/default-${{ matrix.role }}-hermes
+          file: agents/default-${{ matrix.role }}-hermes/Dockerfile
+          push: true
+          build-args: |
+            HIVEMIND_AGENT_BASE_HERMES_IMAGE=${{ env.REGISTRY }}/${{ needs.prepare.outputs.ns }}/hivemind-agent-base-hermes:${{ needs.prepare.outputs.short_sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=default-${{ matrix.role }}-hermes
+          cache-to: type=gha,mode=max,scope=default-${{ matrix.role }}-hermes
+
+      - name: Print image info
+        run: |
+          echo "### hivemind-default-${{ matrix.role }}-hermes" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Tags:** ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
 

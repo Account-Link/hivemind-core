@@ -377,6 +377,60 @@ class TestDefaultAgentAutoload:
             hm.db.close()
             _clear_default_agents(test_dsn)
 
+    def test_autoload_pulls_missing_configured_image(self, monkeypatch):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+        _clear_default_agents(test_dsn)
+
+        calls = {"pull": [], "extract": []}
+        present: set[str] = set()
+
+        class FakeRunner:
+            def __init__(self, settings):
+                self.settings = settings
+
+            def cleanup_stale_containers(self):
+                return None
+
+            def image_exists(self, image):
+                return image in present
+
+            def pull_image(self, image):
+                calls["pull"].append(image)
+                present.add(image)
+                return True
+
+            def extract_image_files(self, image, **kwargs):
+                calls["extract"].append(image)
+                return {"agent.py": f"# {image}"}
+
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda settings: FakeRunner(settings),
+        )
+
+        settings = Settings(
+            database_url=test_dsn,
+            llm_api_key="test",
+            autoload_default_agents=True,
+            default_query_hermes_image=(
+                "ghcr.io/teleport-computer/hivemind-default-query-hermes:latest"
+            ),
+        )
+        hm = Hivemind(settings)
+        try:
+            assert calls["pull"] == [
+                "ghcr.io/teleport-computer/hivemind-default-query-hermes:latest"
+            ]
+            assert calls["extract"] == calls["pull"]
+            agent = hm.agent_store.get("default-query-hermes")
+            assert agent is not None
+            assert agent.harness == "hermes"
+        finally:
+            hm.db.close()
+            _clear_default_agents(test_dsn)
+
     def test_autoload_disabled_does_not_register(self, monkeypatch):
         test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
         if not test_dsn:
