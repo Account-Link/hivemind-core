@@ -132,15 +132,17 @@ class Hivemind:
         return build_sandbox_settings(self.settings)
 
     def _bundled_agents_root(self) -> Path | None:
-        candidates: list[Path] = []
         configured = (getattr(self.settings, "bundled_agents_dir", "") or "").strip()
         if configured:
-            candidates.append(Path(configured))
-        candidates.append(Path("/app/agents"))
-        candidates.append(Path(__file__).resolve().parents[1] / "agents")
+            root = Path(configured)
+            if root.is_dir():
+                return root
 
-        for root in candidates:
-            if (root / "base").is_dir() or (root / "base-hermes").is_dir():
+        for root in (
+            Path("/app/agents"),
+            Path(__file__).resolve().parents[1] / "agents",
+        ):
+            if root.is_dir():
                 return root
         return None
 
