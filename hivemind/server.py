@@ -389,6 +389,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Unauthorized")
         request.state.tenant_id = caller.tenant_id
         request.state.caller = caller
+        if caller.hive.start_default_agent_image_warmup():
+            _spawn_bg(request.app, caller.hive.warm_default_agent_images())
         return caller
 
     def requires_role(*roles: Role):

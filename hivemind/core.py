@@ -19,6 +19,66 @@ from .version import APP_VERSION
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_AGENT_SPECS = (
+    (
+        "index",
+        "claude_code",
+        "default_index_agent",
+        "default_index_image",
+        "default-index",
+    ),
+    (
+        "scope",
+        "claude_code",
+        "default_scope_agent",
+        "default_scope_image",
+        "default-scope",
+    ),
+    (
+        "query",
+        "claude_code",
+        "default_query_agent",
+        "default_query_image",
+        "default-query",
+    ),
+    (
+        "mediator",
+        "claude_code",
+        "default_mediator_agent",
+        "default_mediator_image",
+        "default-mediator",
+    ),
+    (
+        "index",
+        "hermes",
+        "default_index_hermes_agent",
+        "default_index_hermes_image",
+        "default-index-hermes",
+    ),
+    (
+        "scope",
+        "hermes",
+        "default_scope_hermes_agent",
+        "default_scope_hermes_image",
+        "default-scope-hermes",
+    ),
+    (
+        "query",
+        "hermes",
+        "default_query_hermes_agent",
+        "default_query_hermes_image",
+        "default-query-hermes",
+    ),
+    (
+        "mediator",
+        "hermes",
+        "default_mediator_hermes_agent",
+        "default_mediator_hermes_image",
+        "default-mediator-hermes",
+    ),
+)
+
+
 class Hivemind:
     """Thin wrapper: database + pipeline + health.
 
@@ -42,6 +102,8 @@ class Hivemind:
         self.tenant_db = tenant_db
         self.sealer = sealer
         self.billing_meter = billing_meter
+        self._default_agent_image_warm_inflight = False
+        self._default_agent_image_warm_completed = False
         self.db = connect(
             settings.database_url,
             proxy_key=settings.sql_proxy_key,
@@ -152,6 +214,26 @@ class Hivemind:
         leaf = leaf.split("@", 1)[0]
         return leaf.split(":", 1)[0]
 
+    def _is_trusted_bundled_default_image(
+        self,
+        *,
+        image: str,
+        source_name: str,
+    ) -> bool:
+        leaf = self._image_leaf_name(image)
+        if leaf not in {source_name, f"hivemind-{source_name}"}:
+            return False
+
+        image_ref = image.split("@", 1)[0]
+        image_name = image_ref.rsplit(":", 1)[0]
+        if "/" not in image_name:
+            return True
+
+        return image_name.lower() in {
+            f"ghcr.io/teleport-computer/{source_name}",
+            f"ghcr.io/teleport-computer/hivemind-{source_name}",
+        }
+
     def _build_bundled_default_agent_image(
         self,
         runner,
@@ -165,7 +247,9 @@ class Hivemind:
         is only for repo-owned defaults that are copied into the production core
         image so prod does not depend on public GHCR agent packages.
         """
-        if self._image_leaf_name(image) not in {source_name, f"hivemind-{source_name}"}:
+        if not self._is_trusted_bundled_default_image(
+            image=image, source_name=source_name
+        ):
             return False
 
         root = self._bundled_agents_root()
@@ -197,18 +281,16 @@ class Hivemind:
         max_file_size: int = 512_000,
         max_total_size: int = 5_000_000,
     ) -> dict[str, str] | None:
-        """Return bundled source context for trusted local default-agent tags.
+        """Return bundled source context for trusted built-in default-agent refs.
 
         Tenant construction must not block on Docker builds. For repo-owned
-        local tags (``hivemind-default-*:latest``), store the bundled Docker
-        context directly in Postgres; the normal run path can build the image
-        from that context on first use after a CVM redeploy.
+        local tags and GHCR refs, store the bundled Docker context directly in
+        Postgres; the normal run path can build the image from that context on
+        first use after a CVM redeploy.
         """
-        image_ref = image.split("@", 1)[0]
-        image_name = image_ref.rsplit(":", 1)[0]
-        if "/" in image_name:
-            return None
-        if self._image_leaf_name(image) not in {source_name, f"hivemind-{source_name}"}:
+        if not self._is_trusted_bundled_default_image(
+            image=image, source_name=source_name
+        ):
             return None
 
         root = self._bundled_agents_root()
@@ -252,20 +334,8 @@ class Hivemind:
         if not self.settings.autoload_default_agents:
             return
 
-        # (role, harness, agent_key, image_key, fallback_agent_id)
-        specs = (
-            ("index",    "claude_code", "default_index_agent",          "default_index_image",          "default-index"),
-            ("scope",    "claude_code", "default_scope_agent",          "default_scope_image",          "default-scope"),
-            ("query",    "claude_code", "default_query_agent",          "default_query_image",          "default-query"),
-            ("mediator", "claude_code", "default_mediator_agent",       "default_mediator_image",       "default-mediator"),
-            ("index",    "hermes",      "default_index_hermes_agent",   "default_index_hermes_image",   "default-index-hermes"),
-            ("scope",    "hermes",      "default_scope_hermes_agent",   "default_scope_hermes_image",   "default-scope-hermes"),
-            ("query",    "hermes",      "default_query_hermes_agent",   "default_query_hermes_image",   "default-query-hermes"),
-            ("mediator", "hermes",      "default_mediator_hermes_agent","default_mediator_hermes_image","default-mediator-hermes"),
-        )
-
         runner = None
-        for role, harness, agent_key, image_key, fallback_agent_id in specs:
+        for role, harness, agent_key, image_key, fallback_agent_id in DEFAULT_AGENT_SPECS:
             image = (getattr(self.settings, image_key, "") or "").strip()
             if not image:
                 continue
@@ -349,6 +419,76 @@ class Hivemind:
                 raise RuntimeError(
                     f"Default {role} agent bootstrap failed for image '{image}': {e}"
                 )
+
+    def needs_default_agent_image_warmup(self) -> bool:
+        if not self.settings.autoload_default_agents:
+            return False
+        return (
+            not self._default_agent_image_warm_inflight
+            and not self._default_agent_image_warm_completed
+        )
+
+    def start_default_agent_image_warmup(self) -> bool:
+        if not self.needs_default_agent_image_warmup():
+            return False
+        self._default_agent_image_warm_inflight = True
+        return True
+
+    async def warm_default_agent_images(self) -> None:
+        """Rebuild missing autoloaded default images without blocking auth.
+
+        Autoload stores bundled source for repo-owned defaults so tenant
+        construction stays fast after a CVM redeploy. This background pass
+        pays the Docker rebuild cost before the first real room run needs
+        scope/query/mediator containers.
+        """
+        if (
+            not self._default_agent_image_warm_inflight
+            and not self.start_default_agent_image_warmup()
+        ):
+            return
+        failures = 0
+        try:
+            runner = _create_runner(self._build_sandbox_settings())
+            for spec in DEFAULT_AGENT_SPECS:
+                _role, _harness, agent_key, image_key, fallback_agent_id = spec
+                image = (getattr(self.settings, image_key, "") or "").strip()
+                if not image:
+                    continue
+                agent_id = (getattr(self.settings, agent_key, "") or "").strip()
+                if not agent_id:
+                    agent_id = fallback_agent_id
+                agent = await asyncio.to_thread(self.agent_store.get, agent_id)
+                if agent is None:
+                    continue
+                try:
+                    files = await asyncio.to_thread(
+                        lambda: self.agent_store.get_files(
+                            agent.agent_id,
+                            allow_sealed=True,
+                        )
+                    )
+                    rebuilt = await runner.ensure_image_async(agent.image, files)
+                    if rebuilt:
+                        logger.info(
+                            "Warmed default agent image %s for %s",
+                            agent.image,
+                            agent.agent_id,
+                        )
+                except Exception as e:
+                    failures += 1
+                    logger.warning(
+                        "Default agent image warmup failed for %s (%s): %s",
+                        agent_id,
+                        image,
+                        e,
+                    )
+        except Exception as e:
+            failures += 1
+            logger.warning("Default agent image warmup setup failed: %s", e)
+        finally:
+            self._default_agent_image_warm_completed = failures == 0
+            self._default_agent_image_warm_inflight = False
 
     def health(self) -> dict:
         rows = self.db.execute(

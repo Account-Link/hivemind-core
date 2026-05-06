@@ -308,6 +308,59 @@ class TestDefaultAgentAutoload:
             is None
         )
 
+    def test_bundled_default_agent_files_reads_repo_owned_ghcr_ref(self, tmp_path):
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+        (source_dir / "agent.py").write_text("print('hello')\n")
+
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            bundled_agents_dir=str(tmp_path),
+        )
+
+        files = hm._bundled_default_agent_files(
+            image=(
+                "ghcr.io/teleport-computer/"
+                "hivemind-default-query-hermes:abc123"
+            ),
+            source_name="default-query-hermes",
+        )
+
+        assert files == {
+            "Dockerfile": "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n",
+            "agent.py": "print('hello')\n",
+        }
+
+    def test_bundled_default_build_ignores_untrusted_registry_ref(self, tmp_path):
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+
+        class FakeRunner:
+            def build_image(self, build_path, tag):
+                raise AssertionError("untrusted registry refs must not build")
+
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            bundled_agents_dir=str(tmp_path),
+        )
+
+        assert (
+            hm._build_bundled_default_agent_image(
+                FakeRunner(),
+                image="ghcr.io/example/hivemind-default-query-hermes:latest",
+                source_name="default-query-hermes",
+            )
+            is False
+        )
+
     def test_autoload_refreshes_bundled_context_with_stable_tag(self, tmp_path):
         source_dir = tmp_path / "default-query-hermes"
         source_dir.mkdir()
@@ -599,6 +652,176 @@ class TestDefaultAgentAutoload:
         finally:
             hm.db.close()
             _clear_default_agents(test_dsn)
+
+    def test_autoload_stores_repo_owned_ghcr_context_without_docker(
+        self, monkeypatch, tmp_path
+    ):
+        test_dsn = os.environ.get("HIVEMIND_TEST_DATABASE_URL", "")
+        if not test_dsn:
+            pytest.skip("HIVEMIND_TEST_DATABASE_URL not set")
+        _clear_default_agents(test_dsn)
+
+        source_dir = tmp_path / "default-query-hermes"
+        source_dir.mkdir()
+        (source_dir / "Dockerfile").write_text(
+            "FROM hivemind-agent-base-hermes:latest\nCOPY agent.py .\n"
+        )
+        (source_dir / "agent.py").write_text("print('hello')\n")
+
+        calls = {"build": [], "pull": [], "extract": []}
+        present: set[str] = set()
+
+        class FakeRunner:
+            def __init__(self, settings):
+                self.settings = settings
+
+            def cleanup_stale_containers(self):
+                return None
+
+            def image_exists(self, image):
+                return image in present
+
+            def build_image(self, build_path, tag):
+                calls["build"].append((build_path, tag))
+                present.add(tag)
+                return tag
+
+            def pull_image(self, image):
+                calls["pull"].append(image)
+                return False
+
+            def extract_image_files(self, image, **kwargs):
+                calls["extract"].append(image)
+                return {"agent.py": f"# {image}"}
+
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda settings: FakeRunner(settings),
+        )
+
+        settings = Settings(
+            database_url=test_dsn,
+            llm_api_key="test",
+            autoload_default_agents=True,
+            bundled_agents_dir=str(tmp_path),
+            default_query_hermes_image=(
+                "ghcr.io/teleport-computer/hivemind-default-query-hermes:abc123"
+            ),
+        )
+        hm = Hivemind(settings)
+        try:
+            assert calls["build"] == []
+            assert calls["pull"] == []
+            assert calls["extract"] == []
+            agent = hm.agent_store.get("default-query-hermes")
+            assert agent is not None
+            assert agent.harness == "hermes"
+            assert (
+                agent.image
+                == "ghcr.io/teleport-computer/"
+                "hivemind-default-query-hermes:abc123"
+            )
+            stored_paths = [
+                row["path"] for row in hm.agent_store.list_file_paths(agent.agent_id)
+            ]
+            assert sorted(stored_paths) == [
+                "Dockerfile",
+                "agent.py",
+            ]
+        finally:
+            hm.db.close()
+            _clear_default_agents(test_dsn)
+
+    @pytest.mark.asyncio
+    async def test_default_agent_image_warmup_rebuilds_from_stored_context(
+        self, monkeypatch
+    ):
+        calls = []
+
+        class FakeStore:
+            def get(self, agent_id):
+                if agent_id == "default-query-hermes":
+                    return SimpleNamespace(
+                        agent_id=agent_id,
+                        image=(
+                            "ghcr.io/teleport-computer/"
+                            "hivemind-default-query-hermes:abc123"
+                        ),
+                    )
+                return None
+
+            def get_files(self, agent_id, allow_sealed=False):
+                assert agent_id == "default-query-hermes"
+                assert allow_sealed is True
+                return {
+                    "Dockerfile": "FROM hivemind-agent-base-hermes:latest\n",
+                    "agent.py": "print('hello')\n",
+                }
+
+        class FakeRunner:
+            async def ensure_image_async(self, image, files):
+                calls.append((image, sorted(files)))
+                return True
+
+        runner = FakeRunner()
+        monkeypatch.setattr("hivemind.core._create_runner", lambda settings: runner)
+
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            autoload_default_agents=True,
+            default_query_hermes_agent="default-query-hermes",
+            default_query_hermes_image=(
+                "ghcr.io/teleport-computer/hivemind-default-query-hermes:abc123"
+            ),
+        )
+        hm.agent_store = FakeStore()
+        hm._build_sandbox_settings = lambda: SimpleNamespace()
+        hm._default_agent_image_warm_inflight = False
+        hm._default_agent_image_warm_completed = False
+
+        assert hm.start_default_agent_image_warmup() is True
+        assert hm.start_default_agent_image_warmup() is False
+
+        await hm.warm_default_agent_images()
+
+        assert calls == [
+            (
+                "ghcr.io/teleport-computer/hivemind-default-query-hermes:abc123",
+                ["Dockerfile", "agent.py"],
+            )
+        ]
+        assert hm._default_agent_image_warm_completed is True
+        assert hm.start_default_agent_image_warmup() is False
+
+    @pytest.mark.asyncio
+    async def test_default_agent_image_warmup_setup_failure_can_retry(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "hivemind.core._create_runner",
+            lambda settings: (_ for _ in ()).throw(RuntimeError("docker down")),
+        )
+
+        hm = object.__new__(Hivemind)
+        hm.settings = Settings(
+            llm_api_key="test",
+            autoload_default_agents=True,
+            default_query_hermes_agent="default-query-hermes",
+            default_query_hermes_image=(
+                "ghcr.io/teleport-computer/hivemind-default-query-hermes:abc123"
+            ),
+        )
+        hm.agent_store = SimpleNamespace()
+        hm._build_sandbox_settings = lambda: SimpleNamespace()
+        hm._default_agent_image_warm_inflight = False
+        hm._default_agent_image_warm_completed = False
+
+        assert hm.start_default_agent_image_warmup() is True
+        await hm.warm_default_agent_images()
+
+        assert hm._default_agent_image_warm_completed is False
+        assert hm.start_default_agent_image_warmup() is True
 
     def test_bundled_default_build_failure_is_fatal(self, tmp_path):
         source_dir = tmp_path / "default-query-hermes"

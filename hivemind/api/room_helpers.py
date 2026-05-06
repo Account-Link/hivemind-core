@@ -109,9 +109,73 @@ def room_wrap_id(caller: Caller) -> str:
     return f"query:{token_id}"
 
 
+def _first_header_value(value: str | None) -> str:
+    return (value or "").split(",", 1)[0].strip()
+
+
+def _parse_forwarded_header(value: str | None) -> dict[str, str]:
+    """Parse the first RFC 7239 Forwarded hop into a small key/value map."""
+    first = _first_header_value(value)
+    if not first:
+        return {}
+    out: dict[str, str] = {}
+    for part in first.split(";"):
+        key, sep, raw = part.strip().partition("=")
+        if not sep:
+            continue
+        cleaned = raw.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] == '"':
+            cleaned = cleaned[1:-1]
+        out[key.strip().lower()] = cleaned
+    return out
+
+
+def _with_forwarded_port(host: str, proto: str, port: str) -> str:
+    port = port.strip()
+    if not port.isdigit():
+        return host
+    if (proto, port) in {("http", "80"), ("https", "443")}:
+        return host
+    # Host may be "example.com:8443" or "[::1]:8443" already.
+    suffix = host.rsplit("]", 1)[-1] if host.startswith("[") else host
+    if ":" in suffix:
+        return host
+    return f"{host}:{port}"
+
+
+def external_request_base(request: Request) -> tuple[str, str]:
+    """Return the externally visible ``(base_url, host)`` for room links.
+
+    In production the app sits behind dstack-ingress: FastAPI sees HTTP on
+    the Docker bridge, while clients must use the public HTTPS origin for
+    strict attestation. Prefer proxy headers when present; otherwise keep
+    TestClient/local behavior unchanged.
+    """
+    forwarded = _parse_forwarded_header(request.headers.get("forwarded"))
+    proto = (
+        _first_header_value(request.headers.get("x-forwarded-proto"))
+        or forwarded.get("proto")
+        or request.url.scheme
+        or "http"
+    ).lower()
+    if proto not in {"http", "https"}:
+        proto = request.url.scheme or "http"
+
+    host = (
+        _first_header_value(request.headers.get("x-forwarded-host"))
+        or forwarded.get("host")
+        or request.url.netloc
+        or "service"
+    )
+    port = _first_header_value(request.headers.get("x-forwarded-port"))
+    if port:
+        host = _with_forwarded_port(host, proto, port)
+
+    return f"{proto}://{host}".rstrip("/"), host
+
+
 def room_link(request: Request, room_id: str, token: str, pubkey_b64: str) -> str:
-    base = str(request.base_url).rstrip("/")
-    host = request.url.netloc or "service"
+    base, host = external_request_base(request)
     return (
         f"hmroom://{host}/{room_id}"
         f"?service={quote(base, safe='')}"
@@ -129,8 +193,7 @@ def share_room_link(
     """Stable share-link URI. Same shape as :func:`room_link` but the
     capability is carried in ``?share=`` so the server can route the
     bearer through the share-link auth path instead of invite-token."""
-    base = str(request.base_url).rstrip("/")
-    host = request.url.netloc or "service"
+    base, host = external_request_base(request)
     return (
         f"hmroom://{host}/{room_id}"
         f"?service={quote(base, safe='')}"
