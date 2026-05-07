@@ -156,6 +156,14 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     assert policy in body
 
 
+def test_scope_prompt_preserves_policy_allowed_aggregate_rows():
+    source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
+
+    assert "Pattern A — pass already-safe aggregate rows through" in source
+    assert "Do NOT replace an allowed aggregate table" in source
+    assert "skip simulation and emit after verify_scope_fn" in source
+
+
 def test_mediator_agent_uses_ai_agent_for_safe_aggregate_output(monkeypatch, capsys):
     raw = "watch_day: 2026-04-15\nvideos: 482237"
     policy = "Allowed: aggregate statistics and counts. Not allowed: raw rows."
