@@ -162,6 +162,129 @@ class TestRunQuery:
         assert usage["total_tokens"] == 10
 
     @pytest.mark.asyncio
+    async def test_scope_agent_repairs_overcollapsed_aggregate_policy(
+        self, monkeypatch
+    ):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="scope-aggregate-repair",
+            name="Scope Agent",
+            image="img:scope",
+        )
+        agent_store.list_file_paths.return_value = []
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+
+        scope_fn_source = (
+            "def scope(sql, params, rows):\n"
+            "    return {'allow': True, 'rows': [{'match_count': len(rows)}]}\n"
+        )
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                return json.dumps({"scope_fn": scope_fn_source}), {
+                    "total_tokens": 10
+                }
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="Which day has the highest count?",
+            query_agent_id="q1",
+            scope_agent_id="scope-aggregate-repair",
+            policy="Allowed: aggregate statistics and counts. Not allowed: raw rows.",
+        )
+        fn, source, usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+
+        result = fn(
+            "SELECT DATE(created_at) AS bucket_day, COUNT(*) AS items "
+            "FROM records GROUP BY DATE(created_at)",
+            [],
+            [{"bucket_day": "2026-01-01", "items": 42}],
+        )
+        assert result == {
+            "allow": True,
+            "rows": [{"bucket_day": "2026-01-01", "items": 42}],
+        }
+        role_result = fn(
+            "SELECT role, COUNT(*) AS total FROM messages GROUP BY role",
+            [],
+            [{"role": "assistant", "total": 7}],
+        )
+        assert role_result == {
+            "allow": True,
+            "rows": [{"role": "assistant", "total": 7}],
+        }
+        sensitive_alias_result = fn(
+            "SELECT content AS topic, COUNT(*) AS items "
+            "FROM messages GROUP BY content",
+            [],
+            [{"topic": "private message text", "items": 1}],
+        )
+        assert sensitive_alias_result == {
+            "allow": True,
+            "rows": [{"match_count": 1}],
+        }
+        raw_result = fn(
+            "SELECT id, title FROM records LIMIT 1",
+            [],
+            [{"id": "row-1", "title": "private"}],
+        )
+        assert raw_result == {"allow": True, "rows": [{"match_count": 1}]}
+        assert "_policy_scope" in source
+        assert usage["total_tokens"] == 10
+
+    @pytest.mark.asyncio
+    async def test_scope_agent_does_not_repair_without_aggregate_policy(
+        self, monkeypatch
+    ):
+        settings = Settings(database_url="unused", llm_api_key="test")
+        agent_store = MagicMock(spec=AgentStore)
+        agent_store.get.return_value = AgentConfig(
+            agent_id="scope-no-aggregate-repair",
+            name="Scope Agent",
+            image="img:scope",
+        )
+        agent_store.list_file_paths.return_value = []
+        pipeline = Pipeline(settings, MagicMock(spec=Database), agent_store)
+
+        scope_fn_source = (
+            "def scope(sql, params, rows):\n"
+            "    return {'allow': True, 'rows': [{'match_count': len(rows)}]}\n"
+        )
+
+        class FakeBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def run(self, **kwargs):
+                return json.dumps({"scope_fn": scope_fn_source}), {
+                    "total_tokens": 10
+                }
+
+        monkeypatch.setattr(pipeline_module, "SandboxBackend", FakeBackend)
+
+        req = QueryRequest(
+            query="Which day has the highest count?",
+            query_agent_id="q1",
+            scope_agent_id="scope-no-aggregate-repair",
+            policy="No raw row dumps.",
+        )
+        fn, source, _usage = await pipeline._run_scope_agent(req, max_tokens=1000)
+
+        result = fn(
+            "SELECT DATE(created_at) AS bucket_day, COUNT(*) AS items "
+            "FROM records GROUP BY DATE(created_at)",
+            [],
+            [{"bucket_day": "2026-01-01", "items": 42}],
+        )
+        assert result == {"allow": True, "rows": [{"match_count": 1}]}
+        assert source == scope_fn_source
+
+    @pytest.mark.asyncio
     async def test_scope_agent_accepts_noisy_stdout_before_scope_json(
         self, monkeypatch
     ):
