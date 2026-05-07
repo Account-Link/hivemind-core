@@ -30,6 +30,11 @@ records, preserve row-level records except for fields or rows the policy
 actually excludes. If policy allows redacted records, remove only the
 excluded values and keep the rest of the useful row structure.
 
+Aggregate SQL often uses domain-specific aliases. When the SQL result is
+aggregate/statistical and policy allows that shape, treat numeric result
+values as metrics even when their column names are not generic words like
+count, total, sum, min, max, or avg.
+
 ## Contract
 
 The function must:

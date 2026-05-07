@@ -46,6 +46,9 @@ Ask the database for the shape the user requested. For statistics or
 summaries, compute the statistic in SQL and return the scoped result; for
 row-level questions, request row-level data and let the scope function
 apply the room policy.
+
+Call get_schema before your first SQL unless the provided scope function
+already gives you every table and column needed.
 """
 
 # Override with external prompt file if present (CLI-fused agents)
