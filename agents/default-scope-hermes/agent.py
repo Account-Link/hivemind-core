@@ -179,10 +179,81 @@ else:
     SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
-_FALLBACK_SCOPE_FN = (
+_EMPTY_FALLBACK_SCOPE_FN = (
     "def scope(sql, params, rows):\n"
     "    return {\"allow\": True, \"rows\": []}\n"
 )
+
+_AGGREGATE_FALLBACK_SCOPE_FN = (
+    "def scope(sql, params, rows):\n"
+    "    sql_l = str(sql).lower()\n"
+    "    aggregate_sql = False\n"
+    "    for marker in (\"group by\", \"count(\", \"sum(\", \"avg(\", \"min(\", \"max(\"):\n"
+    "        if marker in sql_l:\n"
+    "            aggregate_sql = True\n"
+    "    safe = []\n"
+    "    if aggregate_sql:\n"
+    "        for row in rows:\n"
+    "            if isinstance(row, dict):\n"
+    "                has_metric = False\n"
+    "                for value in row.values():\n"
+    "                    if isinstance(value, (int, float)) and not isinstance(value, bool):\n"
+    "                        has_metric = True\n"
+    "                if has_metric:\n"
+    "                    safe.append(dict(row))\n"
+    "    return {\"allow\": True, \"rows\": safe}\n"
+)
+
+
+def _aggregate_fallback_is_policy_appropriate() -> bool:
+    text = f"{POLICY_CONTEXT}\n{QUERY_PROMPT}".lower()
+    policy = POLICY_CONTEXT.lower()
+    query = QUERY_PROMPT.lower()
+    aggregate_terms = (
+        "aggregate",
+        "statistic",
+        "statistics",
+        "count",
+        "counts",
+        "ranking",
+        "rankings",
+        "trend",
+        "trends",
+        "summary",
+        "summaries",
+        "highest",
+        "lowest",
+        "most",
+        "least",
+        "average",
+        "total",
+        "number of",
+    )
+    negative_aggregate_phrases = (
+        "not allowed: aggregate",
+        "not allowed aggregate",
+        "forbid aggregate",
+        "forbidden aggregate",
+        "disallow aggregate",
+        "disallowed aggregate",
+    )
+    policy_allows_aggregate = "allowed" in policy and any(
+        term in policy for term in aggregate_terms
+    )
+    query_asks_aggregate = any(term in query for term in aggregate_terms)
+    policy_denies_aggregate = any(phrase in text for phrase in negative_aggregate_phrases)
+    return policy_allows_aggregate and query_asks_aggregate and not policy_denies_aggregate
+
+
+def _statically_erases_rows(source: str) -> bool:
+    compact = re.sub(r"\s+", "", source)
+    return "\"rows\":[]" in compact or "'rows':[]" in compact
+
+
+def _fallback_scope_fn_source() -> str:
+    if _aggregate_fallback_is_policy_appropriate():
+        return _AGGREGATE_FALLBACK_SCOPE_FN
+    return _EMPTY_FALLBACK_SCOPE_FN
 
 
 def _extract_json_emit(text: str) -> dict | None:
@@ -281,7 +352,7 @@ def _extract_json_emit(text: str) -> dict | None:
 def main() -> None:
     if not QUERY_PROMPT.strip():
         # Fail closed with no disclosure when there is no question to scope.
-        print(json.dumps({"scope_fn": _FALLBACK_SCOPE_FN}))
+        print(json.dumps({"scope_fn": _EMPTY_FALLBACK_SCOPE_FN}))
         return
 
     parts: list[str] = []
@@ -315,6 +386,17 @@ def main() -> None:
 
     parsed = _extract_json_emit(response)
     if parsed and isinstance(parsed.get("scope_fn"), str) and parsed["scope_fn"].strip():
+        if (
+            _aggregate_fallback_is_policy_appropriate()
+            and _statically_erases_rows(parsed["scope_fn"])
+        ):
+            print(
+                "scope agent emitted static empty rows for allowed aggregate; "
+                "using aggregate fallback.",
+                file=sys.stderr,
+            )
+            print(json.dumps({"scope_fn": _AGGREGATE_FALLBACK_SCOPE_FN}))
+            return
         # Re-emit canonically so the pipeline parses cleanly.
         print(json.dumps({"scope_fn": parsed["scope_fn"]}))
         return
@@ -325,7 +407,7 @@ def main() -> None:
         f"scope agent produced no parseable JSON; using fallback. raw={response[:500]!r}",
         file=sys.stderr,
     )
-    print(json.dumps({"scope_fn": _FALLBACK_SCOPE_FN}))
+    print(json.dumps({"scope_fn": _fallback_scope_fn_source()}))
 
 
 if __name__ == "__main__":

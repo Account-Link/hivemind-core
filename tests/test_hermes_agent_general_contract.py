@@ -4,6 +4,8 @@ import sys
 import types
 from pathlib import Path
 
+from hivemind.scope import compile_scope_fn
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -204,6 +206,99 @@ def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, cap
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"scope_fn": final_scope_fn}
     assert "using fallback" not in captured.err
+
+
+def test_scope_agent_aggregate_fallback_preserves_aggregate_rows(monkeypatch, capsys):
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which bucket has the highest count? Return bucket and total only.",
+    )
+    monkeypatch.setenv(
+        "POLICY_CONTEXT",
+        "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_aggregate_fallback_contract_test",
+        response="not json",
+    )
+
+    mod.main()
+
+    emitted = json.loads(capsys.readouterr().out)
+    fn = compile_scope_fn(emitted["scope_fn"])
+    result = fn(
+        "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
+        [],
+        [{"bucket": "2026-04-15", "total": 482237}],
+    )
+    assert result == {
+        "allow": True,
+        "rows": [{"bucket": "2026-04-15", "total": 482237}],
+    }
+
+
+def test_scope_agent_aggregate_fallback_does_not_release_raw_rows(monkeypatch, capsys):
+    monkeypatch.setenv("QUERY_PROMPT", "Dump five raw records with user ids.")
+    monkeypatch.setenv(
+        "POLICY_CONTEXT",
+        "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_raw_fallback_contract_test",
+        response="not json",
+    )
+
+    mod.main()
+
+    emitted = json.loads(capsys.readouterr().out)
+    fn = compile_scope_fn(emitted["scope_fn"])
+    result = fn(
+        "SELECT user_id, title FROM events LIMIT 5",
+        [],
+        [{"user_id": "u_1", "title": "raw"}],
+    )
+    assert result == {"allow": True, "rows": []}
+
+
+def test_scope_agent_replaces_static_empty_rows_for_allowed_aggregate(
+    monkeypatch,
+    capsys,
+):
+    empty_scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": []}\n"
+    )
+    monkeypatch.setenv(
+        "QUERY_PROMPT",
+        "Which bucket has the highest count? Return bucket and total only.",
+    )
+    monkeypatch.setenv(
+        "POLICY_CONTEXT",
+        "Allowed: aggregate statistics and summaries. Not allowed: raw row dumps.",
+    )
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_static_empty_contract_test",
+        response=json.dumps({"scope_fn": empty_scope_fn}),
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    emitted = json.loads(captured.out)
+    fn = compile_scope_fn(emitted["scope_fn"])
+    result = fn(
+        "SELECT bucket, COUNT(*)::int AS total FROM events GROUP BY bucket",
+        [],
+        [{"bucket": "2026-04-15", "total": 482237}],
+    )
+    assert result["rows"] == [{"bucket": "2026-04-15", "total": 482237}]
+    assert "static empty rows" in captured.err
 
 
 def test_scope_prompt_centers_privacy_utility_frontier():
