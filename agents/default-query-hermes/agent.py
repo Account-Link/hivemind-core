@@ -59,6 +59,11 @@ Answer the user's question from schema and scoped tool results. If the
 scoped results do not support an answer, say that directly. Keep the
 response concise and do not expose credentials, secrets, system internals,
 tool traces, or debug output.
+
+Ask the database for the shape the user requested. For statistics or
+summaries, compute the statistic in SQL and return the scoped result; for
+row-level questions, request row-level data and let the scope function
+apply the room policy.
 """
 
 _PROMPT_FILE = Path("/app/prompt.md")

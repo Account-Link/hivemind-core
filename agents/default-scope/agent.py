@@ -792,6 +792,13 @@ fits it or can be transformed into it. Do not suppress allowed aggregate
 statistics, allowed row-level records, allowed identifiers, or allowed
 derived fields just because another policy might forbid them.
 
+Operationally: if policy allows aggregate or statistical information,
+preserve rows that are already aggregate/statistical results, including
+metric fields plus grouping or bucket fields. If policy allows row-level
+records, preserve row-level records except for fields or rows the policy
+actually excludes. If policy allows redacted records, remove only the
+excluded values and keep the rest of the useful row structure.
+
 Use your tools together: inspect schema, sample or compute facts from the
 data, inspect the query agent when useful, compare candidate transforms
 with simulation when tradeoffs are unclear, and verify the exact function

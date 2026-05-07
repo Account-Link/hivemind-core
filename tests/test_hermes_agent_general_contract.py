@@ -164,6 +164,7 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "least destructive policy-compliant transform" in source
     assert "When policy allows a" in source
     assert "preserve that class" in source
+    assert "already aggregate/statistical results" in source
     assert "verify_scope_fn" in source
 
 
@@ -174,6 +175,7 @@ def test_query_prompt_is_tool_aware_without_canned_policy():
     assert "execute_sql" in source
     assert "Do not bypass it or" in source
     assert "invent policy beyond it" in source
+    assert "Ask the database for the shape" in source
 
 
 def test_hermes_prompts_do_not_embed_canned_privacy_policies():
