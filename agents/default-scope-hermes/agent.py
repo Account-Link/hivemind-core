@@ -187,25 +187,94 @@ _FALLBACK_SCOPE_FN = (
 
 def _extract_json_emit(text: str) -> dict | None:
     """Pull the last JSON object containing `scope_fn` from the agent's output."""
-    if not text:
+    if not isinstance(text, str) or not text:
         return None
-    # Try the trivial parse first (well-behaved final message).
     text = text.strip()
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict) and "scope_fn" in obj:
-            return obj
-    except json.JSONDecodeError:
-        pass
-    # Fall back to scanning for the last `{...}` containing scope_fn.
-    matches = re.findall(r"\{[^{}]*\"scope_fn\"[^{}]*\}", text, flags=re.DOTALL)
-    for cand in reversed(matches):
+
+    def _scope_source(src: object) -> str | None:
+        if not isinstance(src, str):
+            return None
+        for line in src.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or s.startswith("@"):
+                continue
+            if s.startswith("def scope(") or s.startswith("def scope ("):
+                return src
+            return None
+        return None
+
+    def _scrape_def_scope(candidate: str) -> str | None:
+        match = re.search(
+            r"(?m)^[ \t]*(def\s+scope\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:)",
+            candidate,
+        )
+        if not match:
+            return None
+        lines = candidate[match.start() :].splitlines()
+        out = [lines[0]]
+        for line in lines[1:]:
+            stripped = line.lstrip()
+            if not stripped:
+                out.append(line)
+                continue
+            if line[:1] not in (" ", "\t"):
+                if stripped.startswith("```"):
+                    break
+                break
+            out.append(line)
+        while out and not out[-1].strip():
+            out.pop()
+        return "\n".join(out) if out else None
+
+    def _validate_or_rescue(obj: object) -> dict | None:
+        if not (isinstance(obj, dict) and "scope_fn" in obj):
+            return None
+        src = _scope_source(obj.get("scope_fn"))
+        if src:
+            return {"scope_fn": src}
+        for candidate in (obj.get("scope_fn"), text):
+            if isinstance(candidate, str):
+                rescued = _scrape_def_scope(candidate)
+                if _scope_source(rescued):
+                    return {"scope_fn": rescued}
+        return None
+
+    candidates = [text]
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            inner = "\n".join(lines[1:])
+            if inner.rstrip().endswith("```"):
+                inner = inner.rstrip()[:-3]
+            candidates.append(inner.strip())
+
+    for candidate in candidates:
         try:
-            obj = json.loads(cand)
-            if isinstance(obj, dict) and "scope_fn" in obj:
-                return obj
+            result = _validate_or_rescue(json.loads(candidate))
+            if result:
+                return result
         except json.JSONDecodeError:
             continue
+
+    decoder = json.JSONDecoder()
+    found: dict | None = None
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        result = _validate_or_rescue(obj)
+        if result:
+            found = result
+    if found:
+        return found
+
+    rescued = _scrape_def_scope(text)
+    if _scope_source(rescued):
+        return {"scope_fn": rescued}
+
     return None
 
 

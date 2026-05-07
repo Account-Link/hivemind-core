@@ -156,6 +156,56 @@ def test_scope_agent_uses_ai_agent_for_aggregate_policy(monkeypatch, capsys):
     assert policy in body
 
 
+def test_scope_agent_extracts_fenced_json_with_scope_dict_literal(monkeypatch, capsys):
+    scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n"
+    )
+    monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
+    monkeypatch.setenv("POLICY_CONTEXT", "Allowed: aggregate statistics.")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_fenced_json_contract_test",
+        response="```json\n" + json.dumps({"scope_fn": scope_fn}) + "\n```",
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"scope_fn": scope_fn}
+    assert "using fallback" not in captured.err
+
+
+def test_scope_agent_extracts_last_scope_json_after_diagnostics(monkeypatch, capsys):
+    rejected_scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": []}\n"
+    )
+    final_scope_fn = (
+        "def scope(sql, params, rows):\n"
+        "    return {\"allow\": True, \"rows\": rows}\n"
+    )
+    monkeypatch.setenv("QUERY_PROMPT", "Return aggregate statistics only.")
+    mod, _calls = _load_agent(
+        monkeypatch,
+        "agents/default-scope-hermes/agent.py",
+        "default_scope_hermes_diagnostics_contract_test",
+        response=(
+            "provider retry diagnostic\n"
+            + json.dumps({"scope_fn": rejected_scope_fn})
+            + "\nfinal:\n"
+            + json.dumps({"scope_fn": final_scope_fn})
+        ),
+    )
+
+    mod.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"scope_fn": final_scope_fn}
+    assert "using fallback" not in captured.err
+
+
 def test_scope_prompt_centers_privacy_utility_frontier():
     source = (ROOT / "agents/default-scope-hermes/agent.py").read_text()
 
