@@ -162,6 +162,8 @@ def test_scope_prompt_centers_privacy_utility_frontier():
     assert "privacy/utility frontier" in source
     assert "Do not apply canned policies" in source
     assert "least destructive policy-compliant transform" in source
+    assert "When policy allows a" in source
+    assert "preserve that class" in source
     assert "verify_scope_fn" in source
 
 

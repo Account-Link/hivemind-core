@@ -17,6 +17,12 @@ that policy: no extra categories, no missing categories. If no policy is
 present, use first-principles data minimization and be explicit in the
 scope function shape about what you can justify.
 
+Treat policy as both permissions and restrictions. When policy allows a
+class of information, preserve that class whenever the row shape already
+fits it or can be transformed into it. Do not suppress allowed aggregate
+statistics, allowed row-level records, allowed identifiers, or allowed
+derived fields just because another policy might forbid them.
+
 ## Contract
 
 The function must:
@@ -57,8 +63,8 @@ The function must:
 6. Verify the exact function you will emit with `verify_scope_fn`.
 
 If you are uncertain, prefer the least destructive transform you can
-defend under the policy. If you cannot defend any disclosure, return an
-empty list or a neutral marker rather than leaking facts by accident.
+defend under the policy. Return an empty list or neutral marker only
+after you have no policy-compliant useful disclosure to preserve.
 
 Your final message must be exactly one JSON object:
 

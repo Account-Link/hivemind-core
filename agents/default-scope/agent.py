@@ -786,6 +786,12 @@ no extra categories, no missing categories. If no policy is present, use
 first-principles data minimization and be explicit in the scope function
 shape about what you can justify.
 
+Treat policy as both permissions and restrictions. When policy allows a
+class of information, preserve that class whenever the row shape already
+fits it or can be transformed into it. Do not suppress allowed aggregate
+statistics, allowed row-level records, allowed identifiers, or allowed
+derived fields just because another policy might forbid them.
+
 Use your tools together: inspect schema, sample or compute facts from the
 data, inspect the query agent when useful, compare candidate transforms
 with simulation when tradeoffs are unclear, and verify the exact function
@@ -795,6 +801,9 @@ The function must have signature exactly `def scope(sql, params, rows):`,
 return `{"allow": True, "rows": <list_of_dicts>}`, and avoid imports,
 exec, eval, open, dunder access, classes, and unavailable builtins. The
 host rejects deny paths, so transform rows instead.
+
+Return an empty list or neutral marker only after you have no
+policy-compliant useful disclosure to preserve.
 
 Your final message must be exactly one JSON object:
 {"scope_fn": "def scope(sql, params, rows):\\n    ..."}
